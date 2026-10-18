@@ -179,19 +179,22 @@ export async function getSubmissionsFromFirestore(
 ): Promise<FirestoreSubmission[]> {
   const results: FirestoreSubmission[] = [];
   const aliasSet = new Set<string>();
+  const normSet = new Set<string>();
 
-  if (examId && examId.trim() !== '' && examId.toUpperCase() !== 'ALL') {
-    aliasSet.add(examId.trim().toUpperCase());
-  }
-  if (examCode && examCode.trim() !== '') {
-    aliasSet.add(examCode.trim().toUpperCase());
-  }
-  if (Array.isArray(additionalAliases)) {
-    for (const a of additionalAliases) {
-      if (a && typeof a === 'string' && a.trim() !== '') {
-        aliasSet.add(a.trim().toUpperCase());
-      }
+  const addAlias = (val?: string) => {
+    if (!val || typeof val !== 'string') return;
+    const trimmed = val.trim().toUpperCase();
+    if (trimmed && trimmed !== 'ALL') {
+      aliasSet.add(trimmed);
+      const norm = trimmed.replace(/[^A-Z0-9]/g, '');
+      if (norm) normSet.add(norm);
     }
+  };
+
+  addAlias(examId);
+  addAlias(examCode);
+  if (Array.isArray(additionalAliases)) {
+    additionalAliases.forEach(addAlias);
   }
 
   try {
@@ -203,6 +206,8 @@ export async function getSubmissionsFromFirestore(
       if (!data) return;
       const sExamId = String(data.examId || '').trim().toUpperCase();
       const sExamCode = String(data.examCode || '').trim().toUpperCase();
+      const sNormId = sExamId.replace(/[^A-Z0-9]/g, '');
+      const sNormCode = sExamCode.replace(/[^A-Z0-9]/g, '');
 
       let isMatch = false;
       if (aliasSet.size === 0) {
@@ -210,7 +215,9 @@ export async function getSubmissionsFromFirestore(
         isMatch = true;
       } else {
         isMatch = (sExamId !== '' && aliasSet.has(sExamId)) ||
-                  (sExamCode !== '' && aliasSet.has(sExamCode));
+                  (sExamCode !== '' && aliasSet.has(sExamCode)) ||
+                  (sNormId !== '' && normSet.has(sNormId)) ||
+                  (sNormCode !== '' && normSet.has(sNormCode));
       }
 
       if (isMatch) {
@@ -386,4 +393,134 @@ export async function getExamsFromFirestore(): Promise<any[]> {
     console.warn('[Firebase] getExamsFromFirestore error:', err);
   }
   return exams;
+}
+
+// 9. Save a single student or batch of students to Firestore
+export async function saveStudentsToFirestore(students: any[]): Promise<boolean> {
+  if (!Array.isArray(students) || students.length === 0) return true;
+  try {
+    const promises = students.map((s) => {
+      if (!s || !s.id) return Promise.resolve();
+      const docId = `st_${s.id}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      const payload: Record<string, any> = {
+        id: String(s.id),
+        name: String(s.name || '').trim(),
+        class: String(s.class || '').trim(),
+        sbd: s.sbd ? String(s.sbd).trim() : '',
+        username: s.username ? String(s.username).trim() : '',
+        password: s.password ? String(s.password).trim() : '',
+        isPasswordChanged: Boolean(s.isPasswordChanged),
+        updatedAt: new Date().toISOString()
+      };
+      return setDoc(doc(firestore, 'students', docId), payload, { merge: true });
+    });
+    await Promise.all(promises);
+    return true;
+  } catch (err) {
+    console.warn('[Firebase] saveStudentsToFirestore error:', err);
+    return false;
+  }
+}
+
+// 10. Get students from Firestore
+export async function getStudentsFromFirestore(className?: string): Promise<any[]> {
+  const list: any[] = [];
+  const targetClass = className ? className.trim().toUpperCase() : '';
+  try {
+    const colRef = collection(firestore, 'students');
+    const snap = await getDocs(colRef);
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data && data.id && data.name) {
+        const studentCls = String(data.class || '').trim().toUpperCase();
+        if (!targetClass || studentCls === targetClass) {
+          list.push({
+            id: String(data.id),
+            name: String(data.name),
+            class: String(data.class),
+            sbd: data.sbd ? String(data.sbd) : undefined,
+            username: data.username ? String(data.username) : undefined,
+            password: data.password ? String(data.password) : undefined,
+            isPasswordChanged: Boolean(data.isPasswordChanged)
+          });
+        }
+      }
+    });
+  } catch (err) {
+    console.warn('[Firebase] getStudentsFromFirestore error:', err);
+  }
+  return list;
+}
+
+// 11. Delete single student from Firestore
+export async function deleteStudentFromFirestore(studentId: string): Promise<void> {
+  if (!studentId) return;
+  const docId = `st_${studentId}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  try {
+    await deleteDoc(doc(firestore, 'students', docId));
+  } catch (err) {
+    console.warn('[Firebase] deleteStudentFromFirestore error:', err);
+  }
+}
+
+// 12. Delete all students of a class from Firestore
+export async function deleteClassStudentsFromFirestore(className: string): Promise<void> {
+  if (!className) return;
+  const targetClass = className.trim().toUpperCase();
+  try {
+    const colRef = collection(firestore, 'students');
+    const snap = await getDocs(colRef);
+    const deletePromises: Promise<void>[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data && String(data.class || '').trim().toUpperCase() === targetClass) {
+        deletePromises.push(deleteDoc(d.ref));
+      }
+    });
+    await Promise.all(deletePromises);
+  } catch (err) {
+    console.warn('[Firebase] deleteClassStudentsFromFirestore error:', err);
+  }
+}
+
+// 13. Save classes metadata to Firestore
+export async function saveClassesToFirestore(classes: any[]): Promise<void> {
+  if (!Array.isArray(classes)) return;
+  try {
+    const promises = classes.map((c) => {
+      if (!c || !c.name) return Promise.resolve();
+      const docId = `cls_${c.name.trim().toUpperCase()}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      return setDoc(doc(firestore, 'classes', docId), {
+        name: String(c.name).trim(),
+        grade: Number(c.grade) || 6,
+        studentCount: Number(c.studentCount) || 0,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    });
+    await Promise.all(promises);
+  } catch (err) {
+    console.warn('[Firebase] saveClassesToFirestore error:', err);
+  }
+}
+
+// 14. Get classes from Firestore
+export async function getClassesFromFirestore(): Promise<any[]> {
+  const classes: any[] = [];
+  try {
+    const colRef = collection(firestore, 'classes');
+    const snap = await getDocs(colRef);
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data && data.name) {
+        classes.push({
+          name: String(data.name).trim(),
+          grade: Number(data.grade) || 6,
+          studentCount: Number(data.studentCount) || 0
+        });
+      }
+    });
+  } catch (err) {
+    console.warn('[Firebase] getClassesFromFirestore error:', err);
+  }
+  return classes;
 }

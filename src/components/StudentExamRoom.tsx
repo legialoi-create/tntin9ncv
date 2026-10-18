@@ -657,13 +657,13 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
             </div>
           </div>
 
-          {submitResult.showScore && submitResult.score !== undefined ? (
+          {(submitResult.showScore !== false && (submitResult.score !== undefined || submitResult.bestScore !== undefined)) ? (
             <div className="bg-gradient-to-br from-indigo-950 to-purple-950 border border-indigo-500/30 rounded-xl p-5 mb-6 text-center">
               <p className="text-xs uppercase tracking-wider text-indigo-300 font-semibold mb-1">
                 KẾT QUẢ ĐIỂM SỐ LẦN {submitResult.attemptNumber || currentSession.attemptNumber || 1}
               </p>
               <div className="text-4xl font-extrabold text-amber-300 mb-2">
-                {submitResult.score} <span className="text-lg text-slate-400">/ 10</span>
+                {submitResult.score !== undefined ? submitResult.score : submitResult.bestScore} <span className="text-lg text-slate-400">/ 10</span>
               </div>
               <div className="flex justify-center space-x-4 text-xs text-slate-300 mb-3">
                 <span>

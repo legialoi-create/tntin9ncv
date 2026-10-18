@@ -69,35 +69,33 @@ export const LiveProctoring: React.FC<LiveProctoringProps> = ({ exams, selectedE
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const fetchProctorData = async (showLoading = false) => {
-    if (!currentExamId || !exams.some((e) => e.id === currentExamId)) {
-      setProctorData(null);
+    if (!currentExamId) {
       return;
     }
     if (showLoading) setIsLoading(true);
     try {
       const data = await api.getProctorData(currentExamId);
-      setProctorData(data);
+      if (data) setProctorData(data);
     } catch (err: any) {
-      console.warn('Proctor data not found or loaded yet:', currentExamId, err?.message);
-      setProctorData(null);
+      console.warn('Proctor data warning:', currentExamId, err?.message);
     } finally {
       if (showLoading) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    if (currentExamId && exams.some((e) => e.id === currentExamId)) {
+    if (currentExamId) {
       fetchProctorData(true);
     }
-  }, [currentExamId]);
+  }, [currentExamId, exams]);
 
   useEffect(() => {
-    if (!autoRefresh || !currentExamId || !exams.some((e) => e.id === currentExamId)) return;
+    if (!autoRefresh || !currentExamId) return;
     const interval = setInterval(() => {
       fetchProctorData(false);
-    }, 3000);
+    }, 2500);
     return () => clearInterval(interval);
-  }, [autoRefresh, currentExamId, exams]);
+  }, [autoRefresh, currentExamId]);
 
   // Instant cross-tab & live updates listener
   useEffect(() => {
@@ -377,7 +375,7 @@ export const LiveProctoring: React.FC<LiveProctoringProps> = ({ exams, selectedE
                         {isSubmitted ? (
                           <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">
                             <CheckCircle className="w-3 h-3" />
-                            <span>Đã nộp ({s.score ?? ''}đ)</span>
+                            <span>Đã nộp ({s.score !== undefined ? s.score : (s.bestScore !== undefined ? s.bestScore : 0)}đ)</span>
                           </span>
                         ) : isLocked ? (
                           <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-100 text-red-800 animate-pulse">

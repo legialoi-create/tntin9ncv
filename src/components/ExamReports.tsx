@@ -67,27 +67,26 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   }, [selectedExamId, exams]);
 
   const fetchReports = async (showLoading = false) => {
-    if (!currentExamId || !exams.some((e) => e.id === currentExamId)) {
-      setReportData(null);
+    if (!currentExamId) {
       return;
     }
     if (showLoading) setIsLoading(true);
     try {
       const data = await api.getExamReports(currentExamId);
-      setReportData(data);
+      if (data) setReportData(data);
     } catch (err: any) {
-      console.warn('Exam report not found or loaded yet:', currentExamId, err?.message);
+      console.warn('Exam report warning:', currentExamId, err?.message);
     } finally {
       if (showLoading) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    if (currentExamId && exams.some((e) => e.id === currentExamId)) {
+    if (currentExamId) {
       fetchReports(true);
       const interval = setInterval(() => {
         fetchReports(false);
-      }, 4000);
+      }, 2500);
 
       const handleSync = () => {
         fetchReports(false);

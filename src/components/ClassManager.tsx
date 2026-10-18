@@ -94,6 +94,9 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
       const allStudents = await api.getStudents();
       const counts: Record<string, number> = {};
       allStudents.forEach((s) => {
+        if (!s || !s.class) return;
+        const clsKey = s.class.trim().toUpperCase();
+        counts[clsKey] = (counts[clsKey] || 0) + 1;
         counts[s.class] = (counts[s.class] || 0) + 1;
       });
       setClassStudentCounts(counts);
@@ -639,7 +642,7 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
                       <span className="text-xs text-slate-400 italic">Chưa có lớp nào</span>
                     ) : (
                       gradeClasses.map((c) => {
-                        const studentCount = classStudentCounts[c.name] ?? 0;
+                        const studentCount = classStudentCounts[c.name.trim().toUpperCase()] ?? classStudentCounts[c.name] ?? (c.studentCount || 0);
                         return (
                           <div
                             key={c.name}

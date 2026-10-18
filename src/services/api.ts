@@ -11,7 +11,13 @@ import {
   getDeletedExamsFromFirestore,
   unmarkDeletedExamInFirestore,
   saveExamToFirestore,
-  getExamsFromFirestore
+  getExamsFromFirestore,
+  saveStudentsToFirestore,
+  getStudentsFromFirestore,
+  deleteStudentFromFirestore,
+  deleteClassStudentsFromFirestore,
+  saveClassesToFirestore,
+  getClassesFromFirestore
 } from './firebase';
 
 let teacherToken: string | null = localStorage.getItem('ncv_teacher_token');
@@ -672,18 +678,38 @@ export const api = {
       }
     } catch (e) {}
 
+    // Fetch from Firestore
+    let fbClasses: ClassInfo[] = [];
+    try {
+      fbClasses = await getClassesFromFirestore();
+    } catch (e) {}
+
+    let serverClasses: ClassInfo[] = [];
     try {
       const res = await fetch('/api/classes');
       if (res.ok) {
         const serverData = await res.json();
-        if (Array.isArray(serverData)) {
-          const cleanServer = serverData.filter((c: ClassInfo) => !deletedClasses.includes(c.name.trim().toUpperCase()));
-          localStorage.setItem('ncv_classes_data', JSON.stringify(cleanServer));
-          return cleanServer;
-        }
+        if (Array.isArray(serverData)) serverClasses = serverData;
       }
-    } catch (e) {
-      // offline / cold start
+    } catch (e) {}
+
+    const classMap = new Map<string, ClassInfo>();
+    [...serverClasses, ...localClasses, ...fbClasses].forEach((c) => {
+      if (!c || !c.name) return;
+      const upper = c.name.trim().toUpperCase();
+      if (!deletedClasses.includes(upper) && !classMap.has(upper)) {
+        classMap.set(upper, {
+          name: c.name.trim(),
+          grade: (Number(c.grade) || 6) as 6 | 7 | 8 | 9,
+          studentCount: Number(c.studentCount) || 0
+        });
+      }
+    });
+
+    const clean = Array.from(classMap.values());
+    if (clean.length > 0) {
+      localStorage.setItem('ncv_classes_data', JSON.stringify(clean));
+      return clean;
     }
 
     if (localClasses.length > 0) {
@@ -705,6 +731,8 @@ export const api = {
     } catch (e) {}
 
     localStorage.setItem('ncv_classes_data', JSON.stringify(classes));
+    saveClassesToFirestore(classes).catch(() => {});
+
     try {
       const res = await fetch('/api/classes', {
         method: 'POST',
@@ -815,36 +843,87 @@ export const api = {
 
   getStudents: async (className?: string, asTeacher = true): Promise<StudentInfo[]> => {
     const url = className ? `/api/students?class=${encodeURIComponent(className)}` : '/api/students';
+
+    // 1. Fetch from Firebase Firestore (Authoritative cloud storage on Vercel)
+    let fbStudents: StudentInfo[] = [];
+    try {
+      fbStudents = await getStudentsFromFirestore(className);
+    } catch (e) {
+      console.warn('[Firebase] getStudentsFromFirestore error:', e);
+    }
+
+    // 2. Fetch from local cache
+    let localStudents: StudentInfo[] = [];
+    const cached = localStorage.getItem('ncv_students_data');
+    if (cached) {
+      try {
+        localStudents = JSON.parse(cached) || [];
+      } catch (e) {}
+    }
+
+    // 3. Fetch from Server
+    let serverStudents: StudentInfo[] = [];
     try {
       const res = await fetch(url, {
         headers: getHeaders(asTeacher),
       });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data)) {
-          if (!className) {
-            localStorage.setItem('ncv_students_data', JSON.stringify(data));
-          }
-          return data;
-        }
+        if (Array.isArray(data)) serverStudents = data;
       }
     } catch (e) {}
 
-    const cached = localStorage.getItem('ncv_students_data');
-    let all: StudentInfo[] = [];
-    if (cached) {
-      try {
-        all = JSON.parse(cached) || [];
-      } catch (e) {}
-    }
+    // 4. Merge all sources safely:
+    // We prioritize Firestore & local edits. NEVER let a 3-seed fresh serverless instance wipe out saved students!
+    const studentMap = new Map<string, StudentInfo>();
+
+    // Add server students first
+    serverStudents.forEach((s) => {
+      if (s && s.id && s.name) studentMap.set(s.id, s);
+    });
+
+    // Add local cached students
+    localStudents.forEach((s) => {
+      if (s && s.id && s.name) {
+        studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
+      }
+    });
+
+    // Add Firestore students (highest source of truth across all devices)
+    fbStudents.forEach((s) => {
+      if (s && s.id && s.name) {
+        studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
+      }
+    });
+
+    let merged = Array.from(studentMap.values());
     if (className) {
-      return all.filter((s) => s.class.toLowerCase() === className.toLowerCase());
+      const targetCls = className.trim().toUpperCase();
+      merged = merged.filter((s) => (s.class || '').trim().toUpperCase() === targetCls);
     }
-    return all;
+
+    // Cache updated list in localStorage
+    if (!className) {
+      localStorage.setItem('ncv_students_data', JSON.stringify(merged));
+    } else {
+      const otherClassStudents = localStudents.filter(
+        (s) => (s.class || '').trim().toUpperCase() !== className.trim().toUpperCase()
+      );
+      localStorage.setItem('ncv_students_data', JSON.stringify([...otherClassStudents, ...merged]));
+    }
+
+    // Background sync to Firestore if Firestore had 0 students but we had local students
+    if (fbStudents.length === 0 && merged.length > 0) {
+      saveStudentsToFirestore(merged).catch(() => {});
+    }
+
+    return merged;
   },
 
   saveStudents: async (students: StudentInfo[]): Promise<StudentInfo[]> => {
     localStorage.setItem('ncv_students_data', JSON.stringify(students));
+    saveStudentsToFirestore(students).catch(() => {});
+
     try {
       const res = await fetch('/api/students', {
         method: 'POST',
@@ -868,6 +947,9 @@ export const api = {
         localStorage.setItem('ncv_students_data', JSON.stringify(filtered));
       } catch (e) {}
     }
+
+    deleteStudentFromFirestore(studentId).catch(() => {});
+
     try {
       const res = await fetch(`/api/students/${encodeURIComponent(studentId)}`, {
         method: 'DELETE',
@@ -881,6 +963,7 @@ export const api = {
   },
 
   saveClassStudents: async (className: string, students: StudentInfo[]) => {
+    const trimmedClass = className.trim().toUpperCase();
     const cached = localStorage.getItem('ncv_students_data');
     let all: StudentInfo[] = [];
     if (cached) {
@@ -888,9 +971,17 @@ export const api = {
         all = JSON.parse(cached) || [];
       } catch (e) {}
     }
-    const filtered = all.filter((s) => s.class.toLowerCase() !== className.toLowerCase());
+    const filtered = all.filter((s) => (s.class || '').trim().toUpperCase() !== trimmedClass);
     const updated = [...filtered, ...students];
     localStorage.setItem('ncv_students_data', JSON.stringify(updated));
+
+    // Save to Firebase Firestore immediately so students persist on Vercel across exits and reloads!
+    try {
+      await deleteClassStudentsFromFirestore(className);
+      await saveStudentsToFirestore(students);
+    } catch (e) {
+      console.warn('[Firebase] saveClassStudents warning:', e);
+    }
 
     try {
       const res = await fetch(`/api/classes/${encodeURIComponent(className)}/students`, {
@@ -906,6 +997,7 @@ export const api = {
   },
 
   clearClassStudents: async (className: string) => {
+    const trimmed = className.trim().toUpperCase();
     const cached = localStorage.getItem('ncv_students_data');
     let all: StudentInfo[] = [];
     if (cached) {
@@ -913,8 +1005,10 @@ export const api = {
         all = JSON.parse(cached) || [];
       } catch (e) {}
     }
-    const filtered = all.filter((s) => s.class.toLowerCase() !== className.toLowerCase());
+    const filtered = all.filter((s) => (s.class || '').trim().toUpperCase() !== trimmed);
     localStorage.setItem('ncv_students_data', JSON.stringify(filtered));
+
+    deleteClassStudentsFromFirestore(className).catch(() => {});
 
     try {
       const res = await fetch(`/api/classes/${encodeURIComponent(className)}/students`, {
@@ -939,7 +1033,7 @@ export const api = {
     }
 
     const updatedStudents = students.map((s) => {
-      const isTarget = all || (className && s.class.toLowerCase() === className.toLowerCase());
+      const isTarget = all || (className && (s.class || '').trim().toLowerCase() === className.trim().toLowerCase());
       if (isTarget) {
         const words = (s.name || '').trim().split(/\s+/).filter(Boolean);
         const lastTwo = words.length >= 2 ? words.slice(-2).join('') : words.join('');
@@ -964,6 +1058,7 @@ export const api = {
     });
 
     localStorage.setItem('ncv_students_data', JSON.stringify(updatedStudents));
+    saveStudentsToFirestore(updatedStudents).catch(() => {});
 
     try {
       const res = await fetch('/api/students/generate-class-accounts', {
@@ -977,7 +1072,7 @@ export const api = {
     } catch (e) {}
 
     const classFiltered = className
-      ? updatedStudents.filter((s) => s.class.toLowerCase() === className.toLowerCase())
+      ? updatedStudents.filter((s) => (s.class || '').trim().toLowerCase() === className.trim().toLowerCase())
       : updatedStudents;
 
     return {
@@ -1003,7 +1098,7 @@ export const api = {
 
     const updatedStudents = students.map((s) => {
       const isTarget = params.resetAll && params.className
-        ? s.class.toLowerCase() === params.className.toLowerCase()
+        ? (s.class || '').trim().toLowerCase() === params.className.trim().toLowerCase()
         : s.id === params.studentId;
       if (isTarget) {
         const defaultPass = `${(s.class || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}123`;
@@ -1013,6 +1108,7 @@ export const api = {
     });
 
     localStorage.setItem('ncv_students_data', JSON.stringify(updatedStudents));
+    saveStudentsToFirestore(updatedStudents).catch(() => {});
 
     try {
       const res = await fetch('/api/students/reset-password', {
@@ -1026,7 +1122,7 @@ export const api = {
     } catch (e) {}
 
     const classFiltered = params.className
-      ? updatedStudents.filter((s) => s.class.toLowerCase() === params.className!.toLowerCase())
+      ? updatedStudents.filter((s) => (s.class || '').trim().toLowerCase() === params.className!.trim().toLowerCase())
       : updatedStudents;
 
     return {
@@ -1699,6 +1795,12 @@ export const api = {
         console.warn('[Firebase] Save submission warning:', e);
       }
     } catch (e) {}
+
+    if (result) {
+      if (result.score === undefined && result.studentScore !== undefined) result.score = result.studentScore;
+      if (result.bestScore === undefined && result.studentBestScore !== undefined) result.bestScore = result.studentBestScore;
+      if (result.showScore === undefined) result.showScore = true;
+    }
 
     return result;
   },
