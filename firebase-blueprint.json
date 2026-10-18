@@ -1,0 +1,90 @@
+{
+  "entities": {
+    "Exam": {
+      "title": "Exam",
+      "description": "Examination definition and questions for middle school informatics",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "code": { "type": "string" },
+        "grade": { "type": "number" },
+        "durationMinutes": { "type": "number" },
+        "isOpen": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "title", "code", "grade", "durationMinutes"]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "Student completed exam result with scores and grading",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "examId": { "type": "string" },
+        "examCode": { "type": "string" },
+        "studentName": { "type": "string" },
+        "studentClass": { "type": "string" },
+        "sbd": { "type": "string" },
+        "score": { "type": "number" },
+        "correctCount": { "type": "number" },
+        "incorrectCount": { "type": "number" },
+        "unansweredCount": { "type": "number" },
+        "totalQuestions": { "type": "number" },
+        "attemptNumber": { "type": "number" },
+        "violationCount": { "type": "number" },
+        "submittedAt": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["sessionId", "examId", "studentName", "studentClass", "score"]
+    },
+    "ClassInfo": {
+      "title": "ClassInfo",
+      "description": "School class metadata",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "grade": { "type": "number" },
+        "studentCount": { "type": "number" }
+      },
+      "required": ["name", "grade"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Student account and profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "class": { "type": "string" },
+        "sbd": { "type": "string" },
+        "username": { "type": "string" }
+      },
+      "required": ["id", "name", "class"]
+    }
+  },
+  "firestore": {
+    "/exams/{examId}": {
+      "schema": { "$ref": "#/entities/Exam" },
+      "description": "Exam collections"
+    },
+    "/deleted_exams/{examId}": {
+      "schema": { "$ref": "#/entities/Exam" },
+      "description": "Blacklist of deleted exams to prevent resurrection across Vercel cold starts"
+    },
+    "/submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/Submission" },
+      "description": "Permanent submitted student exam results"
+    },
+    "/classes/{classId}": {
+      "schema": { "$ref": "#/entities/ClassInfo" },
+      "description": "School classes"
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "Student rosters"
+    }
+  }
+}

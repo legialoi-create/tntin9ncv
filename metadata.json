@@ -1,0 +1,8 @@
+{
+  "name": "KIỂM TRA TIN HỌC – THCS NAM CỬA VIỆT",
+  "description": "Hệ thống kiểm tra trắc nghiệm Tin học trực tuyến, chống gian lận và giám sát thời gian thực cho trường THCS Nam Cửa Việt",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
