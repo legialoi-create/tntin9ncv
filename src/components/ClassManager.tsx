@@ -83,21 +83,27 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
       if (onClassesUpdated) {
         onClassesUpdated(res);
       }
+      await loadAllStudentCounts(res);
     } catch (err: any) {
       console.error('Failed to load classes:', err);
       showFeedback('error', 'Không thể tải danh sách lớp');
     }
   };
 
-  const loadAllStudentCounts = async () => {
+  const loadAllStudentCounts = async (classList?: ClassInfo[]) => {
     try {
       const allStudents = await api.getStudents();
+      const targetClasses = classList || classes;
       const counts: Record<string, number> = {};
+      targetClasses.forEach((c) => {
+        if (c && c.name) {
+          counts[c.name.trim().toUpperCase()] = 0;
+        }
+      });
       allStudents.forEach((s) => {
         if (!s || !s.class) return;
         const clsKey = s.class.trim().toUpperCase();
         counts[clsKey] = (counts[clsKey] || 0) + 1;
-        counts[s.class] = (counts[s.class] || 0) + 1;
       });
       setClassStudentCounts(counts);
     } catch (err) {
@@ -115,11 +121,22 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
     try {
       const students = await api.getStudents(className);
       setRosterStudents(students);
+      const upperCls = className.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({
+        ...prev,
+        [upperCls]: students.length,
+        [className]: students.length,
+      }));
     } catch (err: any) {
       showFeedback('error', 'Lỗi tải danh sách học sinh: ' + err.message);
     } finally {
       setIsLoadingRoster(false);
     }
+  };
+
+  const handleCloseRosterModal = () => {
+    setSelectedClassForRoster(null);
+    loadAllStudentCounts();
   };
 
   const handleAddClass = async (e: React.FormEvent) => {
@@ -208,7 +225,8 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
 
     try {
       await api.saveClassStudents(selectedClassForRoster, updated);
-      setClassStudentCounts((prev) => ({ ...prev, [selectedClassForRoster]: updated.length }));
+      const upperCls = selectedClassForRoster.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({ ...prev, [upperCls]: updated.length, [selectedClassForRoster]: updated.length }));
       showFeedback('success', `Đã thêm học sinh ${newStudent.name}`);
     } catch (err: any) {
       showFeedback('error', 'Lỗi lưu học sinh: ' + err.message);
@@ -222,7 +240,8 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
       await api.deleteStudent(studentId);
       const updated = rosterStudents.filter((s) => s.id !== studentId);
       setRosterStudents(updated);
-      setClassStudentCounts((prev) => ({ ...prev, [selectedClassForRoster]: updated.length }));
+      const upperCls = selectedClassForRoster.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({ ...prev, [upperCls]: updated.length, [selectedClassForRoster]: updated.length }));
       showFeedback('success', 'Đã xóa học sinh khỏi lớp');
     } catch (err: any) {
       showFeedback('error', 'Lỗi xóa học sinh: ' + err.message);
@@ -240,7 +259,8 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
     try {
       await api.clearClassStudents(selectedClassForRoster);
       setRosterStudents([]);
-      setClassStudentCounts((prev) => ({ ...prev, [selectedClassForRoster]: 0 }));
+      const upperCls = selectedClassForRoster.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({ ...prev, [upperCls]: 0, [selectedClassForRoster]: 0 }));
       showFeedback('success', `Đã làm trống danh sách lớp ${selectedClassForRoster}`);
     } catch (err: any) {
       showFeedback('error', 'Lỗi xóa danh sách: ' + err.message);
@@ -270,7 +290,8 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
     try {
       await api.saveClassStudents(selectedClassForRoster, generated);
       setRosterStudents(generated);
-      setClassStudentCounts((prev) => ({ ...prev, [selectedClassForRoster]: generated.length }));
+      const upperCls = selectedClassForRoster.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({ ...prev, [upperCls]: generated.length, [selectedClassForRoster]: generated.length }));
       showFeedback('success', `Đã nạp ${generated.length} học sinh mẫu cho lớp ${selectedClassForRoster}`);
     } catch (err: any) {
       showFeedback('error', 'Lỗi lưu: ' + err.message);
@@ -492,7 +513,8 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
 
       await api.saveClassStudents(selectedClassForRoster, imported);
       setRosterStudents(imported);
-      setClassStudentCounts((prev) => ({ ...prev, [selectedClassForRoster]: imported.length }));
+      const upperCls = selectedClassForRoster.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({ ...prev, [upperCls]: imported.length, [selectedClassForRoster]: imported.length }));
       setRosterTab('list');
       setQuickImportText('');
       showFeedback('success', `Đã nhập thành công ${imported.length} học sinh vào lớp ${selectedClassForRoster}`);
@@ -642,7 +664,7 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
                       <span className="text-xs text-slate-400 italic">Chưa có lớp nào</span>
                     ) : (
                       gradeClasses.map((c) => {
-                        const studentCount = classStudentCounts[c.name.trim().toUpperCase()] ?? classStudentCounts[c.name] ?? (c.studentCount || 0);
+                        const studentCount = classStudentCounts[c.name.trim().toUpperCase()] ?? 0;
                         return (
                           <div
                             key={c.name}
@@ -755,7 +777,7 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
                   <span>Xóa lớp này</span>
                 </button>
                 <button
-                  onClick={() => setSelectedClassForRoster(null)}
+                  onClick={handleCloseRosterModal}
                   className="text-slate-400 hover:text-white p-1.5 cursor-pointer rounded-lg hover:bg-slate-800"
                 >
                   <X className="w-5 h-5" />
@@ -1138,7 +1160,7 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
             <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="button"
-                onClick={() => setSelectedClassForRoster(null)}
+                onClick={handleCloseRosterModal}
                 className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
               >
                 Đóng lại

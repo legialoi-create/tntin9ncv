@@ -290,9 +290,23 @@ class DatabaseManager {
       }
 
       // 5. Merge Students: Respect teacher's deleted students and deleted classes tombstone
+      // Identify classes that already have custom saved student rosters
+      const classesWithCustomRoster = new Set<string>();
+      for (const p of parsedList) {
+        if (Array.isArray(p.students)) {
+          for (const st of p.students) {
+            if (st && st.class) {
+              classesWithCustomRoster.add(st.class.trim().toUpperCase());
+            }
+          }
+        }
+      }
+
       const studentMap = new Map<string, StudentInfo>();
       for (const defS of DEFAULT_STUDENTS) {
         const clsUpper = (defS.class || '').trim().toUpperCase();
+        // Do not add default students if this class has a custom roster or is deleted
+        if (classesWithCustomRoster.has(clsUpper)) continue;
         if (!deletedStudentIdsSet.has(defS.id) && !deletedClassNamesSet.has(clsUpper)) {
           studentMap.set(defS.id, {
             ...defS,

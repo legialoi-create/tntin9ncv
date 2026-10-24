@@ -874,25 +874,54 @@ export const api = {
     } catch (e) {}
 
     // 4. Merge all sources safely:
-    // We prioritize Firestore & local edits. NEVER let a 3-seed fresh serverless instance wipe out saved students!
-    const studentMap = new Map<string, StudentInfo>();
-
-    // Add server students first
-    serverStudents.forEach((s) => {
-      if (s && s.id && s.name) studentMap.set(s.id, s);
+    // Determine which classes have explicitly saved rosters in local storage or Firestore
+    const classesWithCustomRoster = new Set<string>();
+    localStudents.forEach((s) => {
+      if (s && s.class) classesWithCustomRoster.add(s.class.trim().toUpperCase());
+    });
+    fbStudents.forEach((s) => {
+      if (s && s.class) classesWithCustomRoster.add(s.class.trim().toUpperCase());
     });
 
-    // Add local cached students
-    localStudents.forEach((s) => {
-      if (s && s.id && s.name) {
-        studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
+    const studentMap = new Map<string, StudentInfo>();
+    const identityKeyMap = new Map<string, string>(); // class:::name -> id
+
+    // 1. Add server students ONLY for classes that don't have custom local/Firestore rosters yet
+    serverStudents.forEach((s) => {
+      if (s && s.id && s.name && s.class) {
+        const clsKey = s.class.trim().toUpperCase();
+        if (!classesWithCustomRoster.has(clsKey)) {
+          studentMap.set(s.id, s);
+          identityKeyMap.set(`${clsKey}:::${s.name.trim().toLowerCase()}`, s.id);
+        }
       }
     });
 
-    // Add Firestore students (highest source of truth across all devices)
-    fbStudents.forEach((s) => {
-      if (s && s.id && s.name) {
+    // 2. Add local cached students (replaces any previous entries for the same student name/class)
+    localStudents.forEach((s) => {
+      if (s && s.id && s.name && s.class) {
+        const clsKey = s.class.trim().toUpperCase();
+        const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
+        const existingId = identityKeyMap.get(identKey);
+        if (existingId && existingId !== s.id) {
+          studentMap.delete(existingId);
+        }
         studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
+        identityKeyMap.set(identKey, s.id);
+      }
+    });
+
+    // 3. Add Firestore students (highest source of truth across all devices)
+    fbStudents.forEach((s) => {
+      if (s && s.id && s.name && s.class) {
+        const clsKey = s.class.trim().toUpperCase();
+        const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
+        const existingId = identityKeyMap.get(identKey);
+        if (existingId && existingId !== s.id) {
+          studentMap.delete(existingId);
+        }
+        studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
+        identityKeyMap.set(identKey, s.id);
       }
     });
 

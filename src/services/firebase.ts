@@ -1,35 +1,38 @@
 import { initializeApp, getApps } from 'firebase/app';
 import {
+  initializeFirestore,
   getFirestore,
+  setLogLevel,
   collection,
   doc,
   setDoc,
   getDocs,
   deleteDoc,
   query,
-  where,
-  getDocFromServer
+  where
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
+
+// Set Firestore log level to avoid benign offline / backend timeout warnings in preview environments
+try {
+  setLogLevel('error');
+} catch (e) {}
 
 // Initialize Firebase App
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 
-// CRITICAL: Must pass firestoreDatabaseId
-export const firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-
-// Test connection on boot
-if (typeof window !== 'undefined') {
-  (async function testConnection() {
-    try {
-      await getDocFromServer(doc(firestore, 'test', 'connection'));
-    } catch (error: any) {
-      if (error instanceof Error && error.message.includes('the client is offline')) {
-        console.warn('[Firebase] Offline or checking configuration');
-      }
-    }
-  })();
+// CRITICAL: Initialize Firestore with experimentalAutoDetectLongPolling to prevent WebSocket 10s timeout warnings in iframes/proxies
+let firestoreInstance;
+try {
+  firestoreInstance = initializeFirestore(app, {
+    experimentalAutoDetectLongPolling: true,
+  }, firebaseConfig.firestoreDatabaseId);
+} catch (e) {
+  // If already initialized, get existing instance
+  firestoreInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 }
+
+export const firestore = firestoreInstance;
 
 export interface FirestoreSubmission {
   sessionId: string;
