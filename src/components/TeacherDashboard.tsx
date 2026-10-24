@@ -195,6 +195,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           </div>
 
           <div className="flex items-center space-x-2">
+            {/* Cloud Storage Status (Vercel Persistent Storage) */}
+            <div
+              className="hidden lg:flex items-center space-x-1.5 px-3 py-1.5 bg-emerald-950/60 border border-emerald-500/30 rounded-xl text-[11px] font-semibold text-emerald-300"
+              title="Dữ liệu đề thi, danh sách học sinh và kết quả bài làm được lưu trữ vĩnh viễn trên Cloud Firestore và tự động khôi phục tức thì trên Vercel"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>Lưu vĩnh viễn (Cloud Firestore)</span>
+            </div>
+
             <button
               onClick={() => setShowChangeAdminPasswordModal(true)}
               className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center space-x-1.5 border border-slate-700"

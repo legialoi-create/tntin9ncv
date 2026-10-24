@@ -207,7 +207,12 @@ class DatabaseManager {
       for (const p of parsedList) {
         if (Array.isArray(p.exams)) {
           for (const ex of p.exams) {
-            if (!ex || !ex.id || deletedExamIdsSet.has(ex.id)) continue;
+            if (!ex || !ex.id) continue;
+            const exUpperId = ex.id.trim().toUpperCase();
+            const exUpperCode = (ex.code || '').trim().toUpperCase();
+            if (deletedExamIdsSet.has(exUpperId) || (exUpperCode && deletedExamIdsSet.has(exUpperCode))) {
+              continue;
+            }
             const existing = examMap.get(ex.id);
             if (!existing) {
               examMap.set(ex.id, {
@@ -241,7 +246,8 @@ class DatabaseManager {
         if (Array.isArray(p.sessions)) {
           for (const s of p.sessions) {
             if (!s || !s.id || !s.examId) continue;
-            if (deletedExamIdsSet.has(s.examId)) continue; // Only clear when teacher deletes the exam
+            const sUpperExamId = String(s.examId).trim().toUpperCase();
+            if (deletedExamIdsSet.has(sUpperExamId)) continue; // Only clear when teacher deletes the exam
 
             const existing = sessionMap.get(s.id);
             if (!existing) {

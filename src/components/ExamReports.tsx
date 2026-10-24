@@ -18,7 +18,8 @@ import {
   Clock,
   History,
   BookOpen,
-  RotateCw
+  RotateCw,
+  Trash2
 } from 'lucide-react';
 import { Exam } from '../types';
 import { api } from '../services/api';
@@ -45,6 +46,8 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   const [sortByViolation, setSortByViolation] = useState<'none' | 'desc' | 'asc'>('none');
   const [viewingViolationsStudent, setViewingViolationsStudent] = useState<any | null>(null);
   const [viewingAttemptsStudent, setViewingAttemptsStudent] = useState<any | null>(null);
+  const [submissionToDelete, setSubmissionToDelete] = useState<any | null>(null);
+  const [isDeletingSubmission, setIsDeletingSubmission] = useState(false);
 
   // Synchronize currentExamId with selectedExamId and valid exams list
   useEffect(() => {
@@ -78,6 +81,21 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       console.warn('Exam report warning:', currentExamId, err?.message);
     } finally {
       if (showLoading) setIsLoading(false);
+    }
+  };
+
+  const confirmDeleteSubmission = async () => {
+    if (!submissionToDelete) return;
+    const targetSessionId = submissionToDelete.sessionId;
+    setIsDeletingSubmission(true);
+    try {
+      await api.deleteSubmission(targetSessionId, currentExamId);
+      setSubmissionToDelete(null);
+      await fetchReports(false);
+    } catch (err: any) {
+      alert('Lỗi xóa bài thi: ' + (err?.message || 'Vui lòng thử lại'));
+    } finally {
+      setIsDeletingSubmission(false);
     }
   };
 
@@ -462,12 +480,13 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                   </div>
                 </th>
                 <th className="py-3 px-4 text-right">Thời gian nộp</th>
+                <th className="py-3 px-3 text-center w-16">Xóa bài</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredSubmissions.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center text-slate-400">
+                  <td colSpan={10} className="py-10 text-center text-slate-400">
                     Chưa có bài thi nào phù hợp với bộ lọc
                   </td>
                 </tr>
@@ -554,6 +573,16 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                       ) : (
                         '-'
                       )}
+                    </td>
+                    <td className="py-3 px-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setSubmissionToDelete(s)}
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
+                        title={`Xóa vĩnh viễn bài thi của ${s.name}`}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </td>
                   </tr>
                 ))
@@ -785,6 +814,47 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer"
               >
                 Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal xác nhận xóa bài thi của học sinh */}
+      {submissionToDelete && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 text-center shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto mb-3">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-bold text-slate-900 mb-1">
+              Xác nhận xóa bài thi
+            </h3>
+            <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+              Bạn có chắc muốn xóa vĩnh viễn kết quả bài thi của học sinh{' '}
+              <b className="text-slate-800">{submissionToDelete.name}</b> (Lớp{' '}
+              <b className="text-slate-800">{submissionToDelete.class}</b>)?
+              <br />
+              <span className="text-[11px] text-slate-400 mt-1 inline-block">
+                Dữ liệu sẽ bị xóa khỏi đám mây Cloud Firestore và máy chủ. Học sinh sẽ có thể làm lại bài thi.
+              </span>
+            </p>
+            <div className="flex space-x-2">
+              <button
+                type="button"
+                onClick={() => setSubmissionToDelete(null)}
+                disabled={isDeletingSubmission}
+                className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs cursor-pointer"
+              >
+                Hủy bỏ
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteSubmission}
+                disabled={isDeletingSubmission}
+                className="flex-1 py-2 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl text-xs cursor-pointer disabled:opacity-50"
+              >
+                {isDeletingSubmission ? 'Đang xóa...' : 'Xác nhận xóa'}
               </button>
             </div>
           </div>

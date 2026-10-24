@@ -17,7 +17,8 @@ import {
   deleteStudentFromFirestore,
   deleteClassStudentsFromFirestore,
   saveClassesToFirestore,
-  getClassesFromFirestore
+  getClassesFromFirestore,
+  deleteSingleSubmissionFromFirestore
 } from './firebase';
 
 let teacherToken: string | null = localStorage.getItem('ncv_teacher_token');
@@ -358,21 +359,40 @@ export const api = {
     } catch (e) {}
 
     // 5. Merge all sources, strictly EXCLUDING any exam in deletedExamsSet
+    // Priority: localExams & fbExams take precedence over server seed data.
+    // When the same exam exists in multiple sources, the one with the newest updatedAt timestamp wins.
     const examMap = new Map<string, Exam>();
-    [...serverData, ...fbExams, ...localExams].forEach((e: Exam) => {
+    const allCandidates = [...localExams, ...fbExams, ...serverData];
+
+    allCandidates.forEach((e: Exam) => {
       if (!e || !e.id || !e.title) return;
       const uId = e.id.trim().toUpperCase();
       const uCode = (e.code || '').trim().toUpperCase();
       if (deletedExamsSet.has(uId) || (uCode && deletedExamsSet.has(uCode))) {
         return; // Strongly filter out deleted exams
       }
-      if (!examMap.has(e.id)) {
+      const existing = examMap.get(e.id);
+      if (!existing) {
         examMap.set(e.id, e);
+      } else {
+        const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
+        const incomingTime = new Date(e.updatedAt || e.createdAt || 0).getTime();
+        if (incomingTime > existingTime) {
+          examMap.set(e.id, e);
+        }
       }
     });
 
     const cleanExams = Array.from(examMap.values());
     localStorage.setItem('ncv_exams_data', JSON.stringify(cleanExams));
+
+    // If Firestore had 0 exams but we have exams, save them permanently to Firestore
+    if (fbExams.length === 0 && cleanExams.length > 0) {
+      cleanExams.forEach((exam) => {
+        saveExamToFirestore(exam).catch(() => {});
+      });
+    }
+
     return cleanExams;
   },
 
@@ -694,7 +714,7 @@ export const api = {
     } catch (e) {}
 
     const classMap = new Map<string, ClassInfo>();
-    [...serverClasses, ...localClasses, ...fbClasses].forEach((c) => {
+    [...fbClasses, ...localClasses, ...serverClasses].forEach((c) => {
       if (!c || !c.name) return;
       const upper = c.name.trim().toUpperCase();
       if (!deletedClasses.includes(upper) && !classMap.has(upper)) {
@@ -709,6 +729,9 @@ export const api = {
     const clean = Array.from(classMap.values());
     if (clean.length > 0) {
       localStorage.setItem('ncv_classes_data', JSON.stringify(clean));
+      if (fbClasses.length === 0) {
+        saveClassesToFirestore(clean).catch(() => {});
+      }
       return clean;
     }
 
@@ -844,7 +867,18 @@ export const api = {
   getStudents: async (className?: string, asTeacher = true): Promise<StudentInfo[]> => {
     const url = className ? `/api/students?class=${encodeURIComponent(className)}` : '/api/students';
 
-    // 1. Fetch from Firebase Firestore (Authoritative cloud storage on Vercel)
+    // 0. Load deleted students blacklist
+    const deletedStudentIdsSet = new Set<string>();
+    try {
+      const delList = JSON.parse(localStorage.getItem('ncv_deleted_student_ids') || '[]');
+      if (Array.isArray(delList)) {
+        delList.forEach((id: string) => {
+          if (id) deletedStudentIdsSet.add(String(id).trim());
+        });
+      }
+    } catch (e) {}
+
+    // 1. Fetch from Firebase Firestore
     let fbStudents: StudentInfo[] = [];
     try {
       fbStudents = await getStudentsFromFirestore(className);
@@ -852,12 +886,15 @@ export const api = {
       console.warn('[Firebase] getStudentsFromFirestore error:', e);
     }
 
-    // 2. Fetch from local cache
+    // 2. Fetch from local cache (teacher's immediate state)
     let localStudents: StudentInfo[] = [];
     const cached = localStorage.getItem('ncv_students_data');
     if (cached) {
       try {
-        localStudents = JSON.parse(cached) || [];
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) {
+          localStudents = parsed.filter((s) => s && s.id && !deletedStudentIdsSet.has(String(s.id).trim()));
+        }
       } catch (e) {}
     }
 
@@ -869,51 +906,51 @@ export const api = {
       });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data)) serverStudents = data;
+        if (Array.isArray(data)) {
+          serverStudents = data.filter((s) => s && s.id && !deletedStudentIdsSet.has(String(s.id).trim()));
+        }
       }
     } catch (e) {}
 
     // 4. Merge all sources safely:
-    // Determine which classes have explicitly saved rosters in local storage or Firestore
-    const classesWithCustomRoster = new Set<string>();
+    // Determine which classes already have local custom rosters
+    const classesWithLocal = new Set<string>();
     localStudents.forEach((s) => {
-      if (s && s.class) classesWithCustomRoster.add(s.class.trim().toUpperCase());
-    });
-    fbStudents.forEach((s) => {
-      if (s && s.class) classesWithCustomRoster.add(s.class.trim().toUpperCase());
+      if (s && s.class) classesWithLocal.add(s.class.trim().toUpperCase());
     });
 
     const studentMap = new Map<string, StudentInfo>();
     const identityKeyMap = new Map<string, string>(); // class:::name -> id
 
-    // 1. Add server students ONLY for classes that don't have custom local/Firestore rosters yet
+    // A. For classes that do NOT have a local roster yet, add from server & firestore
     serverStudents.forEach((s) => {
-      if (s && s.id && s.name && s.class) {
+      if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
         const clsKey = s.class.trim().toUpperCase();
-        if (!classesWithCustomRoster.has(clsKey)) {
+        if (!classesWithLocal.has(clsKey)) {
           studentMap.set(s.id, s);
           identityKeyMap.set(`${clsKey}:::${s.name.trim().toLowerCase()}`, s.id);
         }
       }
     });
 
-    // 2. Add local cached students (replaces any previous entries for the same student name/class)
-    localStudents.forEach((s) => {
-      if (s && s.id && s.name && s.class) {
-        const clsKey = s.class.trim().toUpperCase();
-        const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
-        const existingId = identityKeyMap.get(identKey);
-        if (existingId && existingId !== s.id) {
-          studentMap.delete(existingId);
-        }
-        studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
-        identityKeyMap.set(identKey, s.id);
-      }
-    });
-
-    // 3. Add Firestore students (highest source of truth across all devices)
     fbStudents.forEach((s) => {
-      if (s && s.id && s.name && s.class) {
+      if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
+        const clsKey = s.class.trim().toUpperCase();
+        if (!classesWithLocal.has(clsKey)) {
+          const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
+          const existingId = identityKeyMap.get(identKey);
+          if (existingId && existingId !== s.id) {
+            studentMap.delete(existingId);
+          }
+          studentMap.set(s.id, s);
+          identityKeyMap.set(identKey, s.id);
+        }
+      }
+    });
+
+    // B. Local students are authoritative for classes that exist locally
+    localStudents.forEach((s) => {
+      if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
         const clsKey = s.class.trim().toUpperCase();
         const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
         const existingId = identityKeyMap.get(identKey);
@@ -925,7 +962,29 @@ export const api = {
       }
     });
 
-    let merged = Array.from(studentMap.values());
+    // C. Enhance existing local students with Firestore credentials if available, but never add unwanted extra students
+    fbStudents.forEach((s) => {
+      if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
+        const clsKey = s.class.trim().toUpperCase();
+        if (classesWithLocal.has(clsKey)) {
+          const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
+          const existingId = identityKeyMap.get(identKey) || (studentMap.has(s.id) ? s.id : null);
+          if (existingId) {
+            const existing = studentMap.get(existingId);
+            if (existing) {
+              studentMap.set(existingId, {
+                ...existing,
+                username: existing.username || s.username,
+                password: existing.password || s.password,
+                isPasswordChanged: existing.isPasswordChanged || s.isPasswordChanged,
+              });
+            }
+          }
+        }
+      }
+    });
+
+    let merged = Array.from(studentMap.values()).filter((s) => !deletedStudentIdsSet.has(String(s.id).trim()));
     if (className) {
       const targetCls = className.trim().toUpperCase();
       merged = merged.filter((s) => (s.class || '').trim().toUpperCase() === targetCls);
@@ -939,11 +998,6 @@ export const api = {
         (s) => (s.class || '').trim().toUpperCase() !== className.trim().toUpperCase()
       );
       localStorage.setItem('ncv_students_data', JSON.stringify([...otherClassStudents, ...merged]));
-    }
-
-    // Background sync to Firestore if Firestore had 0 students but we had local students
-    if (fbStudents.length === 0 && merged.length > 0) {
-      saveStudentsToFirestore(merged).catch(() => {});
     }
 
     return merged;
@@ -968,19 +1022,34 @@ export const api = {
   },
 
   deleteStudent: async (studentId: string) => {
+    if (!studentId) return { success: true };
+    const cleanId = String(studentId).trim();
+
+    // 1. Mark in permanent deleted student IDs blacklist
+    try {
+      const delList = JSON.parse(localStorage.getItem('ncv_deleted_student_ids') || '[]');
+      if (Array.isArray(delList) && !delList.includes(cleanId)) {
+        delList.push(cleanId);
+        localStorage.setItem('ncv_deleted_student_ids', JSON.stringify(delList));
+      }
+    } catch (e) {}
+
+    // 2. Remove from local cache
     const cached = localStorage.getItem('ncv_students_data');
     if (cached) {
       try {
         const all: StudentInfo[] = JSON.parse(cached) || [];
-        const filtered = all.filter((s) => s.id !== studentId);
+        const filtered = all.filter((s) => String(s.id).trim() !== cleanId);
         localStorage.setItem('ncv_students_data', JSON.stringify(filtered));
       } catch (e) {}
     }
 
-    deleteStudentFromFirestore(studentId).catch(() => {});
+    // 3. Remove from Firestore
+    deleteStudentFromFirestore(cleanId).catch(() => {});
 
+    // 4. Remove from server
     try {
-      const res = await fetch(`/api/students/${encodeURIComponent(studentId)}`, {
+      const res = await fetch(`/api/students/${encodeURIComponent(cleanId)}`, {
         method: 'DELETE',
         headers: getHeaders(true),
       });
@@ -1000,11 +1069,32 @@ export const api = {
         all = JSON.parse(cached) || [];
       } catch (e) {}
     }
+
+    // Find any previously existing students in this class that were removed in the new list
+    const previousClassStudents = all.filter((s) => (s.class || '').trim().toUpperCase() === trimmedClass);
+    const newStudentIds = new Set(students.map((s) => String(s.id).trim()));
+    const removedIds = previousClassStudents
+      .filter((s) => !newStudentIds.has(String(s.id).trim()))
+      .map((s) => String(s.id).trim());
+
+    if (removedIds.length > 0) {
+      try {
+        const delList = JSON.parse(localStorage.getItem('ncv_deleted_student_ids') || '[]');
+        if (Array.isArray(delList)) {
+          removedIds.forEach((id) => {
+            if (!delList.includes(id)) delList.push(id);
+            deleteStudentFromFirestore(id).catch(() => {});
+          });
+          localStorage.setItem('ncv_deleted_student_ids', JSON.stringify(delList));
+        }
+      } catch (e) {}
+    }
+
     const filtered = all.filter((s) => (s.class || '').trim().toUpperCase() !== trimmedClass);
     const updated = [...filtered, ...students];
     localStorage.setItem('ncv_students_data', JSON.stringify(updated));
 
-    // Save to Firebase Firestore immediately so students persist on Vercel across exits and reloads!
+    // Save to Firebase Firestore immediately
     try {
       await deleteClassStudentsFromFirestore(className);
       await saveStudentsToFirestore(students);
@@ -1034,6 +1124,22 @@ export const api = {
         all = JSON.parse(cached) || [];
       } catch (e) {}
     }
+
+    const targetStudents = all.filter((s) => (s.class || '').trim().toUpperCase() === trimmed);
+    if (targetStudents.length > 0) {
+      try {
+        const delList = JSON.parse(localStorage.getItem('ncv_deleted_student_ids') || '[]');
+        if (Array.isArray(delList)) {
+          targetStudents.forEach((s) => {
+            const sId = String(s.id).trim();
+            if (!delList.includes(sId)) delList.push(sId);
+            deleteStudentFromFirestore(sId).catch(() => {});
+          });
+          localStorage.setItem('ncv_deleted_student_ids', JSON.stringify(delList));
+        }
+      } catch (e) {}
+    }
+
     const filtered = all.filter((s) => (s.class || '').trim().toUpperCase() !== trimmed);
     localStorage.setItem('ncv_students_data', JSON.stringify(filtered));
 
@@ -2007,7 +2113,7 @@ export const api = {
     }
     const cleanExamId = String(examId).trim();
 
-    // 1. Resolve exam object
+    // 1. Resolve exam object (local cache, Firestore, then seed fallback)
     let examObj: Exam | undefined;
     try {
       const cached = localStorage.getItem('ncv_exams_data');
@@ -2017,12 +2123,18 @@ export const api = {
       }
     } catch (e) {}
     if (!examObj) {
+      try {
+        const fbExams = await getExamsFromFirestore();
+        examObj = fbExams.find(e => e.id === cleanExamId || (e.code && e.code.toUpperCase() === cleanExamId.toUpperCase()));
+      } catch (e) {}
+    }
+    if (!examObj) {
       examObj = (SEED_APP_DATA.exams as any[]).find(e => e.id === cleanExamId || (e.code && e.code.toUpperCase() === cleanExamId.toUpperCase()));
     }
 
     const resolvedId = examObj?.id || cleanExamId;
     const resolvedCode = examObj?.code || '';
-    const aliases = [cleanExamId, resolvedId, resolvedCode].filter(Boolean);
+    const aliases = Array.from(new Set([cleanExamId, resolvedId, resolvedCode].filter(Boolean)));
 
     // 2. Fetch server data
     let serverData: any = null;
@@ -2065,11 +2177,25 @@ export const api = {
     try {
       const fbSubs = await getSubmissionsFromFirestore(resolvedId, resolvedCode, aliases);
       for (const fb of fbSubs) {
-        if (!localSubmissions.some((s) => s.sessionId === fb.sessionId)) {
+        const existingIdx = localSubmissions.findIndex((s) => s.sessionId === fb.sessionId);
+        if (existingIdx >= 0) {
+          if (fb.status === 'submitted' || localSubmissions[existingIdx].status !== 'submitted') {
+            localSubmissions[existingIdx] = { ...localSubmissions[existingIdx], ...fb };
+          }
+        } else {
           localSubmissions.push(fb);
         }
       }
     } catch (e) {}
+
+    // Auto-sync persistent submissions to serverless instance on Vercel so Excel exports and API routes are primed
+    if (localSubmissions.length > 0) {
+      fetch('/api/sessions/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessions: localSubmissions }),
+      }).catch(() => {});
+    }
 
     // 5. Combine server submissions and local/Firestore submissions
     const rawSubmissions: any[] = Array.isArray(serverData?.submissions) ? [...serverData.submissions] : [];
@@ -2275,6 +2401,73 @@ export const api = {
     XLSX.utils.book_append_sheet(wb, ws, 'KetQuaThi');
     const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     return new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  },
+
+  // Delete a student's submission permanently from Firestore, localStorage, and server
+  deleteSubmission: async (sessionId: string, examId?: string) => {
+    if (!sessionId) return { success: false };
+
+    // 1. Delete from Firebase Firestore permanently
+    try {
+      await deleteSingleSubmissionFromFirestore(sessionId);
+    } catch (e) {
+      console.warn('deleteSingleSubmissionFromFirestore error:', e);
+    }
+
+    // 2. Remove from local caches
+    try {
+      if (examId) {
+        const key = `ncv_submissions_${examId}`;
+        const existing = JSON.parse(localStorage.getItem(key) || '[]');
+        if (Array.isArray(existing)) {
+          const filtered = existing.filter((s: any) => s.sessionId !== sessionId);
+          localStorage.setItem(key, JSON.stringify(filtered));
+        }
+        localStorage.removeItem(`ncv_reports_cache_${examId}`);
+      }
+
+      const globalRaw = localStorage.getItem('ncv_submissions_global_all');
+      if (globalRaw) {
+        const globalArr = JSON.parse(globalRaw);
+        if (Array.isArray(globalArr)) {
+          const filtered = globalArr.filter((s: any) => s.sessionId !== sessionId);
+          localStorage.setItem('ncv_submissions_global_all', JSON.stringify(filtered));
+        }
+      }
+
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith('ncv_submissions_') || key.startsWith('ncv_reports_cache_'))) {
+          try {
+            const arr = JSON.parse(localStorage.getItem(key) || '[]');
+            if (Array.isArray(arr) && arr.some((s: any) => s.sessionId === sessionId)) {
+              const cleaned = arr.filter((s: any) => s.sessionId !== sessionId);
+              localStorage.setItem(key, JSON.stringify(cleaned));
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+
+    // 3. Delete from backend serverless instance
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+        headers: getHeaders(true),
+      });
+    } catch (e) {}
+
+    // 4. Dispatch browser custom event for instant cross-tab / UI update
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('ncv_submission_update', { detail: { sessionId, deleted: true } }));
+      try {
+        const bc = new BroadcastChannel('ncv_broadcast_sync');
+        bc.postMessage({ type: 'SUBMISSION_DELETED', sessionId });
+        bc.close();
+      } catch (e) {}
+    }
+
+    return { success: true, message: 'Đã xóa bài thi thành công' };
   },
 
   // Backup & Restore

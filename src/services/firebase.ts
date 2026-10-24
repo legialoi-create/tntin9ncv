@@ -259,7 +259,20 @@ export async function getSubmissionsFromFirestore(
   return results;
 }
 
-// 5. Delete all submissions for an exam from Firestore when teacher deletes an exam
+// 5. Delete a single student submission from Firestore (when admin explicitly deletes it)
+export async function deleteSingleSubmissionFromFirestore(sessionId: string): Promise<boolean> {
+  if (!sessionId) return false;
+  const docId = `sub_${sessionId}`.replace(/[^a-zA-Z0-9_\-]/g, '_');
+  try {
+    await deleteDoc(doc(firestore, 'submissions', docId));
+    return true;
+  } catch (err) {
+    console.warn('[Firebase] deleteSingleSubmissionFromFirestore error:', err);
+    return false;
+  }
+}
+
+// 6. Delete all submissions for an exam from Firestore when teacher deletes an exam
 export async function deleteSubmissionsForExamFromFirestore(
   examId: string,
   examCode?: string,
@@ -298,7 +311,8 @@ export async function deleteSubmissionsForExamFromFirestore(
 // 4. Record Deleted Exam in Firestore to permanently prevent resurrection across Vercel cold starts
 export async function recordDeletedExamInFirestore(examId: string, examCode?: string): Promise<void> {
   if (!examId) return;
-  const upperId = examId.trim().toUpperCase();
+  const cleanId = examId.trim();
+  const upperId = cleanId.toUpperCase();
   const upperCode = examCode ? examCode.trim().toUpperCase() : '';
 
   try {
@@ -307,7 +321,8 @@ export async function recordDeletedExamInFirestore(examId: string, examCode?: st
         id: upperId,
         deletedAt: new Date().toISOString()
       }, { merge: true }),
-      deleteDoc(doc(firestore, 'exams', examId.trim()))
+      deleteDoc(doc(firestore, 'exams', cleanId)),
+      deleteDoc(doc(firestore, 'exams', upperId))
     ];
 
     if (upperCode) {
@@ -315,9 +330,24 @@ export async function recordDeletedExamInFirestore(examId: string, examCode?: st
         setDoc(doc(firestore, 'deleted_exams', upperCode), {
           id: upperCode,
           deletedAt: new Date().toISOString()
-        }, { merge: true })
+        }, { merge: true }),
+        deleteDoc(doc(firestore, 'exams', upperCode))
       );
     }
+
+    // Also scan exams collection to delete any docs with matching id or code
+    try {
+      const colRef = collection(firestore, 'exams');
+      const snap = await getDocs(colRef);
+      snap.forEach((d) => {
+        const data = d.data();
+        const dId = String(data?.id || d.id || '').trim().toUpperCase();
+        const dCode = String(data?.code || '').trim().toUpperCase();
+        if (dId === upperId || (upperCode && (dCode === upperCode || dId === upperCode))) {
+          promises.push(deleteDoc(d.ref));
+        }
+      });
+    } catch (e) {}
 
     await Promise.all(promises);
   } catch (err) {
@@ -350,7 +380,6 @@ export async function unmarkDeletedExamInFirestore(examId: string, examCode?: st
   if (!examId) return;
   const upperId = examId.trim().toUpperCase();
   const upperCode = examCode ? examCode.trim().toUpperCase() : '';
-
   try {
     const promises: Promise<any>[] = [
       deleteDoc(doc(firestore, 'deleted_exams', upperId))
@@ -384,12 +413,25 @@ export async function saveExamToFirestore(exam: any): Promise<void> {
 export async function getExamsFromFirestore(): Promise<any[]> {
   const exams: any[] = [];
   try {
+    // Also load deleted exams from Firestore first so we never return deleted exams
+    const deletedSnap = await getDocs(collection(firestore, 'deleted_exams'));
+    const deletedSet = new Set<string>();
+    deletedSnap.forEach((d) => {
+      const data = d.data();
+      if (data && data.id) deletedSet.add(String(data.id).trim().toUpperCase());
+      if (d.id) deletedSet.add(d.id.trim().toUpperCase());
+    });
+
     const colRef = collection(firestore, 'exams');
     const snap = await getDocs(colRef);
     snap.forEach((d) => {
       const data = d.data();
       if (data && data.id && data.title) {
-        exams.push(data);
+        const uId = String(data.id).trim().toUpperCase();
+        const uCode = String(data.code || '').trim().toUpperCase();
+        if (!deletedSet.has(uId) && (!uCode || !deletedSet.has(uCode))) {
+          exams.push(data);
+        }
       }
     });
   } catch (err) {

@@ -139,6 +139,25 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
     loadAllStudentCounts();
   };
 
+  const handleManualSaveRoster = async () => {
+    if (!selectedClassForRoster) return;
+    setIsSavingRoster(true);
+    try {
+      await api.saveClassStudents(selectedClassForRoster, rosterStudents);
+      const upperCls = selectedClassForRoster.trim().toUpperCase();
+      setClassStudentCounts((prev) => ({
+        ...prev,
+        [upperCls]: rosterStudents.length,
+        [selectedClassForRoster]: rosterStudents.length,
+      }));
+      showFeedback('success', `Đã lưu thành công ${rosterStudents.length} học sinh của lớp ${selectedClassForRoster}`);
+    } catch (err: any) {
+      showFeedback('error', 'Lỗi lưu: ' + err.message);
+    } finally {
+      setIsSavingRoster(false);
+    }
+  };
+
   const handleAddClass = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newClassName.trim()) return;
@@ -945,6 +964,21 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
 
                           <button
                             type="button"
+                            onClick={handleManualSaveRoster}
+                            disabled={isSavingRoster}
+                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition flex items-center space-x-1 cursor-pointer shadow-xs disabled:opacity-50"
+                            title={`Lưu vĩnh viễn danh sách lớp ${selectedClassForRoster}`}
+                          >
+                            {isSavingRoster ? (
+                              <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Save className="w-3.5 h-3.5" />
+                            )}
+                            <span>Lưu danh sách</span>
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={handleClearRoster}
                             className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center space-x-1"
                             title="Làm trống toàn bộ danh sách lớp"
@@ -1157,14 +1191,34 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
             </div>
 
             {/* Modal Footer */}
-            <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
-              <button
-                type="button"
-                onClick={handleCloseRosterModal}
-                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
-              >
-                Đóng lại
-              </button>
+            <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center space-x-1.5 text-xs text-emerald-700 font-semibold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Mọi thay đổi được tự động lưu vĩnh viễn trên hệ thống</span>
+              </div>
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={handleManualSaveRoster}
+                  disabled={isSavingRoster}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold cursor-pointer transition flex items-center space-x-1.5 shadow-xs disabled:opacity-50"
+                  title={`Lưu danh sách học sinh lớp ${selectedClassForRoster}`}
+                >
+                  {isSavingRoster ? (
+                    <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5" />
+                  )}
+                  <span>Lưu danh sách lớp</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCloseRosterModal}
+                  className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold cursor-pointer transition"
+                >
+                  Đóng lại
+                </button>
+              </div>
             </div>
           </div>
         </div>

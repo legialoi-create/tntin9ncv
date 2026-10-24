@@ -591,6 +591,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
 
   const answeredCount = Object.keys(answers).filter(k => answers[k] && String(answers[k]).trim()).length;
   const unansweredCount = Math.max(0, questions.length - answeredCount);
+  const progressPercent = questions.length > 0 ? Math.round((answeredCount / questions.length) * 100) : 0;
 
   const displayAnsweredCount = Math.max(
     0,
@@ -1052,6 +1053,72 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         </div>
       )}
 
+      {/* VISUAL COMPLETION PROGRESS BAR BANNER */}
+      <section
+        aria-label="Tiến độ hoàn thành bài kiểm tra"
+        className="bg-slate-800/95 border-b border-slate-700/80 px-4 py-2 sticky top-[53px] z-20 backdrop-blur-md shadow-xs"
+      >
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          {/* Progress label & count */}
+          <div className="flex items-center justify-between sm:justify-start space-x-3">
+            <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-200">
+              <span className="text-slate-400">Tiến độ làm bài:</span>
+              <span className="font-bold text-white bg-slate-900/80 px-2 py-0.5 rounded-md border border-slate-700/80 font-mono">
+                <span className="text-emerald-400">{answeredCount}</span> / {questions.length} câu
+              </span>
+            </div>
+            <span
+              className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border transition-colors ${
+                progressPercent === 100
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 ring-1 ring-emerald-500/30'
+                  : progressPercent >= 50
+                  ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
+                  : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+              }`}
+            >
+              {progressPercent}%
+            </span>
+          </div>
+
+          {/* Animated Visual Progress Bar Track & Fill */}
+          <div className="flex-1 sm:max-w-md sm:mx-4 flex items-center">
+            <div className="w-full bg-slate-950/80 rounded-full h-2.5 border border-slate-700/80 p-0.5 overflow-hidden shadow-inner">
+              <div
+                role="progressbar"
+                aria-valuenow={answeredCount}
+                aria-valuemin={0}
+                aria-valuemax={questions.length}
+                aria-label={`Đã làm ${answeredCount} trên tổng số ${questions.length} câu hỏi`}
+                className={`h-full rounded-full transition-all duration-500 ease-out ${
+                  progressPercent === 100
+                    ? 'bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-300 shadow-sm shadow-emerald-500/50'
+                    : progressPercent >= 50
+                    ? 'bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400'
+                    : 'bg-gradient-to-r from-amber-500 to-amber-300'
+                }`}
+                style={{ width: `${Math.max(progressPercent > 0 ? 3 : 0, progressPercent)}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Completion Status Indicator */}
+          <div className="text-[11px] font-medium text-right flex items-center justify-end">
+            {unansweredCount > 0 ? (
+              <span className="text-amber-300/90 flex items-center space-x-1">
+                <span>Còn</span>
+                <b className="text-amber-300 font-mono text-xs">{unansweredCount}</b>
+                <span>câu chưa làm</span>
+              </span>
+            ) : (
+              <span className="text-emerald-400 font-bold flex items-center space-x-1 animate-pulse">
+                <CheckCircle className="w-3.5 h-3.5" />
+                <span>Đã trả lời hết tất cả câu hỏi!</span>
+              </span>
+            )}
+          </div>
+        </div>
+      </section>
+
       {/* MAIN EXAM BODY */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Left Column: Current Question Card */}
@@ -1190,13 +1257,41 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         {/* Right Column: Question Palette (Bảng số câu hỏi) */}
         <div className="lg:col-span-4 flex flex-col space-y-4">
           <div className="bg-slate-800/90 border border-slate-700/80 rounded-2xl p-5 shadow-xl">
-            <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-700">
+            <div className="flex items-center justify-between mb-2 pb-2 border-b border-slate-700">
               <h2 className="text-sm font-bold text-white uppercase tracking-wider">
                 BẢNG SỐ CÂU HỎI
               </h2>
-              <span className="text-xs font-semibold text-emerald-400">
-                {answeredCount}/{questions.length} câu
+              <span className="text-xs font-semibold text-emerald-400 font-mono">
+                {answeredCount}/{questions.length} ({progressPercent}%)
               </span>
+            </div>
+
+            {/* Sidebar completion progress bar */}
+            <div className="mb-3.5 bg-slate-900/80 rounded-xl p-3 border border-slate-700/70">
+              <div className="flex items-center justify-between text-xs mb-1.5">
+                <span className="text-slate-300 font-medium">Tiến độ bài thi:</span>
+                <span className="font-mono font-bold text-emerald-400">{progressPercent}%</span>
+              </div>
+              <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                <div
+                  role="progressbar"
+                  aria-valuenow={answeredCount}
+                  aria-valuemin={0}
+                  aria-valuemax={questions.length}
+                  className={`h-full rounded-full transition-all duration-500 ease-out ${
+                    progressPercent === 100
+                      ? 'bg-gradient-to-r from-emerald-500 to-teal-300 shadow-xs shadow-emerald-500/50'
+                      : progressPercent >= 50
+                      ? 'bg-gradient-to-r from-indigo-500 to-emerald-400'
+                      : 'bg-gradient-to-r from-amber-500 to-amber-300'
+                  }`}
+                  style={{ width: `${Math.max(progressPercent > 0 ? 3 : 0, progressPercent)}%` }}
+                />
+              </div>
+              <div className="mt-2 text-[11px] text-slate-400 flex items-center justify-between">
+                <span>Đã làm: <b className="text-emerald-400 font-mono">{answeredCount}</b></span>
+                <span>Chưa làm: <b className="text-amber-400 font-mono">{unansweredCount}</b></span>
+              </div>
             </div>
 
             {/* Legend */}

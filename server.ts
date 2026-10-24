@@ -2131,6 +2131,15 @@ app.post('/api/sessions/sync', (req: Request, res: Response) => {
   res.json({ success: true, synced: count });
 });
 
+app.delete('/api/sessions/:sessionId', requireTeacherAuth, (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Mã phiên thi không hợp lệ' });
+  }
+  db.deleteSession(sessionId);
+  res.json({ success: true, message: `Đã xóa bài thi ${sessionId} thành công` });
+});
+
 // Global Error Handler Middleware: Always return structured JSON for internal errors
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
   console.error('[API INTERNAL ERROR]:', err);
