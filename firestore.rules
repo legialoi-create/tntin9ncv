@@ -27,6 +27,11 @@ service cloud.firestore {
       allow write: if true;
     }
 
+    match /deleted_classes/{classId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
     match /students/{studentId} {
       allow read: if true;
       allow write: if true;

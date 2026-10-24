@@ -18,6 +18,10 @@ import {
   deleteClassStudentsFromFirestore,
   saveClassesToFirestore,
   getClassesFromFirestore,
+  deleteClassFromFirestore,
+  recordDeletedClassInFirestore,
+  getDeletedClassesFromFirestore,
+  unmarkDeletedClassInFirestore,
   deleteSingleSubmissionFromFirestore
 } from './firebase';
 
@@ -689,13 +693,16 @@ export const api = {
       } catch (e) {}
     }
 
-    // Get deleted classes blacklist
-    const deletedClasses: string[] = [];
+    // Get deleted classes blacklist from both local storage and Cloud Firestore
+    const deletedClassesSet = new Set<string>();
     try {
       const delArr = JSON.parse(localStorage.getItem('ncv_deleted_classes') || '[]');
       if (Array.isArray(delArr)) {
-        delArr.forEach((c: string) => deletedClasses.push(String(c).trim().toUpperCase()));
+        delArr.forEach((c: string) => deletedClassesSet.add(String(c).trim().toUpperCase()));
       }
+      const fbDeleted = await getDeletedClassesFromFirestore();
+      fbDeleted.forEach((c) => deletedClassesSet.add(c));
+      localStorage.setItem('ncv_deleted_classes', JSON.stringify(Array.from(deletedClassesSet)));
     } catch (e) {}
 
     // Fetch from Firestore
@@ -717,7 +724,7 @@ export const api = {
     [...fbClasses, ...localClasses, ...serverClasses].forEach((c) => {
       if (!c || !c.name) return;
       const upper = c.name.trim().toUpperCase();
-      if (!deletedClasses.includes(upper) && !classMap.has(upper)) {
+      if (!deletedClassesSet.has(upper) && !classMap.has(upper)) {
         classMap.set(upper, {
           name: c.name.trim(),
           grade: (Number(c.grade) || 6) as 6 | 7 | 8 | 9,
@@ -736,7 +743,7 @@ export const api = {
     }
 
     if (localClasses.length > 0) {
-      return localClasses.filter((c: ClassInfo) => !deletedClasses.includes(c.name.trim().toUpperCase()));
+      return localClasses.filter((c: ClassInfo) => !deletedClassesSet.has(c.name.trim().toUpperCase()));
     }
 
     return [];
@@ -751,10 +758,13 @@ export const api = {
         const remaining = delArr.filter((name: string) => !activeUpper.has(name));
         localStorage.setItem('ncv_deleted_classes', JSON.stringify(remaining));
       }
+      for (const c of classes) {
+        unmarkDeletedClassInFirestore(c.name).catch(() => {});
+      }
     } catch (e) {}
 
     localStorage.setItem('ncv_classes_data', JSON.stringify(classes));
-    saveClassesToFirestore(classes).catch(() => {});
+    await saveClassesToFirestore(classes);
 
     try {
       const res = await fetch('/api/classes', {
@@ -788,7 +798,14 @@ export const api = {
       }
     } catch (e) {}
 
-    // 2. Remove from local classes
+    // 2. Permanently delete from Firebase Firestore
+    try {
+      await deleteClassFromFirestore(trimmed);
+    } catch (e) {
+      console.warn('deleteClassFromFirestore error:', e);
+    }
+
+    // 3. Remove from local classes
     let updated: ClassInfo[] = [];
     const cached = localStorage.getItem('ncv_classes_data');
     if (cached) {
@@ -801,7 +818,7 @@ export const api = {
       } catch (e) {}
     }
 
-    // 3. Remove students of this class from local storage
+    // 4. Remove students of this class from local storage
     try {
       const cachedStudents = localStorage.getItem('ncv_students_data');
       if (cachedStudents) {
@@ -913,42 +930,46 @@ export const api = {
     } catch (e) {}
 
     // 4. Merge all sources safely:
-    // Determine which classes already have local custom rosters
+    // Determine which classes already have custom rosters in local storage or Cloud Firestore
     const classesWithLocal = new Set<string>();
     localStudents.forEach((s) => {
       if (s && s.class) classesWithLocal.add(s.class.trim().toUpperCase());
     });
+    const classesWithFirestore = new Set<string>();
+    fbStudents.forEach((s) => {
+      if (s && s.class) classesWithFirestore.add(s.class.trim().toUpperCase());
+    });
+    const classesWithCustomRoster = new Set([...classesWithLocal, ...classesWithFirestore]);
 
     const studentMap = new Map<string, StudentInfo>();
     const identityKeyMap = new Map<string, string>(); // class:::name -> id
 
-    // A. For classes that do NOT have a local roster yet, add from server & firestore
+    // A. For classes that do NOT have any custom roster in local or Firestore, allow server defaults
     serverStudents.forEach((s) => {
       if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
         const clsKey = s.class.trim().toUpperCase();
-        if (!classesWithLocal.has(clsKey)) {
+        if (!classesWithCustomRoster.has(clsKey)) {
           studentMap.set(s.id, s);
           identityKeyMap.set(`${clsKey}:::${s.name.trim().toLowerCase()}`, s.id);
         }
       }
     });
 
+    // B. Firestore students are permanent cloud records across all devices & Vercel cold starts
     fbStudents.forEach((s) => {
       if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
         const clsKey = s.class.trim().toUpperCase();
-        if (!classesWithLocal.has(clsKey)) {
-          const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
-          const existingId = identityKeyMap.get(identKey);
-          if (existingId && existingId !== s.id) {
-            studentMap.delete(existingId);
-          }
-          studentMap.set(s.id, s);
-          identityKeyMap.set(identKey, s.id);
+        const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
+        const existingId = identityKeyMap.get(identKey);
+        if (existingId && existingId !== s.id) {
+          studentMap.delete(existingId);
         }
+        studentMap.set(s.id, s);
+        identityKeyMap.set(identKey, s.id);
       }
     });
 
-    // B. Local students are authoritative for classes that exist locally
+    // C. Local students are authoritative for classes that exist locally
     localStudents.forEach((s) => {
       if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
         const clsKey = s.class.trim().toUpperCase();
@@ -959,28 +980,6 @@ export const api = {
         }
         studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
         identityKeyMap.set(identKey, s.id);
-      }
-    });
-
-    // C. Enhance existing local students with Firestore credentials if available, but never add unwanted extra students
-    fbStudents.forEach((s) => {
-      if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
-        const clsKey = s.class.trim().toUpperCase();
-        if (classesWithLocal.has(clsKey)) {
-          const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
-          const existingId = identityKeyMap.get(identKey) || (studentMap.has(s.id) ? s.id : null);
-          if (existingId) {
-            const existing = studentMap.get(existingId);
-            if (existing) {
-              studentMap.set(existingId, {
-                ...existing,
-                username: existing.username || s.username,
-                password: existing.password || s.password,
-                isPasswordChanged: existing.isPasswordChanged || s.isPasswordChanged,
-              });
-            }
-          }
-        }
       }
     });
 
@@ -1101,6 +1100,20 @@ export const api = {
     } catch (e) {
       console.warn('[Firebase] saveClassStudents warning:', e);
     }
+
+    // Update studentCount on the class in both localStorage and Cloud Firestore
+    try {
+      const cachedClasses = localStorage.getItem('ncv_classes_data');
+      if (cachedClasses) {
+        const clsList: ClassInfo[] = JSON.parse(cachedClasses) || [];
+        const foundIdx = clsList.findIndex((c) => c.name.trim().toUpperCase() === trimmedClass);
+        if (foundIdx >= 0) {
+          clsList[foundIdx] = { ...clsList[foundIdx], studentCount: students.length };
+          localStorage.setItem('ncv_classes_data', JSON.stringify(clsList));
+          saveClassesToFirestore(clsList).catch(() => {});
+        }
+      }
+    } catch (e) {}
 
     try {
       const res = await fetch(`/api/classes/${encodeURIComponent(className)}/students`, {

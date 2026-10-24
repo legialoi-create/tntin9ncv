@@ -552,20 +552,91 @@ export async function saveClassesToFirestore(classes: any[]): Promise<void> {
 export async function getClassesFromFirestore(): Promise<any[]> {
   const classes: any[] = [];
   try {
+    const deletedSnap = await getDocs(collection(firestore, 'deleted_classes'));
+    const deletedSet = new Set<string>();
+    deletedSnap.forEach((d) => {
+      const data = d.data();
+      if (data && data.name) deletedSet.add(String(data.name).trim().toUpperCase());
+      if (d.id) deletedSet.add(d.id.trim().toUpperCase());
+    });
+
     const colRef = collection(firestore, 'classes');
     const snap = await getDocs(colRef);
     snap.forEach((d) => {
       const data = d.data();
       if (data && data.name) {
-        classes.push({
-          name: String(data.name).trim(),
-          grade: Number(data.grade) || 6,
-          studentCount: Number(data.studentCount) || 0
-        });
+        const upper = String(data.name).trim().toUpperCase();
+        if (!deletedSet.has(upper)) {
+          classes.push({
+            name: String(data.name).trim(),
+            grade: Number(data.grade) || 6,
+            studentCount: Number(data.studentCount) || 0
+          });
+        }
       }
     });
   } catch (err) {
     console.warn('[Firebase] getClassesFromFirestore error:', err);
   }
   return classes;
+}
+
+// 15. Delete class from Firestore (permanently remove class doc and all student docs in that class)
+export async function deleteClassFromFirestore(className: string): Promise<void> {
+  if (!className) return;
+  const upper = className.trim().toUpperCase();
+  const docId = `cls_${upper}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  try {
+    await Promise.all([
+      deleteDoc(doc(firestore, 'classes', docId)),
+      deleteClassStudentsFromFirestore(upper),
+      recordDeletedClassInFirestore(upper)
+    ]);
+  } catch (err) {
+    console.warn('[Firebase] deleteClassFromFirestore error:', err);
+  }
+}
+
+// 16. Record Deleted Class in Firestore to prevent resurrection across Vercel cold starts
+export async function recordDeletedClassInFirestore(className: string): Promise<void> {
+  if (!className) return;
+  const upper = className.trim().toUpperCase();
+  try {
+    await setDoc(doc(firestore, 'deleted_classes', upper), {
+      name: upper,
+      deletedAt: new Date().toISOString()
+    }, { merge: true });
+  } catch (err) {
+    console.warn('[Firebase] recordDeletedClassInFirestore error:', err);
+  }
+}
+
+// 17. Get Deleted Classes from Firestore
+export async function getDeletedClassesFromFirestore(): Promise<string[]> {
+  const result: string[] = [];
+  try {
+    const snap = await getDocs(collection(firestore, 'deleted_classes'));
+    snap.forEach((d) => {
+      const data = d.data();
+      if (data && data.name) {
+        result.push(String(data.name).trim().toUpperCase());
+      } else if (d.id) {
+        result.push(d.id.trim().toUpperCase());
+      }
+    });
+  } catch (err) {
+    console.warn('[Firebase] getDeletedClassesFromFirestore error:', err);
+  }
+  return result;
+}
+
+// 18. Unmark Deleted Class from Firestore (when teacher creates or restores a class)
+export async function unmarkDeletedClassInFirestore(className: string): Promise<void> {
+  if (!className) return;
+  const upper = className.trim().toUpperCase();
+  try {
+    await deleteDoc(doc(firestore, 'deleted_classes', upper));
+  } catch (err) {
+    console.warn('[Firebase] unmarkDeletedClassInFirestore error:', err);
+  }
 }
