@@ -1437,18 +1437,64 @@ export const api = {
       } catch (e) {}
     }
 
+    // Check cached real exam if available for schedule and state
+    let realExam: any = null;
+    try {
+      const cached = localStorage.getItem('ncv_exams_data');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) {
+          realExam = parsed.find(
+            (e: any) =>
+              String(e.code || '').trim().toUpperCase() === String(params.examCode || '').trim().toUpperCase() ||
+              String(e.id || '').trim().toUpperCase() === String(params.examCode || '').trim().toUpperCase()
+          );
+        }
+      }
+    } catch (e) {}
+
+    const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((params.studentClass || '').trim());
+    const now = new Date();
+    if (realExam && !isTestClass) {
+      if (realExam.isOpen === false) {
+        throw new Error(`Bài kiểm tra ${realExam.code || params.examCode} hiện đang được Giáo viên tạm đóng.`);
+      }
+      if (realExam.startTime && new Date(realExam.startTime) > now) {
+        const timeStr = new Date(realExam.startTime).toLocaleTimeString('vi-VN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          day: '2-digit',
+          month: '2-digit'
+        });
+        throw new Error(`Ca thi này chưa bắt đầu. Thời gian mở ca thi: ${timeStr}. Em vui lòng quay lại sau!`);
+      }
+      if (realExam.endTime && new Date(realExam.endTime) < now) {
+        const timeStr = new Date(realExam.endTime).toLocaleTimeString('vi-VN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          day: '2-digit',
+          month: '2-digit'
+        });
+        throw new Error(`Ca thi này đã kết thúc vào lúc ${timeStr}. Em không thể vào làm bài được nữa.`);
+      }
+    }
+
     const mockExam = {
-      id: `exam-${params.examCode}`,
-      code: params.examCode,
-      title: `Bài kiểm tra môn Tin học (${params.examCode})`,
-      durationMinutes: 45,
-      totalPoints: 10,
-      isOpen: true,
-      maxAttempts: 1,
-      maxViolationsBeforeLock: 3,
-      shuffleQuestions: true,
-      shuffleOptions: true,
-      showScoreAfterSubmit: true
+      id: realExam?.id || `exam-${params.examCode}`,
+      code: realExam?.code || params.examCode,
+      title: realExam?.title || `Bài kiểm tra môn Tin học (${params.examCode})`,
+      durationMinutes: realExam?.durationMinutes || 45,
+      startTime: realExam?.startTime,
+      endTime: realExam?.endTime,
+      totalPoints: realExam?.totalPoints || 10,
+      isOpen: realExam ? realExam.isOpen !== false : true,
+      maxAttempts: realExam?.maxAttempts || 1,
+      maxViolationsBeforeLock: realExam?.maxViolationsBeforeLock || 3,
+      shuffleQuestions: realExam ? realExam.shuffleQuestions !== false : true,
+      shuffleOptions: realExam ? realExam.shuffleOptions !== false : true,
+      showScoreAfterSubmit: realExam ? realExam.showScoreAfterSubmit !== false : true,
+      questionCount: realExam?.questions?.length || 10,
+      randomQuestionCount: realExam?.randomQuestionCount
     };
 
     const mockStudent = {
@@ -1556,7 +1602,16 @@ export const api = {
         if (errJson?.error) throw new Error(errJson.error);
       }
     } catch (err: any) {
-      if (err?.status === 401 || err?.status === 403 || err?.message?.includes('khóa') || err?.message?.includes('quá số lần') || err?.message?.includes('mật khẩu')) {
+      if (
+        err?.status === 401 ||
+        err?.status === 403 ||
+        err?.message?.includes('khóa') ||
+        err?.message?.includes('quá số lần') ||
+        err?.message?.includes('mật khẩu') ||
+        err?.message?.includes('chưa bắt đầu') ||
+        err?.message?.includes('kết thúc') ||
+        err?.message?.includes('Ca thi')
+      ) {
         throw err;
       }
       console.warn('[Vercel Serverless Fallback] Server 500/offline on /api/student/start, starting offline exam session:', err);
@@ -1576,6 +1631,29 @@ export const api = {
     }
     if (!exam) {
       exam = (cachedExams && cachedExams.length > 0) ? (cachedExams.find(e => e.isOpen) || cachedExams[0]) : (SEED_APP_DATA.exams[0] as any);
+    }
+
+    const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((params.studentClass || '').trim());
+    if (!isTestClass && exam) {
+      const now = new Date();
+      if (exam.startTime && new Date(exam.startTime) > now) {
+        const timeStr = new Date(exam.startTime).toLocaleTimeString('vi-VN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          day: '2-digit',
+          month: '2-digit'
+        });
+        throw new Error(`Ca thi này chưa bắt đầu. Thời gian mở ca thi: ${timeStr}. Em vui lòng quay lại sau!`);
+      }
+      if (exam.endTime && new Date(exam.endTime) < now) {
+        const timeStr = new Date(exam.endTime).toLocaleTimeString('vi-VN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          day: '2-digit',
+          month: '2-digit'
+        });
+        throw new Error(`Ca thi này đã kết thúc vào lúc ${timeStr}. Em không thể vào làm bài được nữa.`);
+      }
     }
 
     const allQ = (exam?.questions && Array.isArray(exam.questions) && exam.questions.length > 0)

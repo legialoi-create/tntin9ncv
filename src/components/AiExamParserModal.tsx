@@ -18,7 +18,12 @@ import {
   Bot,
   MessageSquare,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Clock,
+  Calendar,
+  CalendarClock,
+  Timer,
+  Info
 } from 'lucide-react';
 import { Exam, Question, QuestionOption, GradeLevel } from '../types';
 import { api } from '../services/api';
@@ -66,6 +71,42 @@ export const AiExamParserModal: React.FC<AiExamParserModalProps> = ({
     return matching.length > 0 ? matching : [`${initGrade}A`, `${initGrade}B`];
   });
   const [durationMinutes, setDurationMinutes] = useState(initialExam?.durationMinutes || 45);
+
+  // Format to YYYY-MM-DDTHH:mm for datetime-local input
+  const formatDatetimeForInput = (isoStr?: string) => {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return '';
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch {
+      return '';
+    }
+  };
+
+  const [startTime, setStartTime] = useState<string>(() => formatDatetimeForInput(initialExam?.startTime));
+  const [endTime, setEndTime] = useState<string>(() => formatDatetimeForInput(initialExam?.endTime));
+
+  const setStartNow = () => {
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    setStartTime(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`);
+  };
+
+  const addMinutesToEnd = (mins: number) => {
+    const baseDate = startTime ? new Date(startTime) : new Date();
+    const endDate = new Date(baseDate.getTime() + mins * 60000);
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    setEndTime(`${endDate.getFullYear()}-${pad(endDate.getMonth() + 1)}-${pad(endDate.getDate())}T${pad(endDate.getHours())}:${pad(endDate.getMinutes())}`);
+  };
+
+  const setEndToday = () => {
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    setEndTime(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T23:59`);
+  };
+
   const [shuffleQuestions, setShuffleQuestions] = useState(
     initialExam ? initialExam.shuffleQuestions ?? true : true
   );
@@ -587,6 +628,14 @@ export const AiExamParserModal: React.FC<AiExamParserModalProps> = ({
       missingItems.push('Thời gian làm bài (phải từ 5 đến 180 phút)');
     }
 
+    if (startTime && endTime) {
+      const sMs = new Date(startTime).getTime();
+      const eMs = new Date(endTime).getTime();
+      if (!isNaN(sMs) && !isNaN(eMs) && eMs <= sMs) {
+        missingItems.push('Thời gian kết thúc ca thi phải sau thời gian bắt đầu');
+      }
+    }
+
     if (questions.length === 0) {
       questionsEmpty = true;
       missingItems.push('Danh sách câu hỏi (đề kiểm tra chưa có câu hỏi nào)');
@@ -674,6 +723,8 @@ export const AiExamParserModal: React.FC<AiExamParserModalProps> = ({
         grade: examGrade,
         targetClasses: finalClasses,
         durationMinutes: parsedDuration,
+        startTime: startTime ? new Date(startTime).toISOString() : undefined,
+        endTime: endTime ? new Date(endTime).toISOString() : undefined,
         totalPoints: 10,
         questions,
         randomQuestionCount: validRandom,
@@ -1304,33 +1355,210 @@ D. Danh sách chỉ có 2 phần tử
                   </select>
                 </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 uppercase mb-1 flex items-center justify-between">
-                    <span>Thời gian làm bài (phút)</span>
-                    {missingInfoState?.durationMissing && (
-                      <span className="text-red-600 text-[11px] font-bold">
-                        ⚠️ Nhập thời gian
-                      </span>
-                    )}
-                  </label>
-                  <input
-                    ref={durationInputRef}
-                    type="number"
-                    min={5}
-                    max={120}
-                    value={durationMinutes}
-                    onChange={(e) => {
-                      setDurationMinutes(Number(e.target.value));
-                      if (missingInfoState?.durationMissing && Number(e.target.value) >= 5) {
-                        setMissingInfoState((prev) => (prev ? { ...prev, durationMissing: false } : null));
-                      }
-                    }}
-                    className={`w-full px-3 py-2 bg-white rounded-lg text-sm font-semibold outline-none transition border ${
-                      missingInfoState?.durationMissing
-                        ? 'border-red-500 ring-2 ring-red-300 bg-red-50/50'
-                        : 'border-slate-300 focus:border-indigo-500'
-                    }`}
-                  />
+                {/* DEDICATED EXAM SCHEDULE & DURATION SECTION */}
+                <div className="sm:col-span-2 md:col-span-4 bg-gradient-to-br from-indigo-50/95 via-slate-50 to-purple-50/90 p-4 rounded-xl border border-indigo-200/90 shadow-2xs space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-indigo-100">
+                    <div className="flex items-center space-x-2">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-xs">
+                        <Clock className="w-4 h-4 text-amber-300" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-tight flex items-center space-x-1.5">
+                          <span>Cài đặt Thời gian làm bài & Khung giờ mở ca thi</span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500">
+                          Quy định số phút làm bài và thời gian bắt đầu, kết thúc cho phép học sinh vào phòng thi
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Live Schedule Status Badge */}
+                    <div>
+                      {startTime || endTime ? (
+                        <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200 flex items-center space-x-1.5 shadow-2xs">
+                          <CalendarClock className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Đã lên lịch mở ca thi</span>
+                        </span>
+                      ) : (
+                        <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center space-x-1.5 shadow-2xs">
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Mở tự do (Theo công tắc đề thi)</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                    {/* 1. THỜI GIAN LÀM BÀI (PHÚT) */}
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-2 flex flex-col justify-between">
+                      <div>
+                        <label className="block font-bold text-slate-800 text-xs mb-1.5 flex items-center justify-between">
+                          <span className="flex items-center space-x-1.5 text-indigo-950">
+                            <Timer className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>1. Thời gian làm bài (phút) *</span>
+                          </span>
+                          {missingInfoState?.durationMissing && (
+                            <span className="text-red-600 text-[11px] font-bold">⚠️ Cần nhập</span>
+                          )}
+                        </label>
+                        <input
+                          ref={durationInputRef}
+                          type="number"
+                          min={5}
+                          max={180}
+                          value={durationMinutes}
+                          onChange={(e) => {
+                            setDurationMinutes(Number(e.target.value));
+                            if (missingInfoState?.durationMissing && Number(e.target.value) >= 5) {
+                              setMissingInfoState((prev) => (prev ? { ...prev, durationMissing: false } : null));
+                            }
+                          }}
+                          className={`w-full px-3 py-2 bg-slate-50 border rounded-lg text-sm font-bold text-slate-900 outline-none transition focus:bg-white focus:border-indigo-500 ${
+                            missingInfoState?.durationMissing ? 'border-red-500 ring-2 ring-red-200' : 'border-slate-300'
+                          }`}
+                        />
+                      </div>
+
+                      {/* Quick Presets */}
+                      <div className="pt-1">
+                        <span className="text-[10px] text-slate-400 font-medium block mb-1">Mốc phổ biến:</span>
+                        <div className="flex flex-wrap gap-1">
+                          {[15, 30, 45, 60, 90].map((mins) => (
+                            <button
+                              key={mins}
+                              type="button"
+                              onClick={() => {
+                                setDurationMinutes(mins);
+                                if (missingInfoState?.durationMissing) {
+                                  setMissingInfoState((prev) => (prev ? { ...prev, durationMissing: false } : null));
+                                }
+                              }}
+                              className={`px-2 py-0.5 rounded text-[11px] font-bold transition cursor-pointer border ${
+                                durationMinutes === mins
+                                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                              }`}
+                            >
+                              {mins}p
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 2. THỜI GIAN BẮT ĐẦU */}
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-2 flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="block font-bold text-slate-800 text-xs flex items-center space-x-1.5 text-emerald-950">
+                            <Calendar className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>2. Thời gian bắt đầu</span>
+                          </label>
+                          {startTime && (
+                            <button
+                              type="button"
+                              onClick={() => setStartTime('')}
+                              className="text-[10px] text-red-500 hover:text-red-700 font-semibold underline cursor-pointer"
+                            >
+                              Xóa lịch
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="datetime-local"
+                          value={startTime}
+                          onChange={(e) => setStartTime(e.target.value)}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold text-slate-900 outline-none transition focus:bg-white focus:border-indigo-500 cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Quick Helpers for Start */}
+                      <div className="pt-1 flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={setStartNow}
+                          className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-[11px] font-bold cursor-pointer transition"
+                        >
+                          ⚡ Bắt đầu ngay
+                        </button>
+                        <span className="text-[10px] text-slate-400">
+                          {startTime ? `Mở lúc: ${new Date(startTime).toLocaleTimeString('vi-VN')} ${new Date(startTime).toLocaleDateString('vi-VN')}` : '(Để trống: mở tự do)'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* 3. THỜI GIAN KẾT THÚC */}
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-2 flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="block font-bold text-slate-800 text-xs flex items-center space-x-1.5 text-purple-950">
+                            <CalendarClock className="w-3.5 h-3.5 text-purple-600" />
+                            <span>3. Thời gian kết thúc</span>
+                          </label>
+                          {endTime && (
+                            <button
+                              type="button"
+                              onClick={() => setEndTime('')}
+                              className="text-[10px] text-red-500 hover:text-red-700 font-semibold underline cursor-pointer"
+                            >
+                              Không giới hạn
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="datetime-local"
+                          value={endTime}
+                          onChange={(e) => setEndTime(e.target.value)}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold text-slate-900 outline-none transition focus:bg-white focus:border-indigo-500 cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Quick Helpers for End */}
+                      <div className="pt-1 flex flex-wrap items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => addMinutesToEnd(durationMinutes || 45)}
+                          className="px-2 py-0.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded text-[11px] font-bold cursor-pointer transition"
+                          title="Cộng thêm thời gian làm bài vào giờ kết thúc"
+                        >
+                          +{durationMinutes || 45}p
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addMinutesToEnd(90)}
+                          className="px-2 py-0.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded text-[11px] font-bold cursor-pointer transition"
+                        >
+                          +90p
+                        </button>
+                        <button
+                          type="button"
+                          onClick={setEndToday}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded text-[11px] font-semibold cursor-pointer transition"
+                        >
+                          Hết ngày
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Schedule Explanatory & Rule Box */}
+                  <div className="text-[11px] text-slate-600 bg-white/80 p-2.5 rounded-lg border border-indigo-100/90 flex items-start space-x-2">
+                    <Info className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <p>
+                        <b>Quy chế thi THCS Nam Cửa Việt:</b> Mỗi học sinh khi vào phòng thi sẽ có đúng <b>{durationMinutes} phút</b> làm bài đếm ngược.
+                      </p>
+                      {startTime || endTime ? (
+                        <p className="text-indigo-800 font-semibold">
+                          📅 Ca thi này được bảo vệ bởi khung giờ: {startTime ? `từ ${new Date(startTime).toLocaleTimeString('vi-VN')} ngày ${new Date(startTime).toLocaleDateString('vi-VN')}` : 'ngay bây giờ'} {endTime ? `đến ${new Date(endTime).toLocaleTimeString('vi-VN')} ngày ${new Date(endTime).toLocaleDateString('vi-VN')}` : 'không giới hạn'}. Học sinh vào ngoài khung giờ này sẽ không thể làm bài.
+                        </p>
+                      ) : (
+                        <p className="text-slate-500">
+                          💡 Nếu không nhập giờ bắt đầu/kết thúc, bài thi sẽ luôn mở tự do khi giáo viên bật công tắc <b>"Đang mở thi"</b>.
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
                 <div>

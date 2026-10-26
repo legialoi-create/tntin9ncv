@@ -711,6 +711,27 @@ const handleValidateEntry = (req: Request, res: Response) => {
       return res.status(403).json({ error: `Bài kiểm tra "${exam.title}" hiện đang đóng. Vui lòng liên hệ thầy Lê Gia Lợi để mở phòng thi.` });
     }
 
+    const nowMs = Date.now();
+    if (exam.startTime && !isTeacherReq) {
+      const sMs = new Date(exam.startTime).getTime();
+      if (!isNaN(sMs) && nowMs < sMs) {
+        const startStr = new Date(sMs).toLocaleString('vi-VN');
+        return res.status(403).json({
+          error: `Bài kiểm tra "${exam.title}" chưa đến giờ bắt đầu! Ca thi sẽ mở vào lúc: ${startStr}. Em hãy quay lại đúng giờ nhé.`
+        });
+      }
+    }
+
+    if (exam.endTime && !isTeacherReq) {
+      const eMs = new Date(exam.endTime).getTime();
+      if (!isNaN(eMs) && nowMs > eMs) {
+        const endStr = new Date(eMs).toLocaleString('vi-VN');
+        return res.status(403).json({
+          error: `Bài kiểm tra "${exam.title}" đã hết hạn vào lúc: ${endStr}. Ca thi đã kết thúc.`
+        });
+      }
+    }
+
     if (exam.targetClasses && exam.targetClasses.length > 0) {
       const cleanSClass = finalStudentClass.toUpperCase().replace(/[^A-Z0-9]/g, '');
       const sClassNorm = finalStudentClass.trim().toLowerCase();
@@ -980,6 +1001,27 @@ app.post('/api/student/start', (req: Request, res: Response) => {
 
     if (!exam.isOpen && !isTeacherReq && !isTestClass) {
       return res.status(403).json({ error: `Bài kiểm tra "${exam.title}" hiện đang đóng. Vui lòng liên hệ thầy Lê Gia Lợi để mở phòng thi.` });
+    }
+
+    const checkNowMs = Date.now();
+    if (exam.startTime && !isTeacherReq && !isTestClass) {
+      const sMs = new Date(exam.startTime).getTime();
+      if (!isNaN(sMs) && checkNowMs < sMs) {
+        const startStr = new Date(sMs).toLocaleString('vi-VN');
+        return res.status(403).json({
+          error: `Bài kiểm tra "${exam.title}" chưa đến giờ bắt đầu! Ca thi sẽ mở vào lúc: ${startStr}. Em hãy quay lại đúng giờ nhé.`
+        });
+      }
+    }
+
+    if (exam.endTime && !isTeacherReq && !isTestClass) {
+      const eMs = new Date(exam.endTime).getTime();
+      if (!isNaN(eMs) && checkNowMs > eMs) {
+        const endStr = new Date(eMs).toLocaleString('vi-VN');
+        return res.status(403).json({
+          error: `Bài kiểm tra "${exam.title}" đã hết hạn vào lúc: ${endStr}. Ca thi đã kết thúc.`
+        });
+      }
     }
 
   const existingSessions = db.getSessions(exam.id) || [];

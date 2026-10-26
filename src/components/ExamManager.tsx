@@ -17,7 +17,10 @@ import {
   RotateCcw,
   Bot,
   Send,
-  Download
+  Download,
+  Calendar,
+  CalendarClock,
+  Timer
 } from 'lucide-react';
 import { Exam } from '../types';
 import { api } from '../services/api';
@@ -44,6 +47,35 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
   const [search, setSearch] = useState('');
   const [filterGrade, setFilterGrade] = useState<number | 'ALL'>('ALL');
   const [viewingQuestionsExam, setViewingQuestionsExam] = useState<Exam | null>(null);
+
+  const getExamScheduleStatus = (exam: Exam) => {
+    if (!exam.startTime && !exam.endTime) {
+      return { status: 'open_free', label: 'Tự do', color: 'bg-emerald-50 text-emerald-700 border-emerald-200' };
+    }
+    const nowMs = Date.now();
+    const sMs = exam.startTime ? new Date(exam.startTime).getTime() : 0;
+    const eMs = exam.endTime ? new Date(exam.endTime).getTime() : Infinity;
+
+    if (sMs && nowMs < sMs) {
+      return {
+        status: 'upcoming',
+        label: `Mở lúc ${new Date(sMs).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} ${new Date(sMs).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' })}`,
+        color: 'bg-amber-50 text-amber-700 border-amber-200'
+      };
+    }
+    if (eMs && nowMs > eMs) {
+      return {
+        status: 'ended',
+        label: `Đã đóng (${new Date(eMs).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit' })})`,
+        color: 'bg-slate-100 text-slate-600 border-slate-200'
+      };
+    }
+    return {
+      status: 'active',
+      label: 'Đang trong ca thi',
+      color: 'bg-emerald-100 text-emerald-800 border-emerald-300 font-bold'
+    };
+  };
 
   const [examToDelete, setExamToDelete] = useState<{ id: string; title: string } | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -471,6 +503,39 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
                       Tối đa {exam.maxAttempts || 1} lần {Number(exam.maxAttempts) > 1 ? '(Lấy điểm cao nhất)' : ''}
                     </span>
                   </div>
+
+                  {/* Schedule Details */}
+                  <div className="col-span-2 bg-white/95 p-2.5 rounded-lg border border-slate-200 shadow-2xs mt-1">
+                    <div className="flex items-center justify-between text-[11px] mb-1">
+                      <span className="text-slate-700 font-bold flex items-center space-x-1.5">
+                        <CalendarClock className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Khung giờ ca thi:</span>
+                      </span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getExamScheduleStatus(exam).color}`}>
+                        {getExamScheduleStatus(exam).label}
+                      </span>
+                    </div>
+                    {exam.startTime || exam.endTime ? (
+                      <div className="text-[11px] text-slate-700 space-y-0.5 pl-3 border-l-2 border-indigo-400">
+                        {exam.startTime && (
+                          <div className="flex items-center space-x-1">
+                            <span className="text-slate-400">Bắt đầu:</span>
+                            <b className="text-slate-900">{new Date(exam.startTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} ngày {new Date(exam.startTime).toLocaleDateString('vi-VN')}</b>
+                          </div>
+                        )}
+                        {exam.endTime && (
+                          <div className="flex items-center space-x-1">
+                            <span className="text-slate-400">Kết thúc:</span>
+                            <b className="text-slate-900">{new Date(exam.endTime).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} ngày {new Date(exam.endTime).toLocaleDateString('vi-VN')}</b>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-slate-400 pl-3 border-l-2 border-slate-200">
+                        Không hẹn giờ (Mở tự do theo công tắc)
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Settings labels */}
@@ -547,15 +612,6 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
                 </div>
 
                 <div className="flex space-x-1.5 items-center">
-                  {onTestExam && (
-                    <button
-                      onClick={() => onTestExam(exam.code)}
-                      className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition cursor-pointer flex items-center space-x-1 shadow-2xs"
-                      title="Đóng vai là học sinh để trực tiếp làm thử bài thi này"
-                    >
-                      <span>🎯 Thi thử (Đóng vai HS)</span>
-                    </button>
-                  )}
                   <button
                     onClick={() => onOpenProctor(exam.id)}
                     className="px-2.5 py-1.5 bg-red-50 hover:bg-red-100 text-red-700 rounded-lg text-xs font-bold transition cursor-pointer"

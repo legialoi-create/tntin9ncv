@@ -9,6 +9,8 @@ import {
   ShieldAlert,
   AlertCircle,
   Clock,
+  Calendar,
+  CalendarClock,
   CheckCircle2,
   Lock,
   RotateCw,
@@ -113,6 +115,69 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     }>;
     message: string;
   } | null>(null);
+
+  const [blockedScheduleInfo, setBlockedScheduleInfo] = useState<{
+    type: 'not_started' | 'ended';
+    examTitle: string;
+    timeStr: string;
+    message: string;
+  } | null>(null);
+
+  const formatVietnameseDatetime = (isoStr?: string) => {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return '';
+      return d.toLocaleString('vi-VN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+      });
+    } catch {
+      return '';
+    }
+  };
+
+  const getExamScheduleStatus = (exam?: Exam | any) => {
+    if (!exam) return { status: 'always_open' as const, label: 'Mở tự do' };
+    const now = Date.now();
+    if (exam.startTime) {
+      const sMs = new Date(exam.startTime).getTime();
+      if (!isNaN(sMs) && now < sMs) {
+        return {
+          status: 'not_started' as const,
+          label: 'Chưa đến giờ thi',
+          formattedStart: formatVietnameseDatetime(exam.startTime),
+          formattedEnd: formatVietnameseDatetime(exam.endTime)
+        };
+      }
+    }
+    if (exam.endTime) {
+      const eMs = new Date(exam.endTime).getTime();
+      if (!isNaN(eMs) && now > eMs) {
+        return {
+          status: 'ended' as const,
+          label: 'Đã kết thúc ca thi',
+          formattedStart: formatVietnameseDatetime(exam.startTime),
+          formattedEnd: formatVietnameseDatetime(exam.endTime)
+        };
+      }
+    }
+    if (exam.startTime || exam.endTime) {
+      return {
+        status: 'active' as const,
+        label: 'Đang trong ca thi',
+        formattedStart: formatVietnameseDatetime(exam.startTime),
+        formattedEnd: formatVietnameseDatetime(exam.endTime)
+      };
+    }
+    return {
+      status: 'always_open' as const,
+      label: 'Mở tự do'
+    };
+  };
 
   useEffect(() => {
     // Load class list from backend
@@ -271,6 +336,30 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       return;
     }
 
+    const targetExam = exams.find((e) => e.code === codeToValidate || e.id === selectedExamId);
+    const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test(studentClass.trim());
+    if (targetExam && !isTestClass) {
+      const sched = getExamScheduleStatus(targetExam);
+      if (sched.status === 'not_started') {
+        setBlockedScheduleInfo({
+          type: 'not_started',
+          examTitle: targetExam.title,
+          timeStr: sched.formattedStart || '',
+          message: `Bài kiểm tra "${targetExam.title}" chưa đến giờ bắt đầu! Ca thi sẽ mở vào lúc: ${sched.formattedStart}. Em hãy quay lại đúng giờ để vào thi nhé.`
+        });
+        return;
+      }
+      if (sched.status === 'ended') {
+        setBlockedScheduleInfo({
+          type: 'ended',
+          examTitle: targetExam.title,
+          timeStr: sched.formattedEnd || '',
+          message: `Bài kiểm tra "${targetExam.title}" đã kết thúc vào lúc: ${sched.formattedEnd}. Thời gian làm bài cho ca này đã hết, hệ thống không còn nhận học sinh vào thi.`
+        });
+        return;
+      }
+    }
+
     const selectedStudent = classStudents.find((s) => s.id === selectedStudentId);
     const assignedUsername = selectedStudent?.username || computeUsername(studentName, studentClass);
 
@@ -299,8 +388,25 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       });
       setCurrentPasswordInput(password.trim());
       setBlockedAttemptInfo(null);
+      setBlockedScheduleInfo(null);
     } catch (err: any) {
-      if (
+      if (err.message && (err.message.includes('chưa đến giờ') || err.message.includes('chưa bắt đầu'))) {
+        setBlockedScheduleInfo({
+          type: 'not_started',
+          examTitle: targetExam?.title || 'Bài kiểm tra',
+          timeStr: targetExam?.startTime ? formatVietnameseDatetime(targetExam.startTime) : '',
+          message: err.message
+        });
+        setErrorMsg(null);
+      } else if (err.message && (err.message.includes('đã hết hạn') || err.message.includes('đã kết thúc') || err.message.includes('kết thúc vào lúc'))) {
+        setBlockedScheduleInfo({
+          type: 'ended',
+          examTitle: targetExam?.title || 'Bài kiểm tra',
+          timeStr: targetExam?.endTime ? formatVietnameseDatetime(targetExam.endTime) : '',
+          message: err.message
+        });
+        setErrorMsg(null);
+      } else if (
         err.data?.hasCompletedAllAttempts ||
         (err.data?.attemptsMade !== undefined && err.data?.attemptsMade >= (err.data?.maxAttempts || 1)) ||
         (err.message && (err.message.includes('quá số lần') || err.message.includes('hoàn thành đủ')))
@@ -327,8 +433,32 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
 
   const handleConfirmStart = async () => {
     if (!verifiedInfo) return;
-    setIsLoading(true);
     setErrorMsg(null);
+
+    const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((verifiedInfo.student?.class || '').trim());
+    if (!isTestClass) {
+      const sched = getExamScheduleStatus(verifiedInfo.exam);
+      if (sched.status === 'not_started') {
+        setBlockedScheduleInfo({
+          type: 'not_started',
+          examTitle: verifiedInfo.exam.title,
+          timeStr: sched.formattedStart || '',
+          message: `Bài kiểm tra "${verifiedInfo.exam.title}" chưa đến giờ bắt đầu! Ca thi sẽ mở vào lúc: ${sched.formattedStart}. Em hãy quay lại đúng giờ để vào thi nhé.`
+        });
+        return;
+      }
+      if (sched.status === 'ended') {
+        setBlockedScheduleInfo({
+          type: 'ended',
+          examTitle: verifiedInfo.exam.title,
+          timeStr: sched.formattedEnd || '',
+          message: `Bài kiểm tra "${verifiedInfo.exam.title}" đã kết thúc vào lúc: ${sched.formattedEnd}. Thời gian làm bài cho ca này đã hết.`
+        });
+        return;
+      }
+    }
+
+    setIsLoading(true);
 
     // Request fullscreen immediately inside user click gesture
     try {
@@ -351,8 +481,26 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
 
       onStartExam(res, verifiedInfo.exam, verifiedInfo.student);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Không thể bắt đầu làm bài thi. Vui lòng kiểm tra lại phòng thi hoặc liên hệ giáo viên.');
       setIsLoading(false);
+      if (err.message && (err.message.includes('chưa đến giờ') || err.message.includes('chưa bắt đầu'))) {
+        setBlockedScheduleInfo({
+          type: 'not_started',
+          examTitle: verifiedInfo.exam.title,
+          timeStr: verifiedInfo.exam.startTime ? formatVietnameseDatetime(verifiedInfo.exam.startTime) : '',
+          message: err.message
+        });
+        return;
+      }
+      if (err.message && (err.message.includes('đã hết hạn') || err.message.includes('đã kết thúc') || err.message.includes('kết thúc vào lúc'))) {
+        setBlockedScheduleInfo({
+          type: 'ended',
+          examTitle: verifiedInfo.exam.title,
+          timeStr: verifiedInfo.exam.endTime ? formatVietnameseDatetime(verifiedInfo.exam.endTime) : '',
+          message: err.message
+        });
+        return;
+      }
+      setErrorMsg(err.message || 'Không thể bắt đầu làm bài thi. Vui lòng kiểm tra lại phòng thi hoặc liên hệ giáo viên.');
     }
   };
 
@@ -481,46 +629,148 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                       <option value="">
                         -- Chọn bài kiểm tra từ danh sách ({exams.length} bài) --
                       </option>
-                      {exams.map((ex) => (
-                        <option key={ex.id} value={ex.id}>
-                          {ex.title} (Khối {ex.grade} - {ex.durationMinutes} phút) {!ex.isOpen ? '🔒 [Chưa mở]' : '🟢 [Đang mở]'}
-                        </option>
-                      ))}
+                      {exams.map((ex) => {
+                        const sched = getExamScheduleStatus(ex);
+                        let schedTag = '';
+                        if (sched.status === 'not_started') {
+                          schedTag = ` [⏰ Chưa đến giờ thi - Mở: ${sched.formattedStart}]`;
+                        } else if (sched.status === 'ended') {
+                          schedTag = ` [🛑 Đã kết thúc lúc: ${sched.formattedEnd}]`;
+                        } else if (!ex.isOpen) {
+                          schedTag = ' [🔒 Tạm đóng]';
+                        } else {
+                          schedTag = ' [🟢 Đang mở]';
+                        }
+                        return (
+                          <option key={ex.id} value={ex.id}>
+                            {ex.title} (Khối {ex.grade} - {ex.durationMinutes} phút){schedTag}
+                          </option>
+                        );
+                      })}
                       <option value="__custom__">
                         ✏️ Tự gõ mã khác (nếu cần nhập mã riêng)
                       </option>
                     </select>
                   </div>
 
-                  {selectedExam && (
-                    <div className="mt-1.5 p-2 sm:p-2.5 bg-gradient-to-r from-indigo-50/90 to-blue-50/90 border border-indigo-200/80 rounded-lg flex flex-wrap items-center justify-between gap-1.5 text-xs">
-                      <div className="flex items-center space-x-2">
-                        <div className={`w-2 h-2 rounded-full ${selectedExam.isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-                        <div>
-                          <div className="font-bold text-slate-900 text-xs sm:text-sm leading-tight">{selectedExam.title}</div>
-                          <div className="text-slate-600 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
-                            <span className="font-semibold text-indigo-700">Khối {selectedExam.grade}</span>
-                            <span>•</span>
-                            <span>Thời gian: <b>{selectedExam.durationMinutes} phút</b></span>
-                            <span>•</span>
-                            <span>
-                              Số câu:{' '}
-                              <b>
-                                {selectedExam.randomQuestionCount &&
-                                selectedExam.randomQuestionCount > 0 &&
-                                selectedExam.randomQuestionCount < ((selectedExam as any).questionCount || selectedExam.questions?.length || 0)
-                                  ? `${selectedExam.randomQuestionCount} câu (bốc ngẫu nhiên / ${(selectedExam as any).questionCount || selectedExam.questions?.length || 0} câu)`
-                                  : `${(selectedExam as any).questionCount || selectedExam.questions?.length || 0} câu`}
-                              </b>
+                  {selectedExam && (() => {
+                    const sched = getExamScheduleStatus(selectedExam);
+                    return (
+                      <div className="mt-1.5 space-y-1.5">
+                        <div className="p-2 sm:p-2.5 bg-gradient-to-r from-indigo-50/90 to-blue-50/90 border border-indigo-200/80 rounded-lg flex flex-wrap items-center justify-between gap-1.5 text-xs">
+                          <div className="flex items-center space-x-2">
+                            <div className={`w-2 h-2 rounded-full ${selectedExam.isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                            <div>
+                              <div className="font-bold text-slate-900 text-xs sm:text-sm leading-tight">{selectedExam.title}</div>
+                              <div className="text-slate-600 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                                <span className="font-semibold text-indigo-700">Khối {selectedExam.grade}</span>
+                                <span>•</span>
+                                <span>Thời gian: <b>{selectedExam.durationMinutes} phút</b></span>
+                                <span>•</span>
+                                <span>
+                                  Số câu:{' '}
+                                  <b>
+                                    {selectedExam.randomQuestionCount &&
+                                    selectedExam.randomQuestionCount > 0 &&
+                                    selectedExam.randomQuestionCount < ((selectedExam as any).questionCount || selectedExam.questions?.length || 0)
+                                      ? `${selectedExam.randomQuestionCount} câu (bốc ngẫu nhiên / ${(selectedExam as any).questionCount || selectedExam.questions?.length || 0} câu)`
+                                      : `${(selectedExam as any).questionCount || selectedExam.questions?.length || 0} câu`}
+                                  </b>
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded-full font-bold text-[10px] sm:text-[11px] ${
+                              sched.status === 'not_started'
+                                ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                : sched.status === 'ended'
+                                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                : selectedExam.isOpen
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                : 'bg-slate-100 text-slate-800 border border-slate-200'
+                            }`}
+                          >
+                            {sched.status === 'not_started'
+                              ? '⏰ Chưa đến giờ thi'
+                              : sched.status === 'ended'
+                              ? '🛑 Đã kết thúc ca thi'
+                              : selectedExam.isOpen
+                              ? '🟢 Đang mở phòng thi'
+                              : '🔒 Chưa mở phòng thi'}
+                          </span>
+                        </div>
+
+                        {/* Standout Schedule Alert if Not Started */}
+                        {sched.status === 'not_started' && (
+                          <div className="p-3 bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-300 rounded-xl flex items-start space-x-3 text-amber-950 shadow-xs animate-in fade-in">
+                            <div className="w-8 h-8 rounded-lg bg-amber-500 text-white flex items-center justify-center shrink-0">
+                              <Clock className="w-5 h-5 animate-pulse" />
+                            </div>
+                            <div className="flex-1">
+                              <div className="flex items-center justify-between">
+                                <h4 className="font-extrabold text-xs sm:text-sm text-amber-900 uppercase tracking-tight">
+                                  CHƯA ĐẾN THỜI GIAN LÀM BÀI
+                                </h4>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
+                                  Chưa mở ca
+                                </span>
+                              </div>
+                              <p className="text-xs text-amber-800 mt-1 leading-relaxed">
+                                Ca thi này chưa bắt đầu. Thời gian mở ca thi chính thức: <b className="font-bold text-indigo-900 underline">{sched.formattedStart}</b>.
+                              </p>
+                              <p className="text-[11px] text-amber-700 mt-1 italic">
+                                💡 Em vui lòng quay lại đúng giờ để đăng nhập và làm bài kiểm tra nhé!
+                              </p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Standout Schedule Alert if Ended */}
+                        {sched.status === 'ended' && (
+                          <div className="p-3 bg-gradient-to-r from-rose-50 to-red-50 border-2 border-rose-300 rounded-xl flex items-start space-x-3 text-rose-950 shadow-xs animate-in fade-in">
+                            <div className="w-8 h-8 rounded-lg bg-rose-600 text-white flex items-center justify-center shrink-0">
+                              <ShieldAlert className="w-5 h-5" />
+                            </div>
+                            <div className="flex-1">
+                              <div className="flex items-center justify-between">
+                                <h4 className="font-extrabold text-xs sm:text-sm text-rose-950 uppercase tracking-tight">
+                                  ĐÃ KẾT THÚC THỜI GIAN THI
+                                </h4>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-200 text-rose-900 border border-rose-300">
+                                  Đã đóng ca
+                                </span>
+                              </div>
+                              <p className="text-xs text-rose-900 mt-1 leading-relaxed">
+                                Ca thi này đã kết thúc vào lúc: <b className="font-bold text-rose-950 underline">{sched.formattedEnd}</b>.
+                              </p>
+                              <p className="text-[11px] text-rose-800 mt-1 font-medium">
+                                Thời gian làm bài cho ca này đã hết. Hệ thống không nhận thêm học sinh vào phòng thi.
+                              </p>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Active Schedule Info */}
+                        {sched.status === 'active' && (
+                          <div className="p-2.5 bg-emerald-50 border border-emerald-300 rounded-lg flex items-center justify-between text-xs text-emerald-950">
+                            <div className="flex items-center space-x-2">
+                              <CalendarClock className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <div>
+                                <span className="font-bold text-emerald-900">Khung giờ mở ca thi:</span>
+                                <span className="ml-1 text-slate-700">
+                                  Từ <b>{sched.formattedStart || 'Mở tự do'}</b> đến <b className="text-rose-700">{sched.formattedEnd || 'Không giới hạn'}</b>
+                                </span>
+                              </div>
+                            </div>
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              🟢 Đang trong ca thi
                             </span>
                           </div>
-                        </div>
+                        )}
                       </div>
-                      <span className={`px-2 py-0.5 rounded-full font-bold text-[10px] sm:text-[11px] ${selectedExam.isOpen ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-amber-100 text-amber-800 border border-amber-200'}`}>
-                        {selectedExam.isOpen ? '🟢 Đang mở phòng thi' : '🔒 Chưa mở phòng thi'}
-                      </span>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   <div className="flex justify-end mt-1">
                     <button
@@ -760,23 +1010,49 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
               </div>
             </div>
 
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full py-2.5 sm:py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold shadow-md shadow-indigo-200 transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50 mt-3 sm:mt-4 text-xs sm:text-sm"
-            >
-              {isLoading ? (
-                <>
-                  <RotateCw className="w-4 h-4 animate-spin" />
-                  <span>Đang xác thực thông tin đăng nhập...</span>
-                </>
-              ) : (
-                <>
-                  <Lock className="w-4 h-4" />
-                  <span>ĐĂNG NHẬP VÀ VÀO PHÒNG THI</span>
-                </>
-              )}
-            </button>
+            {(() => {
+              const isTest = /^(test|thu|demo|gv|giaovien)/i.test((studentClass || '').trim());
+              const sched = selectedExam ? getExamScheduleStatus(selectedExam) : null;
+              const isBlocked = !isTest && sched && (sched.status === 'not_started' || sched.status === 'ended');
+
+              return (
+                <button
+                  type="submit"
+                  disabled={isLoading || Boolean(isBlocked)}
+                  className={`w-full py-2.5 sm:py-3 text-white rounded-xl font-bold shadow-md transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed mt-3 sm:mt-4 text-xs sm:text-sm ${
+                    isBlocked
+                      ? sched.status === 'not_started'
+                        ? 'bg-amber-600 shadow-amber-200 hover:bg-amber-700'
+                        : 'bg-rose-600 shadow-rose-200 hover:bg-rose-700'
+                      : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'
+                  }`}
+                >
+                  {isLoading ? (
+                    <>
+                      <RotateCw className="w-4 h-4 animate-spin" />
+                      <span>Đang xác thực thông tin đăng nhập...</span>
+                    </>
+                  ) : isBlocked ? (
+                    sched.status === 'not_started' ? (
+                      <>
+                        <Clock className="w-4 h-4" />
+                        <span>CHƯA ĐẾN GIỜ THI (MỞ: {sched.formattedStart})</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldAlert className="w-4 h-4" />
+                        <span>CA THI ĐÃ KẾT THÚC (LÚC: {sched.formattedEnd})</span>
+                      </>
+                    )
+                  ) : (
+                    <>
+                      <Lock className="w-4 h-4" />
+                      <span>ĐĂNG NHẬP VÀ VÀO PHÒNG THI</span>
+                    </>
+                  )}
+                </button>
+              );
+            })()}
           </form>
         </div>
       ) : (
@@ -862,6 +1138,24 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                 )}
               </span>
             </div>
+            {(verifiedInfo.exam.startTime || verifiedInfo.exam.endTime) && (
+              <div className="col-span-2 sm:col-span-3 bg-indigo-50/80 border border-indigo-200/80 rounded-lg p-2.5 flex items-start space-x-2 text-indigo-950 mt-1">
+                <CalendarClock className="w-4 h-4 text-indigo-600 mt-0.5 shrink-0" />
+                <div className="text-xs">
+                  <span className="font-bold text-indigo-900">Khung giờ mở ca thi: </span>
+                  {verifiedInfo.exam.startTime ? (
+                    <span>Từ <b className="text-indigo-700">{new Date(verifiedInfo.exam.startTime).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' })}</b></span>
+                  ) : (
+                    <span>Mở tự do</span>
+                  )}
+                  {verifiedInfo.exam.endTime ? (
+                    <span> đến <b className="text-rose-700">{new Date(verifiedInfo.exam.endTime).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' })}</b></span>
+                  ) : (
+                    <span> (Không giới hạn đóng)</span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Ô ĐỔI MẬT KHẨU CHO HỌC SINH TRƯỚC KHI VÀO THI */}
@@ -1081,36 +1375,92 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
             </ul>
           </div>
 
-          <div className="flex space-x-2.5 pt-1">
-            <button
-              onClick={() => setVerifiedInfo(null)}
-              className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium text-xs sm:text-sm transition cursor-pointer"
-            >
-              Quay lại sửa thông tin
-            </button>
+          {(() => {
+            const isTest = /^(test|thu|demo|gv|giaovien)/i.test((verifiedInfo.student?.class || '').trim());
+            const sched = getExamScheduleStatus(verifiedInfo.exam);
+            const isBlocked = !isTest && (sched.status === 'not_started' || sched.status === 'ended');
 
-            <button
-              onClick={handleConfirmStart}
-              disabled={isLoading}
-              className="flex-1 py-2.5 sm:py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-md shadow-emerald-200 transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50 text-xs sm:text-sm"
-            >
-              {isLoading ? (
-                <>
-                  <RotateCw className="w-4 h-4 animate-spin" />
-                  <span>Đang khởi tạo bài thi...</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-current" />
-                  <span>
-                    {verifiedInfo.attemptsMade && verifiedInfo.attemptsMade > 0
-                      ? `BẮT ĐẦU LÀM LẦN ${verifiedInfo.nextAttemptNumber || (verifiedInfo.attemptsMade + 1)} (ĐẢO ĐỀ MỚI)`
-                      : 'BẮT ĐẦU KIỂM TRA'}
-                  </span>
-                </>
-              )}
-            </button>
-          </div>
+            return (
+              <div className="space-y-2.5 pt-1">
+                {isBlocked && (
+                  <div
+                    className={`p-3 rounded-xl border flex items-start space-x-2.5 text-xs font-semibold ${
+                      sched.status === 'not_started'
+                        ? 'bg-amber-50 border-amber-300 text-amber-950'
+                        : 'bg-rose-50 border-rose-300 text-rose-950'
+                    }`}
+                  >
+                    {sched.status === 'not_started' ? (
+                      <Clock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <ShieldAlert className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                    )}
+                    <div>
+                      <p className="font-bold text-sm">
+                        {sched.status === 'not_started'
+                          ? 'CHƯA ĐẾN THỜI GIAN LÀM BÀI'
+                          : 'ĐÃ KẾT THÚC THỜI GIAN THI'}
+                      </p>
+                      <p className="mt-0.5 font-normal">
+                        {sched.status === 'not_started'
+                          ? `Ca thi sẽ chính thức mở vào lúc: ${sched.formattedStart}. Em vui lòng đợi đến giờ mở ca để vào làm bài.`
+                          : `Ca thi đã kết thúc vào lúc: ${sched.formattedEnd}. Thời gian làm bài cho ca này đã hết.`}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex space-x-2.5">
+                  <button
+                    onClick={() => setVerifiedInfo(null)}
+                    className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium text-xs sm:text-sm transition cursor-pointer"
+                  >
+                    Quay lại sửa thông tin
+                  </button>
+
+                  <button
+                    onClick={handleConfirmStart}
+                    disabled={isLoading || Boolean(isBlocked)}
+                    className={`flex-1 py-2.5 sm:py-3 text-white rounded-xl font-bold shadow-md transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed text-xs sm:text-sm ${
+                      isBlocked
+                        ? sched.status === 'not_started'
+                          ? 'bg-amber-600 shadow-amber-200'
+                          : 'bg-rose-600 shadow-rose-200'
+                        : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-200'
+                    }`}
+                  >
+                    {isLoading ? (
+                      <>
+                        <RotateCw className="w-4 h-4 animate-spin" />
+                        <span>Đang khởi tạo bài thi...</span>
+                      </>
+                    ) : isBlocked ? (
+                      sched.status === 'not_started' ? (
+                        <>
+                          <Clock className="w-4 h-4" />
+                          <span>CHƯA ĐẾN GIỜ MỞ CA THI</span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldAlert className="w-4 h-4" />
+                          <span>CA THI ĐÃ KẾT THÚC</span>
+                        </>
+                      )
+                    ) : (
+                      <>
+                        <Play className="w-4 h-4 fill-current" />
+                        <span>
+                          {verifiedInfo.attemptsMade && verifiedInfo.attemptsMade > 0
+                            ? `BẮT ĐẦU LÀM LẦN ${verifiedInfo.nextAttemptNumber || (verifiedInfo.attemptsMade + 1)} (ĐẢO ĐỀ MỚI)`
+                            : 'BẮT ĐẦU KIỂM TRA'}
+                        </span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1228,6 +1578,108 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                 type="button"
                 onClick={() => setBlockedAttemptInfo(null)}
                 className="px-5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+              >
+                Đã hiểu và Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Blocked Schedule Modal: Not yet started OR already ended */}
+      {blockedScheduleInfo && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border max-w-lg w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div
+              className={`px-6 py-5 text-white flex items-center justify-between ${
+                blockedScheduleInfo.type === 'not_started'
+                  ? 'bg-gradient-to-r from-amber-600 to-orange-600'
+                  : 'bg-gradient-to-r from-rose-600 to-red-700'
+              }`}
+            >
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+                  {blockedScheduleInfo.type === 'not_started' ? (
+                    <Clock className="w-6 h-6 text-white" />
+                  ) : (
+                    <ShieldAlert className="w-6 h-6 text-white" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base uppercase tracking-tight">
+                    {blockedScheduleInfo.type === 'not_started'
+                      ? 'CHƯA ĐẾN THỜI GIAN LÀM BÀI'
+                      : 'ĐÃ KẾT THÚC THỜI GIAN THI'}
+                  </h3>
+                  <p className="text-xs text-white/90">
+                    {blockedScheduleInfo.type === 'not_started'
+                      ? 'Ca thi chưa mở nhận học sinh'
+                      : 'Hệ thống đã đóng phòng thi'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBlockedScheduleInfo(null)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div
+                className={`p-4 rounded-xl border text-xs space-y-2.5 ${
+                  blockedScheduleInfo.type === 'not_started'
+                    ? 'bg-amber-50/80 border-amber-200 text-amber-950'
+                    : 'bg-rose-50/80 border-rose-200 text-rose-950'
+                }`}
+              >
+                <div className="flex justify-between items-center border-b border-black/5 pb-2">
+                  <span className="text-slate-600 font-medium">Bài kiểm tra:</span>
+                  <span className="font-bold text-slate-900 text-sm">{blockedScheduleInfo.examTitle}</span>
+                </div>
+                <div className="flex justify-between items-center border-b border-black/5 pb-2">
+                  <span className="text-slate-600 font-medium">
+                    {blockedScheduleInfo.type === 'not_started' ? 'Thời gian mở ca thi:' : 'Thời gian kết thúc:'}
+                  </span>
+                  <span
+                    className={`font-mono font-bold text-sm ${
+                      blockedScheduleInfo.type === 'not_started' ? 'text-amber-700' : 'text-rose-700'
+                    }`}
+                  >
+                    {blockedScheduleInfo.timeStr || 'Theo lịch giáo viên'}
+                  </span>
+                </div>
+                <div className="pt-1">
+                  <p className="leading-relaxed font-medium">
+                    {blockedScheduleInfo.message}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-700 space-y-1">
+                <p className="font-bold text-slate-800 flex items-center space-x-1.5">
+                  <CalendarClock className="w-4 h-4 text-indigo-600" />
+                  <span>Hướng dẫn dành cho học sinh:</span>
+                </p>
+                <p className="text-[11px] leading-relaxed text-slate-600">
+                  {blockedScheduleInfo.type === 'not_started'
+                    ? 'Em vui lòng kiểm tra đồng hồ và quay lại phòng thi đúng giờ quy định. Hệ thống sẽ tự động mở đề thi chính xác theo mốc thời gian trên.'
+                    : 'Thời gian làm bài quy định cho ca thi này đã kết thúc. Nếu em có lý do chính đáng hoặc gặp sự cố bất khả kháng, vui lòng gặp trực tiếp thầy Lê Gia Lợi tại phòng Tin học.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setBlockedScheduleInfo(null)}
+                className={`px-5 py-2.5 text-white rounded-xl text-xs font-bold transition cursor-pointer ${
+                  blockedScheduleInfo.type === 'not_started'
+                    ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-200'
+                    : 'bg-rose-700 hover:bg-rose-800 shadow-rose-200'
+                }`}
               >
                 Đã hiểu và Đóng
               </button>
