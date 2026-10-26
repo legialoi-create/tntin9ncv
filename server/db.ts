@@ -67,19 +67,41 @@ export function verifyPassword(inputPassword: string, storedPasswordOrHash: stri
 }
 
 // Username & Default Password generator functions
-export function generateStudentUsername(fullName: string, className: string): string {
+export function generateStudentUsername(fullName: string, className: string, classStudentsList?: StudentInfo[]): string {
   if (!fullName) return '';
-  const words = fullName.trim().split(/\s+/).filter(Boolean);
-  const lastTwo = words.length >= 2 ? words.slice(-2).join('') : words.join('');
-  const cleanName = lastTwo
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/đ/g, 'd')
-    .replace(/Đ/g, 'D')
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toLowerCase();
   const cleanClass = (className || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-  return `${cleanName}${cleanClass}`;
+
+  const getClean = (nameStr: string, wordCount: number) => {
+    const words = nameStr.trim().split(/\s+/).filter(Boolean);
+    const selected = words.length >= wordCount ? words.slice(-wordCount).join('') : words.join('');
+    return selected
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/đ/g, 'd')
+      .replace(/Đ/g, 'D')
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .toLowerCase();
+  };
+
+  const clean2 = getClean(fullName, 2);
+  const candidate2 = `${clean2}${cleanClass}`;
+
+  if (classStudentsList && classStudentsList.length > 0) {
+    const curNorm = fullName.trim().toLowerCase();
+    const hasCollision = classStudentsList.some((st) => {
+      if (!st.name) return false;
+      if (st.name.trim().toLowerCase() === curNorm) return false;
+      const other2 = getClean(st.name, 2);
+      return `${other2}${cleanClass}` === candidate2;
+    });
+
+    if (hasCollision) {
+      const clean3 = getClean(fullName, 3);
+      return `${clean3}${cleanClass}`;
+    }
+  }
+
+  return candidate2;
 }
 
 export function getDefaultStudentPassword(className: string): string {
@@ -693,7 +715,7 @@ class DatabaseManager {
     const defaultPass = getDefaultStudentPassword(className);
     const normalized = classStudents.map(s => ({
       ...s,
-      username: s.username || generateStudentUsername(s.name, s.class || className),
+      username: s.username || generateStudentUsername(s.name, s.class || className, classStudents),
       password: s.password || defaultPass,
       isPasswordChanged: !!s.isPasswordChanged
     }));
@@ -717,9 +739,10 @@ class DatabaseManager {
   public generateAccountsForClass(className: string): StudentInfo[] {
     const trimmed = className.trim().toLowerCase();
     const defaultPass = getDefaultStudentPassword(className);
+    const studentsInClass = this.data.students.filter(s => s.class.trim().toLowerCase() === trimmed);
     this.data.students.forEach(s => {
       if (s.class.trim().toLowerCase() === trimmed) {
-        s.username = generateStudentUsername(s.name, s.class);
+        s.username = generateStudentUsername(s.name, s.class, studentsInClass);
         if (!s.password) {
           s.password = defaultPass;
           s.isPasswordChanged = false;
@@ -740,7 +763,8 @@ class DatabaseManager {
       (s.username && s.username.toLowerCase() === key)
     );
     if (student) {
-      student.username = generateStudentUsername(student.name, student.class);
+      const studentsInClass = this.data.students.filter(s => s.class.trim().toLowerCase() === student.class.trim().toLowerCase());
+      student.username = generateStudentUsername(student.name, student.class, studentsInClass);
       student.password = getDefaultStudentPassword(student.class);
       student.isPasswordChanged = false;
       this.persist();
@@ -752,9 +776,10 @@ class DatabaseManager {
   public resetClassPasswords(className: string): StudentInfo[] {
     const trimmed = (className || '').trim().toLowerCase();
     const defaultPass = getDefaultStudentPassword(className);
+    const studentsInClass = this.data.students.filter(s => s.class && s.class.trim().toLowerCase() === trimmed);
     this.data.students.forEach(s => {
       if (s.class && s.class.trim().toLowerCase() === trimmed) {
-        s.username = generateStudentUsername(s.name, s.class);
+        s.username = generateStudentUsername(s.name, s.class, studentsInClass);
         s.password = defaultPass;
         s.isPasswordChanged = false;
       }

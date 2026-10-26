@@ -60,20 +60,42 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     message: string;
   } | null>(null);
 
-  // Helper to compute username: 2 last words of name + class
-  const computeUsername = (name: string, cls: string) => {
+  // Helper to compute username: 2 last words of name + class, or 3 last words if 2-word clean username collides with another student in class
+  const computeCleanNameWords = (name: string, wordCount: number) => {
     if (!name) return '';
     const words = name.trim().split(/\s+/).filter(Boolean);
-    const lastTwo = words.length >= 2 ? words.slice(-2).join('') : words.join('');
-    const cleanName = lastTwo
+    const selectedWords = words.length >= wordCount ? words.slice(-wordCount).join('') : words.join('');
+    return selectedWords
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/đ/g, 'd')
       .replace(/Đ/g, 'D')
       .replace(/[^a-zA-Z0-9]/g, '')
       .toLowerCase();
+  };
+
+  const computeUsername = (name: string, cls: string, studentList: StudentInfo[] = classStudents) => {
+    if (!name) return '';
     const cleanClass = (cls || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    return `${cleanName}${cleanClass}`;
+    const clean2 = computeCleanNameWords(name, 2);
+    const candidate2 = `${clean2}${cleanClass}`;
+
+    if (studentList && studentList.length > 0) {
+      const normalizedCurrentName = name.trim().toLowerCase();
+      const hasCollision = studentList.some((st) => {
+        if (!st.name) return false;
+        if (st.name.trim().toLowerCase() === normalizedCurrentName) return false;
+        const otherClean2 = computeCleanNameWords(st.name, 2);
+        return `${otherClean2}${cleanClass}` === candidate2;
+      });
+
+      if (hasCollision) {
+        const clean3 = computeCleanNameWords(name, 3);
+        return `${clean3}${cleanClass}`;
+      }
+    }
+
+    return candidate2;
   };
 
   // Class student roster state
@@ -269,14 +291,39 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     if (val === '__custom__') {
       setIsManualExamCode(true);
       setExamCode('');
+      setBlockedScheduleInfo(null);
       return;
     }
 
     const found = exams.find((x) => x.id === val);
     if (found) {
       setExamCode(found.code);
+      const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((studentClass || '').trim());
+      if (!isTestClass) {
+        const sched = getExamScheduleStatus(found);
+        if (sched.status === 'not_started') {
+          setBlockedScheduleInfo({
+            type: 'not_started',
+            examTitle: found.title,
+            timeStr: sched.formattedStart || '',
+            message: `Bài kiểm tra "${found.title}" chưa đến giờ bắt đầu! Ca thi sẽ mở vào lúc: ${sched.formattedStart}. Em hãy quay lại đúng giờ để vào thi nhé.`
+          });
+        } else if (sched.status === 'ended') {
+          setBlockedScheduleInfo({
+            type: 'ended',
+            examTitle: found.title,
+            timeStr: sched.formattedEnd || '',
+            message: `Bài kiểm tra "${found.title}" đã kết thúc vào lúc: ${sched.formattedEnd}. Thời gian làm bài cho ca này đã hết, hệ thống không nhận thêm học sinh vào thi.`
+          });
+        } else {
+          setBlockedScheduleInfo(null);
+        }
+      } else {
+        setBlockedScheduleInfo(null);
+      }
     } else {
       setExamCode('');
+      setBlockedScheduleInfo(null);
     }
   };
 
@@ -361,7 +408,7 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     }
 
     const selectedStudent = classStudents.find((s) => s.id === selectedStudentId);
-    const assignedUsername = selectedStudent?.username || computeUsername(studentName, studentClass);
+    const assignedUsername = selectedStudent?.username || computeUsername(studentName, studentClass, classStudents);
 
     setIsLoading(true);
     try {
@@ -957,11 +1004,11 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                     Tên đăng nhập (Name):
                   </span>
                   <span className="font-mono text-xs font-bold text-indigo-700 bg-white px-1.5 py-0.5 rounded border border-indigo-200">
-                    {computeUsername(studentName, studentClass)}
+                    {computeUsername(studentName, studentClass, classStudents)}
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-400">
-                  (2 chữ cuối tên + lớp)
+                  (2 chữ cuối tên + lớp, trùng lấy 3 chữ)
                 </span>
               </div>
             )}
