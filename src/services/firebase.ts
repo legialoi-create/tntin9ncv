@@ -354,6 +354,7 @@ export async function deleteSubmissionsForExamFromFirestore(
 // 4. Record Deleted Exam in Firestore to permanently prevent resurrection across Vercel cold starts
 export async function recordDeletedExamInFirestore(examId: string, examCode?: string): Promise<void> {
   if (!examId) return;
+  cachedDeletedExams = null;
   const cleanId = examId.trim();
   const upperId = cleanId.toUpperCase();
   const upperCode = examCode ? examCode.trim().toUpperCase() : '';
@@ -398,8 +399,15 @@ export async function recordDeletedExamInFirestore(examId: string, examCode?: st
   }
 }
 
-// 5. Get all deleted exam IDs/codes from Firestore
-export async function getDeletedExamsFromFirestore(): Promise<string[]> {
+// 5. Get all deleted exam IDs/codes from Firestore (with 60-second in-memory cache to minimize read ops)
+let cachedDeletedExams: { ids: string[]; timestamp: number } | null = null;
+
+export async function getDeletedExamsFromFirestore(forceRefresh = false): Promise<string[]> {
+  const now = Date.now();
+  if (!forceRefresh && cachedDeletedExams && now - cachedDeletedExams.timestamp < 60000) {
+    return cachedDeletedExams.ids;
+  }
+
   const ids: string[] = [];
   try {
     const colRef = collection(firestore, 'deleted_exams');
@@ -412,8 +420,10 @@ export async function getDeletedExamsFromFirestore(): Promise<string[]> {
         ids.push(d.id.trim().toUpperCase());
       }
     });
+    cachedDeletedExams = { ids, timestamp: now };
   } catch (err) {
     console.warn('[Firebase] getDeletedExamsFromFirestore error:', err);
+    if (cachedDeletedExams) return cachedDeletedExams.ids;
   }
   return ids;
 }
@@ -421,6 +431,7 @@ export async function getDeletedExamsFromFirestore(): Promise<string[]> {
 // 6. Unmark a deleted exam when teacher explicitly restores or recreates it
 export async function unmarkDeletedExamInFirestore(examId: string, examCode?: string): Promise<void> {
   if (!examId) return;
+  cachedDeletedExams = null;
   const upperId = examId.trim().toUpperCase();
   const upperCode = examCode ? examCode.trim().toUpperCase() : '';
   try {
@@ -436,9 +447,12 @@ export async function unmarkDeletedExamInFirestore(examId: string, examCode?: st
   }
 }
 
+let cachedExams: { list: any[]; timestamp: number } | null = null;
+
 // 7. Save custom exam to Firestore for permanent cross-device persistence
 export async function saveExamToFirestore(exam: any): Promise<void> {
   if (!exam || !exam.id) return;
+  cachedExams = null; // Invalidate cache on write
   try {
     const upperId = String(exam.id).trim().toUpperCase();
     const upperCode = exam.code ? String(exam.code).trim().toUpperCase() : '';
@@ -452,18 +466,18 @@ export async function saveExamToFirestore(exam: any): Promise<void> {
   }
 }
 
-// 8. Get custom exams saved in Firestore
-export async function getExamsFromFirestore(): Promise<any[]> {
+// 8. Get custom exams saved in Firestore (with 60-second in-memory cache)
+export async function getExamsFromFirestore(forceRefresh = false): Promise<any[]> {
+  const now = Date.now();
+  if (!forceRefresh && cachedExams && now - cachedExams.timestamp < 60000) {
+    return cachedExams.list;
+  }
+
   const exams: any[] = [];
   try {
     // Also load deleted exams from Firestore first so we never return deleted exams
-    const deletedSnap = await getDocs(collection(firestore, 'deleted_exams'));
-    const deletedSet = new Set<string>();
-    deletedSnap.forEach((d) => {
-      const data = d.data();
-      if (data && data.id) deletedSet.add(String(data.id).trim().toUpperCase());
-      if (d.id) deletedSet.add(d.id.trim().toUpperCase());
-    });
+    const deletedArr = await getDeletedExamsFromFirestore(forceRefresh);
+    const deletedSet = new Set<string>(deletedArr);
 
     const colRef = collection(firestore, 'exams');
     const snap = await getDocs(colRef);
@@ -477,8 +491,10 @@ export async function getExamsFromFirestore(): Promise<any[]> {
         }
       }
     });
+    cachedExams = { list: exams, timestamp: now };
   } catch (err) {
     console.warn('[Firebase] getExamsFromFirestore error:', err);
+    if (cachedExams) return cachedExams.list;
   }
   return exams;
 }
@@ -503,6 +519,7 @@ export async function saveStudentsToFirestore(students: any[]): Promise<boolean>
       return setDoc(doc(firestore, 'students', docId), payload, { merge: true });
     });
     await Promise.all(promises);
+    cachedStudents = null; // Invalidate cache on student write
     return true;
   } catch (err) {
     console.warn('[Firebase] saveStudentsToFirestore error:', err);
@@ -510,39 +527,54 @@ export async function saveStudentsToFirestore(students: any[]): Promise<boolean>
   }
 }
 
-// 10. Get students from Firestore
-export async function getStudentsFromFirestore(className?: string): Promise<any[]> {
-  const list: any[] = [];
+// In-memory cache for students with 60-second TTL
+let cachedStudents: { list: any[]; timestamp: number } | null = null;
+
+// 10. Get students from Firestore (cached 60s to minimize Firestore reads)
+export async function getStudentsFromFirestore(className?: string, forceRefresh = false): Promise<any[]> {
+  const now = Date.now();
   const targetClass = className ? className.trim().toUpperCase() : '';
+
+  if (!forceRefresh && cachedStudents && now - cachedStudents.timestamp < 60000) {
+    if (!targetClass) return cachedStudents.list;
+    return cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+  }
+
+  const list: any[] = [];
   try {
     const colRef = collection(firestore, 'students');
     const snap = await getDocs(colRef);
     snap.forEach((d) => {
       const data = d.data();
       if (data && data.id && data.name) {
-        const studentCls = String(data.class || '').trim().toUpperCase();
-        if (!targetClass || studentCls === targetClass) {
-          list.push({
-            id: String(data.id),
-            name: String(data.name),
-            class: String(data.class),
-            sbd: data.sbd ? String(data.sbd) : undefined,
-            username: data.username ? String(data.username) : undefined,
-            password: data.password ? String(data.password) : undefined,
-            isPasswordChanged: Boolean(data.isPasswordChanged)
-          });
-        }
+        list.push({
+          id: String(data.id),
+          name: String(data.name),
+          class: String(data.class),
+          sbd: data.sbd ? String(data.sbd) : undefined,
+          username: data.username ? String(data.username) : undefined,
+          password: data.password ? String(data.password) : undefined,
+          isPasswordChanged: Boolean(data.isPasswordChanged)
+        });
       }
     });
+    cachedStudents = { list, timestamp: now };
   } catch (err) {
     console.warn('[Firebase] getStudentsFromFirestore error:', err);
+    if (cachedStudents) {
+      if (!targetClass) return cachedStudents.list;
+      return cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+    }
   }
-  return list;
+
+  if (!targetClass) return list;
+  return list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
 }
 
 // 11. Delete single student from Firestore
 export async function deleteStudentFromFirestore(studentId: string): Promise<void> {
   if (!studentId) return;
+  cachedStudents = null; // Invalidate cache
   const docId = `st_${studentId}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   try {
     await deleteDoc(doc(firestore, 'students', docId));
@@ -554,6 +586,7 @@ export async function deleteStudentFromFirestore(studentId: string): Promise<voi
 // 12. Delete all students of a class from Firestore
 export async function deleteClassStudentsFromFirestore(className: string): Promise<void> {
   if (!className) return;
+  cachedStudents = null; // Invalidate cache
   const targetClass = className.trim().toUpperCase();
   try {
     const colRef = collection(firestore, 'students');
@@ -571,9 +604,14 @@ export async function deleteClassStudentsFromFirestore(className: string): Promi
   }
 }
 
+// In-memory cache for classes and deleted classes (60-second TTL)
+let cachedClasses: { list: any[]; timestamp: number } | null = null;
+let cachedDeletedClasses: { ids: string[]; timestamp: number } | null = null;
+
 // 13. Save classes metadata to Firestore
 export async function saveClassesToFirestore(classes: any[]): Promise<void> {
   if (!Array.isArray(classes)) return;
+  cachedClasses = null; // Invalidate cache on write
   try {
     const promises = classes.map((c) => {
       if (!c || !c.name) return Promise.resolve();
@@ -591,17 +629,17 @@ export async function saveClassesToFirestore(classes: any[]): Promise<void> {
   }
 }
 
-// 14. Get classes from Firestore
-export async function getClassesFromFirestore(): Promise<any[]> {
+// 14. Get classes from Firestore (cached 60s to minimize read ops)
+export async function getClassesFromFirestore(forceRefresh = false): Promise<any[]> {
+  const now = Date.now();
+  if (!forceRefresh && cachedClasses && now - cachedClasses.timestamp < 60000) {
+    return cachedClasses.list;
+  }
+
   const classes: any[] = [];
   try {
-    const deletedSnap = await getDocs(collection(firestore, 'deleted_classes'));
-    const deletedSet = new Set<string>();
-    deletedSnap.forEach((d) => {
-      const data = d.data();
-      if (data && data.name) deletedSet.add(String(data.name).trim().toUpperCase());
-      if (d.id) deletedSet.add(d.id.trim().toUpperCase());
-    });
+    const deletedArr = await getDeletedClassesFromFirestore(forceRefresh);
+    const deletedSet = new Set<string>(deletedArr);
 
     const colRef = collection(firestore, 'classes');
     const snap = await getDocs(colRef);
@@ -618,8 +656,10 @@ export async function getClassesFromFirestore(): Promise<any[]> {
         }
       }
     });
+    cachedClasses = { list: classes, timestamp: now };
   } catch (err) {
     console.warn('[Firebase] getClassesFromFirestore error:', err);
+    if (cachedClasses) return cachedClasses.list;
   }
   return classes;
 }
@@ -627,6 +667,9 @@ export async function getClassesFromFirestore(): Promise<any[]> {
 // 15. Delete class from Firestore (permanently remove class doc and all student docs in that class)
 export async function deleteClassFromFirestore(className: string): Promise<void> {
   if (!className) return;
+  cachedClasses = null;
+  cachedDeletedClasses = null;
+  cachedStudents = null;
   const upper = className.trim().toUpperCase();
   const docId = `cls_${upper}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   try {
@@ -643,6 +686,8 @@ export async function deleteClassFromFirestore(className: string): Promise<void>
 // 16. Record Deleted Class in Firestore to prevent resurrection across Vercel cold starts
 export async function recordDeletedClassInFirestore(className: string): Promise<void> {
   if (!className) return;
+  cachedClasses = null;
+  cachedDeletedClasses = null;
   const upper = className.trim().toUpperCase();
   try {
     await setDoc(doc(firestore, 'deleted_classes', upper), {
@@ -654,8 +699,13 @@ export async function recordDeletedClassInFirestore(className: string): Promise<
   }
 }
 
-// 17. Get Deleted Classes from Firestore
-export async function getDeletedClassesFromFirestore(): Promise<string[]> {
+// 17. Get Deleted Classes from Firestore (cached 60s)
+export async function getDeletedClassesFromFirestore(forceRefresh = false): Promise<string[]> {
+  const now = Date.now();
+  if (!forceRefresh && cachedDeletedClasses && now - cachedDeletedClasses.timestamp < 60000) {
+    return cachedDeletedClasses.ids;
+  }
+
   const result: string[] = [];
   try {
     const snap = await getDocs(collection(firestore, 'deleted_classes'));
@@ -667,8 +717,10 @@ export async function getDeletedClassesFromFirestore(): Promise<string[]> {
         result.push(d.id.trim().toUpperCase());
       }
     });
+    cachedDeletedClasses = { ids: result, timestamp: now };
   } catch (err) {
     console.warn('[Firebase] getDeletedClassesFromFirestore error:', err);
+    if (cachedDeletedClasses) return cachedDeletedClasses.ids;
   }
   return result;
 }
@@ -676,6 +728,8 @@ export async function getDeletedClassesFromFirestore(): Promise<string[]> {
 // 18. Unmark Deleted Class from Firestore (when teacher creates or restores a class)
 export async function unmarkDeletedClassInFirestore(className: string): Promise<void> {
   if (!className) return;
+  cachedClasses = null;
+  cachedDeletedClasses = null;
   const upper = className.trim().toUpperCase();
   try {
     await deleteDoc(doc(firestore, 'deleted_classes', upper));

@@ -330,6 +330,17 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     setIsLoading(true);
     setErrorMsg(null);
 
+    // Request fullscreen immediately inside user click gesture
+    try {
+      if (document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen();
+      } else if ((document.documentElement as any).webkitRequestFullscreen) {
+        await (document.documentElement as any).webkitRequestFullscreen();
+      }
+    } catch (fsErr) {
+      console.warn('Initial fullscreen gesture:', fsErr);
+    }
+
     try {
       const res = await api.startExam({
         examCode: verifiedInfo.exam.code,

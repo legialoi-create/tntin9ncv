@@ -48,6 +48,7 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   const [viewingAttemptsStudent, setViewingAttemptsStudent] = useState<any | null>(null);
   const [submissionToDelete, setSubmissionToDelete] = useState<any | null>(null);
   const [isDeletingSubmission, setIsDeletingSubmission] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string>(() => new Date().toLocaleTimeString('vi-VN'));
 
   // Synchronize currentExamId with selectedExamId and valid exams list
   useEffect(() => {
@@ -76,7 +77,10 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
     if (showLoading) setIsLoading(true);
     try {
       const data = await api.getExamReports(currentExamId);
-      if (data) setReportData(data);
+      if (data) {
+        setReportData(data);
+        setLastUpdated(new Date().toLocaleTimeString('vi-VN'));
+      }
     } catch (err: any) {
       console.warn('Exam report warning:', currentExamId, err?.message);
     } finally {
@@ -102,9 +106,6 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   useEffect(() => {
     if (currentExamId) {
       fetchReports(true);
-      const interval = setInterval(() => {
-        fetchReports(false);
-      }, 2500);
 
       const handleSync = () => {
         fetchReports(false);
@@ -120,7 +121,6 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       } catch (e) {}
 
       return () => {
-        clearInterval(interval);
         window.removeEventListener('ncv_submission_update', handleSync);
         if (bc) bc.close();
       };
@@ -227,11 +227,12 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
           {/* Manual Refresh Button */}
           <button
             onClick={() => fetchReports(true)}
-            title="Cập nhật kết quả làm bài mới nhất"
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition cursor-pointer flex items-center space-x-1.5"
+            disabled={isLoading}
+            title="Bấm để tải điểm số và kết quả bài làm mới nhất từ Cloud Firestore"
+            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition cursor-pointer flex items-center space-x-1.5 shadow-sm shadow-indigo-200 disabled:opacity-60"
           >
-            <RotateCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-indigo-600' : ''}`} />
-            <span>Làm mới</span>
+            <RotateCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>Làm mới kết quả</span>
           </button>
 
           {/* Export Excel Button */}
@@ -242,6 +243,24 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
             <FileSpreadsheet className="w-4 h-4" />
             <span>XUẤT EXCEL (.xlsx)</span>
           </button>
+        </div>
+
+        {/* Real-time zero-waste status bar */}
+        <div className="w-full flex flex-wrap items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-100 gap-2">
+          <div className="flex items-center space-x-2">
+            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>Vừa cập nhật: <b className="text-slate-800">{lastUpdated}</b></span>
+            <span className="text-slate-300">•</span>
+            <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200/60">
+              Điểm số lưu vĩnh viễn trên Cloud Firestore
+            </span>
+          </div>
+          <div className="flex items-center space-x-1.5 text-slate-600 font-medium">
+            <span className="bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded text-[10px]">
+              Chế độ Thủ công
+            </span>
+            <span>0 lượt tải ngầm • Bấm nút "Làm mới kết quả" khi Thầy muốn nạp điểm mới</span>
+          </div>
         </div>
       </div>
 

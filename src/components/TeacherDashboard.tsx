@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   FileText,
   ShieldAlert,
@@ -136,16 +136,25 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     }
   };
 
+  const lastRefreshedRef = useRef<number>(Date.now());
+
   useEffect(() => {
     loadExams();
     loadClasses();
+    lastRefreshedRef.current = Date.now();
 
     const handleFocus = () => {
-      loadExams();
-      loadClasses();
+      const now = Date.now();
+      // Throttle: only reload if at least 45 seconds have elapsed since last load
+      if (now - lastRefreshedRef.current >= 45000) {
+        lastRefreshedRef.current = now;
+        loadExams();
+        loadClasses();
+      }
     };
 
     const handleExamDeleted = (e: any) => {
+      lastRefreshedRef.current = Date.now();
       loadExams();
     };
 
@@ -161,6 +170,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       bc = new BroadcastChannel('ncv_broadcast_sync');
       bc.onmessage = (ev) => {
         if (ev.data?.type === 'EXAM_DELETED') {
+          lastRefreshedRef.current = Date.now();
           loadExams();
         }
       };

@@ -93,7 +93,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     message: string;
   }>({ show: false, level: 1, message: '' });
   const [warningCountdown, setWarningCountdown] = useState<number>(10);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(() => {
+    return !!(typeof document !== 'undefined' && (document.fullscreenElement || (document as any).webkitFullscreenElement));
+  });
   const [needsFullscreenPrompt, setNeedsFullscreenPrompt] = useState(false);
 
   // Lock 60s countdown state
@@ -148,12 +150,22 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       setNeedsFullscreenPrompt(false);
     } catch (err) {
       console.warn('Fullscreen request blocked or dismissed:', err);
+      setIsFullscreen(false);
+      setNeedsFullscreenPrompt(true);
     }
   };
 
-  // Initial fullscreen prompt
+  // Initial fullscreen enforcement
   useEffect(() => {
-    enterFullscreen();
+    const isCurrentlyFs = !!(document.fullscreenElement || (document as any).webkitFullscreenElement);
+    if (!isCurrentlyFs) {
+      enterFullscreen().catch(() => {
+        setNeedsFullscreenPrompt(true);
+      });
+    } else {
+      setIsFullscreen(true);
+      setNeedsFullscreenPrompt(false);
+    }
   }, []);
 
   // Timer countdown and auto submit
@@ -327,23 +339,32 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     }).catch(() => {});
   }, [currentSession.sessionId, examInfo.id, examInfo.code, studentInfo.name, studentInfo.class, studentInfo.sbd, questions.length]);
 
-  // 2. Optimized checkpoint sync: Keep answers in local buffer during exam, sync progress periodically or after 15 mins
+  // 2. Optimized checkpoint sync: Keep answers in local buffer during exam (0 writes per answer click).
+  // Only sync progress periodically every 3 minutes or when locked to minimize Firestore writes.
+  const answersRef = useRef(answers);
+  answersRef.current = answers;
+
   useEffect(() => {
     if (submitResult) return;
-    const answeredCount = Object.keys(answers).length;
-    const now = Date.now();
-    const elapsedMinutes = (now - roomEntryTimeRef.current) / (60 * 1000);
-    // After 15 minutes of exam time, periodic 2 minutes, or when violations occur: sync progress to Firestore
-    if (elapsedMinutes >= 15 || now - lastSyncRef.current >= 120000 || violationCount > 0 || isLocked) {
-      lastSyncRef.current = now;
+
+    const syncCheckpoint = () => {
+      const currentAnsCount = Object.keys(answersRef.current).length;
       updateSessionProgressInFirestore({
         sessionId: currentSession.sessionId,
-        answeredCount,
+        answeredCount: currentAnsCount,
         violationCount,
         isLocked
       }).catch(() => {});
+    };
+
+    if (isLocked) {
+      syncCheckpoint();
+      return;
     }
-  }, [answers, violationCount, isLocked, submitResult, currentSession.sessionId]);
+
+    const interval = setInterval(syncCheckpoint, 180000); // 3-minute interval
+    return () => clearInterval(interval);
+  }, [isLocked, violationCount, submitResult, currentSession.sessionId]);
 
   // Record Violation Function
   const handleViolation = useCallback(
@@ -422,8 +443,10 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       const inFs = !!document.fullscreenElement || !!(document as any).webkitFullscreenElement;
       setIsFullscreen(inFs);
       if (!inFs && !submitResult && !isLocked) {
-        setNeedsFullscreenPrompt(false);
+        setNeedsFullscreenPrompt(true);
         handleViolation('fullscreen_exit', 'Thoát khỏi chế độ toàn màn hình');
+      } else if (inFs) {
+        setNeedsFullscreenPrompt(false);
       }
     };
 
@@ -854,6 +877,52 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
           </div>
         </div>
       )}
+
+      {/* Strict Fullscreen Enforcement Modal */}
+      {(!isFullscreen || needsFullscreenPrompt) && !warningModal.show && !submitResult && !isLocked && (
+        <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border-2 border-indigo-500/80 rounded-2xl p-6 sm:p-8 max-w-lg w-full text-center shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="w-16 h-16 bg-indigo-500/20 text-indigo-400 rounded-full flex items-center justify-center mx-auto border border-indigo-500/40 animate-pulse">
+              <Maximize2 className="w-8 h-8" />
+            </div>
+
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-400 bg-indigo-950/80 border border-indigo-800/60 px-3 py-1 rounded-full">
+                QUY CHẾ THI TRỰC TUYẾN BẮT BUỘC
+              </span>
+              <h3 className="text-xl font-extrabold text-white mt-2">
+                BẬT CHẾ ĐỘ TOÀN MÀN HÌNH
+              </h3>
+              <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+                Trường THCS Nam Cửa Việt yêu cầu học sinh làm bài ở chế độ <b className="text-indigo-300">Toàn màn hình 100%</b> để đảm bảo tính công bằng và chống gian lận.
+              </p>
+            </div>
+
+            <div className="bg-slate-800/80 rounded-xl p-3.5 text-left border border-slate-700/80 text-xs space-y-2 text-slate-300">
+              <div className="flex items-center space-x-2 text-amber-300 font-semibold">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>Lưu ý bắt buộc khi làm bài:</span>
+              </div>
+              <ul className="list-disc list-inside space-y-1 text-slate-400 text-[11px] pl-1">
+                <li>Không bấm phím thoát (Esc) hoặc thu nhỏ cửa sổ trình duyệt.</li>
+                <li>Không chuyển sang tab hoặc phần mềm khác (hệ thống sẽ tính vi phạm).</li>
+                <li>Bài làm được lưu an toàn cục bộ nếu gặp sự cố mạng tạm thời.</li>
+              </ul>
+            </div>
+
+            <button
+              onClick={() => {
+                enterFullscreen();
+              }}
+              className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-98 text-white font-extrabold rounded-xl shadow-lg shadow-indigo-900/50 transition cursor-pointer flex items-center justify-center space-x-2 text-sm"
+            >
+              <Maximize2 className="w-4 h-4" />
+              <span>BẬT TOÀN MÀN HÌNH ĐỂ VÀO LÀM BÀI</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Warning Modals (Level 1 & Level 2) */}
       {warningModal.show && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
