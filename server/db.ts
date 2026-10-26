@@ -67,41 +67,76 @@ export function verifyPassword(inputPassword: string, storedPasswordOrHash: stri
 }
 
 // Username & Default Password generator functions
-export function generateStudentUsername(fullName: string, className: string, classStudentsList?: StudentInfo[]): string {
+export function generateStudentUsername(
+  fullName: string,
+  className: string,
+  classStudentsList?: StudentInfo[],
+  studentId?: string
+): string {
   if (!fullName) return '';
   const cleanClass = (className || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
 
-  const getClean = (nameStr: string, wordCount: number) => {
-    const words = nameStr.trim().split(/\s+/).filter(Boolean);
-    const selected = words.length >= wordCount ? words.slice(-wordCount).join('') : words.join('');
-    return selected
+  const cleanStr = (str: string) =>
+    (str || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/đ/g, 'd')
       .replace(/Đ/g, 'D')
       .replace(/[^a-zA-Z0-9]/g, '')
       .toLowerCase();
+
+  const get2WordClean = (nameStr: string) => {
+    const words = (nameStr || '').trim().split(/\s+/).filter(Boolean);
+    const selected = words.length >= 2 ? words.slice(-2).join('') : words.join('');
+    return cleanStr(selected);
   };
 
-  const clean2 = getClean(fullName, 2);
-  const candidate2 = `${clean2}${cleanClass}`;
+  const getFullClean = (nameStr: string) => {
+    const words = (nameStr || '').trim().split(/\s+/).filter(Boolean);
+    return cleanStr(words.join(''));
+  };
 
-  if (classStudentsList && classStudentsList.length > 0) {
-    const curNorm = fullName.trim().toLowerCase();
-    const hasCollision = classStudentsList.some((st) => {
-      if (!st.name) return false;
-      if (st.name.trim().toLowerCase() === curNorm) return false;
-      const other2 = getClean(st.name, 2);
-      return `${other2}${cleanClass}` === candidate2;
-    });
+  const cur2WordClean = get2WordClean(fullName);
+  const cand2 = `${cur2WordClean}${cleanClass}`;
 
-    if (hasCollision) {
-      const clean3 = getClean(fullName, 3);
-      return `${clean3}${cleanClass}`;
-    }
+  if (!classStudentsList || classStudentsList.length === 0) {
+    return cand2;
   }
 
-  return candidate2;
+  const curNormName = fullName.trim().toLowerCase();
+
+  // Check how many students in the class roster generate the same 2-word clean username
+  const colliding2WordStudents = classStudentsList.filter((st) => {
+    if (!st || !st.name) return false;
+    return get2WordClean(st.name) === cur2WordClean;
+  });
+
+  // If only 1 student has this 2-word clean name, no collision!
+  if (colliding2WordStudents.length <= 1) {
+    return cand2;
+  }
+
+  // Collision detected on 2-word clean name! Take full name + class
+  const fullClean = `${getFullClean(fullName)}${cleanClass}`;
+
+  // Check if multiple students have the exact same full name (or full clean name)
+  const identicalFullNameStudents = colliding2WordStudents.filter((st) => {
+    return st.name && getFullClean(st.name) === getFullClean(fullName);
+  });
+
+  if (identicalFullNameStudents.length > 1) {
+    let index = -1;
+    if (studentId) {
+      index = identicalFullNameStudents.findIndex((st) => st.id === studentId);
+    }
+    if (index === -1) {
+      index = identicalFullNameStudents.findIndex((st) => st.name.trim().toLowerCase() === curNormName);
+    }
+    const suffixNum = index >= 0 ? index + 1 : 1;
+    return `${fullClean}${suffixNum}`;
+  }
+
+  return fullClean;
 }
 
 export function getDefaultStudentPassword(className: string): string {
@@ -715,7 +750,7 @@ class DatabaseManager {
     const defaultPass = getDefaultStudentPassword(className);
     const normalized = classStudents.map(s => ({
       ...s,
-      username: s.username || generateStudentUsername(s.name, s.class || className, classStudents),
+      username: s.username || generateStudentUsername(s.name, s.class || className, classStudents, s.id),
       password: s.password || defaultPass,
       isPasswordChanged: !!s.isPasswordChanged
     }));
@@ -742,7 +777,7 @@ class DatabaseManager {
     const studentsInClass = this.data.students.filter(s => s.class.trim().toLowerCase() === trimmed);
     this.data.students.forEach(s => {
       if (s.class.trim().toLowerCase() === trimmed) {
-        s.username = generateStudentUsername(s.name, s.class, studentsInClass);
+        s.username = generateStudentUsername(s.name, s.class, studentsInClass, s.id);
         if (!s.password) {
           s.password = defaultPass;
           s.isPasswordChanged = false;
@@ -764,7 +799,7 @@ class DatabaseManager {
     );
     if (student) {
       const studentsInClass = this.data.students.filter(s => s.class.trim().toLowerCase() === student.class.trim().toLowerCase());
-      student.username = generateStudentUsername(student.name, student.class, studentsInClass);
+      student.username = generateStudentUsername(student.name, student.class, studentsInClass, student.id);
       student.password = getDefaultStudentPassword(student.class);
       student.isPasswordChanged = false;
       this.persist();
@@ -779,7 +814,7 @@ class DatabaseManager {
     const studentsInClass = this.data.students.filter(s => s.class && s.class.trim().toLowerCase() === trimmed);
     this.data.students.forEach(s => {
       if (s.class && s.class.trim().toLowerCase() === trimmed) {
-        s.username = generateStudentUsername(s.name, s.class, studentsInClass);
+        s.username = generateStudentUsername(s.name, s.class, studentsInClass, s.id);
         s.password = defaultPass;
         s.isPasswordChanged = false;
       }

@@ -60,42 +60,76 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     message: string;
   } | null>(null);
 
-  // Helper to compute username: 2 last words of name + class, or 3 last words if 2-word clean username collides with another student in class
-  const computeCleanNameWords = (name: string, wordCount: number) => {
-    if (!name) return '';
-    const words = name.trim().split(/\s+/).filter(Boolean);
-    const selectedWords = words.length >= wordCount ? words.slice(-wordCount).join('') : words.join('');
-    return selectedWords
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/đ/g, 'd')
-      .replace(/Đ/g, 'D')
-      .replace(/[^a-zA-Z0-9]/g, '')
-      .toLowerCase();
-  };
-
-  const computeUsername = (name: string, cls: string, studentList: StudentInfo[] = classStudents) => {
+  // Helper to compute username: 2 last words + class normally; full name on 2-word collision; full name + 1,2... on full name match
+  const computeUsername = (
+    name: string,
+    cls: string,
+    studentList: StudentInfo[] = classStudents,
+    studentId?: string
+  ) => {
     if (!name) return '';
     const cleanClass = (cls || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    const clean2 = computeCleanNameWords(name, 2);
-    const candidate2 = `${clean2}${cleanClass}`;
 
-    if (studentList && studentList.length > 0) {
-      const normalizedCurrentName = name.trim().toLowerCase();
-      const hasCollision = studentList.some((st) => {
-        if (!st.name) return false;
-        if (st.name.trim().toLowerCase() === normalizedCurrentName) return false;
-        const otherClean2 = computeCleanNameWords(st.name, 2);
-        return `${otherClean2}${cleanClass}` === candidate2;
-      });
+    const cleanStr = (str: string) =>
+      (str || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toLowerCase();
 
-      if (hasCollision) {
-        const clean3 = computeCleanNameWords(name, 3);
-        return `${clean3}${cleanClass}`;
-      }
+    const get2WordClean = (nameStr: string) => {
+      const words = (nameStr || '').trim().split(/\s+/).filter(Boolean);
+      const selected = words.length >= 2 ? words.slice(-2).join('') : words.join('');
+      return cleanStr(selected);
+    };
+
+    const getFullClean = (nameStr: string) => {
+      const words = (nameStr || '').trim().split(/\s+/).filter(Boolean);
+      return cleanStr(words.join(''));
+    };
+
+    const cur2WordClean = get2WordClean(name);
+    const cand2 = `${cur2WordClean}${cleanClass}`;
+
+    if (!studentList || studentList.length === 0) {
+      return cand2;
     }
 
-    return candidate2;
+    const curNormName = name.trim().toLowerCase();
+
+    // Check how many students in the class roster generate the same 2-word clean username
+    const colliding2WordStudents = studentList.filter((st) => {
+      if (!st || !st.name) return false;
+      return get2WordClean(st.name) === cur2WordClean;
+    });
+
+    if (colliding2WordStudents.length <= 1) {
+      return cand2;
+    }
+
+    // Collision detected on 2-word clean name! Take full name + class
+    const fullClean = `${getFullClean(name)}${cleanClass}`;
+
+    // Check if multiple students have the exact same full name
+    const identicalFullNameStudents = colliding2WordStudents.filter((st) => {
+      return st.name && getFullClean(st.name) === getFullClean(name);
+    });
+
+    if (identicalFullNameStudents.length > 1) {
+      let index = -1;
+      if (studentId) {
+        index = identicalFullNameStudents.findIndex((st) => st.id === studentId);
+      }
+      if (index === -1) {
+        index = identicalFullNameStudents.findIndex((st) => st.name.trim().toLowerCase() === curNormName);
+      }
+      const suffixNum = index >= 0 ? index + 1 : 1;
+      return `${fullClean}${suffixNum}`;
+    }
+
+    return fullClean;
   };
 
   // Class student roster state
@@ -1004,11 +1038,11 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                     Tên đăng nhập (Name):
                   </span>
                   <span className="font-mono text-xs font-bold text-indigo-700 bg-white px-1.5 py-0.5 rounded border border-indigo-200">
-                    {computeUsername(studentName, studentClass, classStudents)}
+                    {computeUsername(studentName, studentClass, classStudents, selectedStudentId)}
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-400">
-                  (2 chữ cuối tên + lớp, trùng lấy 3 chữ)
+                  (2 chữ cuối tên + lớp, trùng lấy cả họ tên & 1, 2...)
                 </span>
               </div>
             )}
