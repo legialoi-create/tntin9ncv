@@ -145,15 +145,32 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       loadClasses();
     };
 
+    const handleExamDeleted = (e: any) => {
+      loadExams();
+    };
+
     window.addEventListener('focus', handleFocus);
+    window.addEventListener('ncv_exam_deleted', handleExamDeleted);
     const handleVisibility = () => {
       if (!document.hidden) handleFocus();
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('ncv_broadcast_sync');
+      bc.onmessage = (ev) => {
+        if (ev.data?.type === 'EXAM_DELETED') {
+          loadExams();
+        }
+      };
+    } catch (e) {}
+
     return () => {
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('ncv_exam_deleted', handleExamDeleted);
       document.removeEventListener('visibilitychange', handleVisibility);
+      if (bc) bc.close();
     };
   }, []);
 

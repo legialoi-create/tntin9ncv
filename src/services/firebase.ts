@@ -201,6 +201,17 @@ export async function getSubmissionsFromFirestore(
   }
 
   try {
+    // 0. Load deleted exams blacklist to ensure submissions from deleted exams are never returned
+    const deletedSet = new Set<string>();
+    try {
+      const deletedSnap = await getDocs(collection(firestore, 'deleted_exams'));
+      deletedSnap.forEach((d) => {
+        const data = d.data();
+        if (data?.id) deletedSet.add(String(data.id).trim().toUpperCase());
+        if (d.id) deletedSet.add(d.id.trim().toUpperCase());
+      });
+    } catch (e) {}
+
     const colRef = collection(firestore, 'submissions');
     const snap = await getDocs(colRef);
 
@@ -211,6 +222,11 @@ export async function getSubmissionsFromFirestore(
       const sExamCode = String(data.examCode || '').trim().toUpperCase();
       const sNormId = sExamId.replace(/[^A-Z0-9]/g, '');
       const sNormCode = sExamCode.replace(/[^A-Z0-9]/g, '');
+
+      // Strictly ignore submissions whose exam is in the deleted exams list
+      if ((sExamId && deletedSet.has(sExamId)) || (sExamCode && deletedSet.has(sExamCode)) || (sNormId && deletedSet.has(sNormId))) {
+        return;
+      }
 
       let isMatch = false;
       if (aliasSet.size === 0) {
@@ -272,22 +288,34 @@ export async function deleteSingleSubmissionFromFirestore(sessionId: string): Pr
   }
 }
 
-// 6. Delete all submissions for an exam from Firestore when teacher deletes an exam
+// 6. Delete all submissions for an exam from Firestore when teacher deletes an exam (Permanent cascading deletion)
 export async function deleteSubmissionsForExamFromFirestore(
   examId: string,
   examCode?: string,
   additionalAliases?: string[]
-): Promise<void> {
-  if (!examId) return;
+): Promise<number> {
+  if (!examId && !examCode) return 0;
   const aliasSet = new Set<string>();
-  aliasSet.add(examId.trim().toUpperCase());
-  if (examCode) aliasSet.add(examCode.trim().toUpperCase());
+  const normSet = new Set<string>();
+
+  const registerKey = (val?: string) => {
+    if (!val || typeof val !== 'string') return;
+    const clean = val.trim();
+    if (!clean) return;
+    const upper = clean.toUpperCase();
+    aliasSet.add(upper);
+    aliasSet.add(clean);
+    const norm = upper.replace(/[^A-Z0-9]/g, '');
+    if (norm) normSet.add(norm);
+  };
+
+  registerKey(examId);
+  registerKey(examCode);
   if (Array.isArray(additionalAliases)) {
-    for (const a of additionalAliases) {
-      if (a) aliasSet.add(String(a).trim().toUpperCase());
-    }
+    additionalAliases.forEach(registerKey);
   }
 
+  let deletedCount = 0;
   try {
     const colRef = collection(firestore, 'submissions');
     const snap = await getDocs(colRef);
@@ -295,10 +323,23 @@ export async function deleteSubmissionsForExamFromFirestore(
 
     snap.forEach((d) => {
       const data = d.data();
-      const sExamId = String(data.examId || '').trim().toUpperCase();
-      const sExamCode = String(data.examCode || '').trim().toUpperCase();
-      if ((sExamId && aliasSet.has(sExamId)) || (sExamCode && aliasSet.has(sExamCode))) {
+      if (!data) return;
+      const sExamId = String(data.examId || '').trim();
+      const sExamCode = String(data.examCode || '').trim();
+      const sUpperId = sExamId.toUpperCase();
+      const sUpperCode = sExamCode.toUpperCase();
+      const sNormId = sUpperId.replace(/[^A-Z0-9]/g, '');
+      const sNormCode = sUpperCode.replace(/[^A-Z0-9]/g, '');
+
+      const isMatch =
+        (sUpperId !== '' && aliasSet.has(sUpperId)) ||
+        (sUpperCode !== '' && aliasSet.has(sUpperCode)) ||
+        (sNormId !== '' && normSet.has(sNormId)) ||
+        (sNormCode !== '' && normSet.has(sNormCode));
+
+      if (isMatch) {
         deletePromises.push(deleteDoc(d.ref));
+        deletedCount++;
       }
     });
 
@@ -306,6 +347,8 @@ export async function deleteSubmissionsForExamFromFirestore(
   } catch (err) {
     console.warn('[Firebase] deleteSubmissionsForExamFromFirestore error:', err);
   }
+
+  return deletedCount;
 }
 
 // 4. Record Deleted Exam in Firestore to permanently prevent resurrection across Vercel cold starts

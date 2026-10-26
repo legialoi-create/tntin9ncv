@@ -15,6 +15,22 @@ const getAiClient = () => {
   });
 };
 
+// Helper: Run promise with timeout
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(errorMsg)), timeoutMs);
+    promise
+      .then((val) => {
+        clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+};
+
 export interface ParsedQuestionResult {
   number: number;
   content: string;
@@ -37,8 +53,8 @@ export interface ParseExamResponse {
 
 // Robust local parser for Word/PDF/Text exam files
 export function parseExamLocally(rawText: string, answersText?: string): ParseExamResponse {
-  const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-  if (lines.length === 0) {
+  const cleanInput = (rawText || '').trim();
+  if (!cleanInput) {
     throw new Error('Tài liệu trống, không tìm thấy nội dung để phân tích.');
   }
 
@@ -54,7 +70,7 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
 
   // 2. Also extract answer keys from rawText if present (e.g. at the bottom of the exam)
   const answerSectionRegex = /(?:bảng\s*đáp\s*án|đáp\s*án|hướng\s*dẫn\s*chấm|key\s*đáp\s*án|phần\s*đáp\s*án)[\s\:\-\n]+([\s\S]*)$/i;
-  const answerSectionMatch = rawText.match(answerSectionRegex);
+  const answerSectionMatch = cleanInput.match(answerSectionRegex);
   if (answerSectionMatch && answerSectionMatch[1]) {
     const ansKeySection = answerSectionMatch[1];
     const regex = /(?:câu\s*)?(\d+)[\s\.\-\:\)]+([A-D])\b/gi;
@@ -68,22 +84,38 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
   }
 
   // If answer section found at bottom of rawText, truncate questions body so it doesn't get parsed as a corrupt question
-  let textForQuestions = rawText;
+  let textForQuestions = cleanInput;
   if (answerSectionMatch && typeof answerSectionMatch.index === 'number' && answerSectionMatch.index > 80) {
-    textForQuestions = rawText.slice(0, answerSectionMatch.index);
+    textForQuestions = cleanInput.slice(0, answerSectionMatch.index);
   }
 
-  // Detect grade from title
+  // Detect grade from title or body
   let grade: 6 | 7 | 8 | 9 | undefined = undefined;
-  if (/tin\s*học\s*6|lớp\s*6|khối\s*6/i.test(rawText)) grade = 6;
-  else if (/tin\s*học\s*7|lớp\s*7|khối\s*7/i.test(rawText)) grade = 7;
-  else if (/tin\s*học\s*8|lớp\s*8|khối\s*8/i.test(rawText)) grade = 8;
-  else if (/tin\s*học\s*9|lớp\s*9|khối\s*9/i.test(rawText)) grade = 9;
+  if (/tin\s*học\s*6|lớp\s*6|khối\s*6/i.test(cleanInput)) grade = 6;
+  else if (/tin\s*học\s*7|lớp\s*7|khối\s*7/i.test(cleanInput)) grade = 7;
+  else if (/tin\s*học\s*8|lớp\s*8|khối\s*8/i.test(cleanInput)) grade = 8;
+  else if (/tin\s*học\s*9|lớp\s*9|khối\s*9/i.test(cleanInput)) grade = 9;
 
-  // Split text into question chunks by matching "Câu 1", "Câu 2", "1.", "1:"
-  const questionSplitter = /(?:^|\n)(?:câu\s*(\d+)[\.\:\)]|\b(\d+)[\.\:\)]\s+)/gi;
+  // Detect title from first non-empty lines
+  let detectedTitle = '';
+  const firstLines = cleanInput.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (firstLines.length > 0) {
+    const candidate = firstLines[0];
+    if (
+      !/^(?:câu|bài|\d+[\.\:\)])/i.test(candidate) &&
+      candidate.length < 120 &&
+      (candidate.toUpperCase().includes('ĐỀ') ||
+        candidate.toUpperCase().includes('KIỂM TRA') ||
+        candidate.toUpperCase().includes('TIN HỌC'))
+    ) {
+      detectedTitle = candidate.replace(/^[\#\*\-\s]+|[\#\*\-\s]+$/g, '').trim();
+    }
+  }
+
+  // Split text into question chunks by matching "Câu 1", "Câu 2", "Bài 1", "1.", "1:", "1)", "1/"
+  const questionSplitter = /(?:^|\n)(?:(?:câu|bài)\s*(\d+)[\.\:\)\-\s]|\b(\d+)[\.\:\)\/]\s+)/gi;
   const chunks: { num: number; text: string }[] = [];
-  
+
   let match;
   const matches: { index: number; num: number; matchStr: string }[] = [];
   while ((match = questionSplitter.exec(textForQuestions)) !== null) {
@@ -100,10 +132,10 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
       chunks.push({ num: current.num || i + 1, text: chunkText });
     }
   } else {
-    // Fallback: split by empty lines or lines starting with number
-    const blocks = textForQuestions.split(/\n\s*\n/);
+    // Fallback: split by double line breaks
+    const blocks = textForQuestions.split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
     blocks.forEach((blk, idx) => {
-      chunks.push({ num: idx + 1, text: blk.trim() });
+      chunks.push({ num: idx + 1, text: blk });
     });
   }
 
@@ -145,49 +177,63 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
       codeLanguage = 'pascal';
     }
 
-    // Extract options A, B, C, D
+    // Advanced Option Extractor (Handles single line "A. 1 B. 2 C. 3 D. 4", multiline, lowercase, slash, etc.)
     const optionMatches: { id: 'A' | 'B' | 'C' | 'D'; text: string; isCorrectHint?: boolean }[] = [];
-    const optRegex = /(?:^|\s|\n)([A-D])[\.\:\)]\s*([^\n\r]+)/g;
-    let optM;
-    while ((optM = optRegex.exec(chunkText)) !== null) {
-      const optId = optM[1].toUpperCase() as 'A' | 'B' | 'C' | 'D';
-      let optText = optM[2].trim();
+    const optMarkerRegex = /(?:^|[\n\r]|\s{2,}|\t)(?:(?:\(|\[)?([A-D]|[a-d])(?:\)|\])?[\.\:\)\/\-]\s*)/g;
+    const optMarkerPositions: { optId: 'A' | 'B' | 'C' | 'D'; start: number; end: number }[] = [];
 
-      // Check if option is marked with *, (x), bold, or underline as correct
-      let isHint = false;
-      if (
-        optText.startsWith('*') ||
-        optText.endsWith('*') ||
-        /[\(\[]x[\)\]]/i.test(optText) ||
-        /\(đúng\)/i.test(optText) ||
-        /✓/.test(optText)
-      ) {
-        isHint = true;
-        optText = optText.replace(/^[\*\s✓]+|[\*\s✓]+$/g, '').trim();
-      }
+    let oMatch;
+    while ((oMatch = optMarkerRegex.exec(chunkText)) !== null) {
+      const letter = oMatch[1].toUpperCase() as 'A' | 'B' | 'C' | 'D';
+      optMarkerPositions.push({
+        optId: letter,
+        start: oMatch.index,
+        end: oMatch.index + oMatch[0].length,
+      });
+    }
 
-      // Avoid duplicates for same option ID
-      if (!optionMatches.some(o => o.id === optId)) {
-        optionMatches.push({ id: optId, text: optText, isCorrectHint: isHint });
+    if (optMarkerPositions.length > 0) {
+      for (let i = 0; i < optMarkerPositions.length; i++) {
+        const curOpt = optMarkerPositions[i];
+        const nextStart = i < optMarkerPositions.length - 1 ? optMarkerPositions[i + 1].start : chunkText.length;
+        let optBody = chunkText.slice(curOpt.end, nextStart).trim();
+
+        optBody = optBody.replace(/(?:đáp\s*án|đ\/a|key|chọn|đáp\s*án\s*đúng)[\s\:\-\.\=]*[A-D]\b/gi, '').trim();
+
+        let isHint = false;
+        if (
+          optBody.startsWith('*') ||
+          optBody.endsWith('*') ||
+          /[\(\[]x[\)\]]/i.test(optBody) ||
+          /\(đúng\)/i.test(optBody) ||
+          /✓/.test(optBody)
+        ) {
+          isHint = true;
+          optBody = optBody.replace(/^[\*\s✓]+|[\*\s✓]+$/g, '').trim();
+        }
+
+        if (!optionMatches.some((o) => o.id === curOpt.optId)) {
+          optionMatches.push({ id: curOpt.optId, text: optBody, isCorrectHint: isHint });
+        }
       }
     }
 
-    // Set correct answer if found in hint
+    // Check if any option had an answer hint
     if (!detectedAnswer) {
-      const hint = optionMatches.find(o => o.isCorrectHint);
+      const hint = optionMatches.find((o) => o.isCorrectHint);
       if (hint) detectedAnswer = hint.id;
     }
 
-    // Content: everything before the first option match
+    // Extract Question Content (everything before the first option marker)
     let questionContent = chunkText;
-    const firstOptIndex = chunkText.search(/(?:^|\s|\n)[A-D][\.\:\)]/);
-    if (firstOptIndex > 0) {
-      questionContent = chunkText.slice(0, firstOptIndex).trim();
+    if (optMarkerPositions.length > 0) {
+      questionContent = chunkText.slice(0, optMarkerPositions[0].start).trim();
     }
-    // Clean up inline answer or markers from content
-    questionContent = questionContent.replace(/(?:đáp\s*án|đ\/a|key|chọn|đáp\s*án\s*đúng)[\s\:\-\.\=]*[A-D]\b/gi, '').trim();
+    questionContent = questionContent
+      .replace(/(?:đáp\s*án|đ\/a|key|chọn|đáp\s*án\s*đúng)[\s\:\-\.\=]*[A-D]\b/gi, '')
+      .trim();
 
-    // Check duplicate
+    // Check duplicate questions
     const normalizedContent = questionContent.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (seenContents.has(normalizedContent) && normalizedContent.length > 10) {
       duplicateQuestionsFound.push(qNum);
@@ -195,12 +241,12 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
       seenContents.add(normalizedContent);
     }
 
-    // Ensure 4 options A, B, C, D exist
+    // Ensure all 4 options A, B, C, D exist with non-empty text
     const options: { id: 'A' | 'B' | 'C' | 'D'; text: string }[] = [];
-    (['A', 'B', 'C', 'D'] as const).forEach(optId => {
-      const found = optionMatches.find(o => o.id === optId);
-      if (found) {
-        options.push({ id: optId, text: found.text });
+    (['A', 'B', 'C', 'D'] as const).forEach((optId) => {
+      const found = optionMatches.find((o) => o.id === optId);
+      if (found && found.text && found.text.trim()) {
+        options.push({ id: optId, text: found.text.trim() });
       } else {
         options.push({ id: optId, text: `Phương án ${optId}` });
       }
@@ -213,7 +259,6 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
     let isAutoGuessed = false;
     if (!detectedAnswer) {
       unknownAnswerWarnings.push(qNum);
-      // Distribute fallback answers naturally across B, C, A, D instead of all A
       const fallbackOptions: ('A' | 'B' | 'C' | 'D')[] = ['B', 'C', 'A', 'D'];
       detectedAnswer = fallbackOptions[(qNum - 1) % 4];
       isAutoGuessed = true;
@@ -226,24 +271,29 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
       codeLanguage,
       options,
       correctAnswer: detectedAnswer,
-      explanation: isAutoGuessed ? 'Đáp án mặc định (đang chờ AI hoặc giáo viên duyệt)' : undefined
+      explanation: isAutoGuessed ? 'Đáp án được khởi tạo mặc định (Thầy có thể sửa lại)' : undefined,
     });
   });
 
+  const finalTitle =
+    detectedTitle ||
+    (grade
+      ? `Đề kiểm tra Tin học ${grade} - THCS Nam Cửa Việt`
+      : 'Đề kiểm tra Tin học - THCS Nam Cửa Việt');
+
   return {
-    title: grade ? `Kiểm tra Tin học ${grade} - THCS Nam Cửa Việt` : 'Đề kiểm tra Tin học THCS Nam Cửa Việt',
+    title: finalTitle,
     grade,
     questions,
     duplicateQuestionsFound,
     missingOptionsWarnings,
     unknownAnswerWarnings,
-    notes: 'Bóc tách thành công bằng bộ phân tích thông minh của hệ thống.'
+    notes: 'Bóc tách thành công bằng bộ phân tích tự động thông minh.',
   };
 }
 
 export async function solveQuestionsWithAI(
   questions: {
-    id?: string;
     number: number;
     content: string;
     codeSnippet?: string;
@@ -256,13 +306,19 @@ export async function solveQuestionsWithAI(
     return [];
   }
 
-  const ai = getAiClient();
-  const defaultModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-4-argon'];
-  const preferredModel = selectedModel && selectedModel !== 'auto' ? selectedModel : null;
+  let ai: GoogleGenAI;
+  try {
+    ai = getAiClient();
+  } catch (e: any) {
+    console.warn('solveQuestionsWithAI getAiClient error:', e?.message || e);
+    return [];
+  }
+
+  const defaultModels = ['gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-4-argon', 'gemini-3.8-flash'];
+  const preferredModel = selectedModel && selectedModel !== 'auto' && selectedModel !== 'local' ? selectedModel : null;
   const aiModelsToTry = preferredModel
     ? [preferredModel, ...defaultModels.filter((m) => m !== preferredModel)]
     : defaultModels;
-  let lastErr: any = null;
 
   const systemInstruction = `Bạn là chuyên gia giáo viên bộ môn Tin học THCS (Lớp 6, 7, 8, 9) giàu kinh nghiệm tại Việt Nam.
 Nhiệm vụ: Giải chi tiết và chọn ĐÁP ÁN ĐÚNG CHÍNH XÁC NHẤT (A, B, C hoặc D) cho từng câu hỏi trắc nghiệm Tin học.
@@ -286,26 +342,30 @@ ${JSON.stringify(
 
   for (const modelName of aiModelsToTry) {
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: [prompt],
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                number: { type: Type.INTEGER },
-                correctAnswer: { type: Type.STRING },
-                explanation: { type: Type.STRING },
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: [prompt],
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  number: { type: Type.INTEGER },
+                  correctAnswer: { type: Type.STRING },
+                  explanation: { type: Type.STRING },
+                },
+                required: ['number', 'correctAnswer', 'explanation'],
               },
-              required: ['number', 'correctAnswer', 'explanation'],
             },
           },
-        },
-      });
+        }),
+        8000,
+        `Model ${modelName} timed out`
+      );
 
       const parsed = JSON.parse(response.text || '[]');
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -318,12 +378,11 @@ ${JSON.stringify(
         }));
       }
     } catch (err: any) {
-      lastErr = err;
-      console.warn(`solveQuestionsWithAI failed on ${modelName}:`, err?.message || err);
+      console.warn(`solveQuestionsWithAI warning on ${modelName}:`, err?.message || err);
     }
   }
 
-  throw new Error(lastErr?.message || 'Không thể giải đáp án bằng AI lúc này');
+  return [];
 }
 
 export async function parseExamWithAI(params: {
@@ -331,9 +390,9 @@ export async function parseExamWithAI(params: {
   fileBase64?: string;
   mimeType?: string;
   filename?: string;
-  answersText?: string; // Optional separate answer key
-  teacherPrompt?: string; // Optional teacher prompt/instruction for AI
-  selectedModel?: string; // Optional preferred model from teacher
+  answersText?: string;
+  teacherPrompt?: string;
+  selectedModel?: string;
 }): Promise<ParseExamResponse> {
   let textContent = params.rawText || '';
 
@@ -382,8 +441,16 @@ export async function parseExamWithAI(params: {
     }
   }
 
-  // 3. Try Gemini models in priority order with teacher preference
-  const defaultModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-4-argon'];
+  // If teacher explicitly selected 'local', or if we already have text content, try AI first but always have local fallback
+  if (params.selectedModel === 'local') {
+    if (textContent && textContent.trim().length > 0) {
+      return parseExamLocally(textContent, params.answersText);
+    }
+    throw new Error('Chế độ phân tích Cục bộ yêu cầu văn bản đề thi hoặc tệp Word (.docx).');
+  }
+
+  // 3. Try Gemini models in priority order with timeout
+  const defaultModels = ['gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-4-argon', 'gemini-3.8-flash'];
   const preferredModel = params.selectedModel && params.selectedModel !== 'auto' ? params.selectedModel : null;
   const aiModelsToTry = preferredModel
     ? [preferredModel, ...defaultModels.filter((m) => m !== preferredModel)]
@@ -402,7 +469,7 @@ Nhiệm vụ của bạn là bóc tách danh sách toàn bộ câu hỏi trắc 
    - ƯU TIÊN 1: Nếu trong tài liệu có đánh dấu đáp án (bôi đậm, gạch chân, dấu *, dấu (x), chữ "Đáp án: X", hoặc bảng đáp án ở cuối đề / đính kèm), chọn chính xác phương án đó.
    - ƯU TIÊN 2: Nếu tài liệu KHÔNG có đáp án ghi sẵn, BẠN LÀ GIÁO VIÊN TIN HỌC XUẤT SẮC, HÃY DÙNG CHUYÊN MÔN ĐỂ SUY LUẬN, CHẠY THỬ ĐOẠN CODE, TÍNH TOÁN CÔNG THỨC EXCEL ĐỂ CHỌN ĐÁP ÁN ĐÚNG CHÍNH XÁC NHẤT (A, B, C hoặc D).
    - QUY TẮC BẮT BUỘC: TUYỆT ĐỐI KHÔNG ĐƯỢC CHỌN TOÀN BỘ ĐÁP ÁN A! Đề thi trắc nghiệm phải có đáp án phân bố tự nhiên (A, B, C, D) theo đúng nội dung khoa học của từng câu hỏi.
-   - Cung cấp lời giải thích ngắn gọn (1-2 câu) vào trường 'explanation' (ví dụ: giải thích vì sao chọn đáp án đó hoặc phân tích kết quả của câu lệnh/công thức).
+   - Cung cấp lời giải thích ngắn gọn (1-2 câu) vào trường 'explanation'.
 4. Đưa số câu bị trùng vào 'duplicateQuestionsFound'.
 5. Đưa số câu thiếu phương án vào 'missingOptionsWarnings'.
 6. 'unknownAnswerWarnings': chỉ để lại nếu câu hỏi đó hoàn toàn bị rách/mất phương án không thể suy luận.`;
@@ -436,70 +503,73 @@ Nhiệm vụ của bạn là bóc tách danh sách toàn bộ câu hỏi trắc 
 
       contents.push(prompt);
 
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              grade: { type: Type.INTEGER },
-              questions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    number: { type: Type.INTEGER },
-                    content: { type: Type.STRING },
-                    codeSnippet: { type: Type.STRING },
-                    codeLanguage: { type: Type.STRING },
-                    options: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          id: { type: Type.STRING },
-                          text: { type: Type.STRING },
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                grade: { type: Type.INTEGER },
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      number: { type: Type.INTEGER },
+                      content: { type: Type.STRING },
+                      codeSnippet: { type: Type.STRING },
+                      codeLanguage: { type: Type.STRING },
+                      options: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            id: { type: Type.STRING },
+                            text: { type: Type.STRING },
+                          },
+                          required: ['id', 'text'],
                         },
-                        required: ['id', 'text'],
                       },
+                      correctAnswer: { type: Type.STRING },
+                      explanation: { type: Type.STRING },
                     },
-                    correctAnswer: { type: Type.STRING },
-                    explanation: { type: Type.STRING },
+                    required: ['number', 'content', 'options', 'correctAnswer'],
                   },
-                  required: ['number', 'content', 'options', 'correctAnswer'],
                 },
+                duplicateQuestionsFound: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER },
+                },
+                missingOptionsWarnings: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER },
+                },
+                unknownAnswerWarnings: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER },
+                },
+                notes: { type: Type.STRING },
               },
-              duplicateQuestionsFound: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER },
-              },
-              missingOptionsWarnings: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER },
-              },
-              unknownAnswerWarnings: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER },
-              },
-              notes: { type: Type.STRING },
+              required: [
+                'questions',
+                'duplicateQuestionsFound',
+                'missingOptionsWarnings',
+                'unknownAnswerWarnings',
+              ],
             },
-            required: [
-              'questions',
-              'duplicateQuestionsFound',
-              'missingOptionsWarnings',
-              'unknownAnswerWarnings',
-            ],
           },
-        },
-      });
+        }),
+        10000,
+        `AI model ${modelName} timed out`
+      );
 
       const parsed = JSON.parse(response.text || '{}') as ParseExamResponse;
       if (parsed.questions && parsed.questions.length > 0) {
-        // Sanitize correctAnswers
         parsed.questions.forEach((q, qIdx) => {
           if (!q.correctAnswer || !['A', 'B', 'C', 'D'].includes(q.correctAnswer.toUpperCase())) {
             const fallbackOptions: ('A' | 'B' | 'C' | 'D')[] = ['B', 'C', 'A', 'D'];
@@ -513,53 +583,58 @@ Nhiệm vụ của bạn là bóc tách danh sách toàn bộ câu hỏi trắc 
       }
     } catch (err: any) {
       lastGeminiError = err;
-      console.warn(`Gemini model ${modelName} returned:`, err?.message || err);
+      console.warn(`Gemini model ${modelName} warning:`, err?.message || err);
     }
   }
 
-  // 4. If AI calls failed or quota exceeded, but text content is available:
+  // 4. Guaranteed zero-failure fallback: If AI calls failed or model was unavailable, but text is available:
   if (textContent && textContent.trim().length > 0) {
-    console.info('Falling back to local intelligent exam parser...');
+    console.info('Seamlessly falling back to local intelligent exam parser...');
     const localResult = parseExamLocally(textContent, params.answersText);
-    
-    // If localResult has questions with unknown answers, try solving them with solveQuestionsWithAI
-    if (localResult.questions.some(q => localResult.unknownAnswerWarnings.includes(q.number))) {
+
+    // Optional background auto-solve attempt (does not block if it fails)
+    if (localResult.questions.some((q) => localResult.unknownAnswerWarnings.includes(q.number))) {
       try {
         const solved = await solveQuestionsWithAI(localResult.questions);
-        const solvedMap = new Map(solved.map(s => [s.number, s]));
-        localResult.questions.forEach(q => {
-          const s = solvedMap.get(q.number);
-          if (s) {
-            q.correctAnswer = s.correctAnswer;
-            q.explanation = s.explanation;
-          }
-        });
-        localResult.unknownAnswerWarnings = [];
-        localResult.notes = 'Đã bóc tách tự động và AI giải, chọn đáp án đúng chính xác cho toàn bộ câu hỏi!';
-        return localResult;
+        if (solved && solved.length > 0) {
+          const solvedMap = new Map(solved.map((s) => [s.number, s]));
+          localResult.questions.forEach((q) => {
+            const s = solvedMap.get(q.number);
+            if (s) {
+              q.correctAnswer = s.correctAnswer;
+              q.explanation = s.explanation;
+            }
+          });
+          localResult.unknownAnswerWarnings = [];
+        }
       } catch (err) {
-        console.warn('Could not auto-solve answers via secondary AI call:', err);
+        console.warn('Optional auto-solve skipped:', err);
       }
     }
 
-    localResult.notes = 'Đã bóc tách tự động thành công bằng bộ phân tích cục bộ thông minh.';
+    localResult.notes = 'Đã bóc tách tự động thành công bằng bộ phân tích thông minh cục bộ.';
     return localResult;
   }
 
-  // 5. If neither AI nor local text worked
-  const is429 = lastGeminiError?.message?.includes('429') || lastGeminiError?.status === 'RESOURCE_EXHAUSTED';
-  if (is429) {
+  // 5. If neither AI nor text extraction worked (e.g. empty file or scanned image without OCR)
+  const is429or503 =
+    lastGeminiError?.message?.includes('429') ||
+    lastGeminiError?.message?.includes('503') ||
+    lastGeminiError?.status === 'RESOURCE_EXHAUSTED' ||
+    lastGeminiError?.status === 'UNAVAILABLE';
+
+  if (is429or503) {
     throw new Error(
-      'Hạn mức AI Google hôm nay đã tạm đầy (429 Quota Exceeded). Quý thầy vui lòng chuyển sang dạng dán trực tiếp nội dung văn bản đề thi hoặc tải file Word (.docx) / PDF văn bản, hệ thống sẽ bóc tách 100% câu hỏi ngay lập tức!'
+      'Hệ thống AI Google đang có lưu lượng truy cập cao hoặc tạm bận. Quý thầy vui lòng chuyển sang dạng dán trực tiếp nội dung văn bản đề thi hoặc tải tệp Word (.docx), hệ thống sẽ bóc tách tức thì 100% câu hỏi!'
     );
   }
 
   throw new Error(
-    lastGeminiError?.message || 'Không thể phân tích đề thi lúc này. Quý thầy vui lòng dán trực tiếp văn bản đề thi để hệ thống tự động bóc tách.'
+    lastGeminiError?.message ||
+      'Không thể đọc nội dung câu hỏi từ tài liệu. Quý thầy vui lòng dán trực tiếp văn bản đề thi hoặc tải tệp Word (.docx) để hệ thống tự động bóc tách.'
   );
 }
 
-// Chat assistant with AI to request custom answers, solve questions, or clarify reasoning
 export interface ChatAssistantMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -591,8 +666,16 @@ export interface ChatExamAssistantResponse {
 export async function chatExamAssistant(
   params: ChatExamAssistantParams
 ): Promise<ChatExamAssistantResponse> {
-  const ai = getAiClient();
-  const models = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+  let ai: GoogleGenAI;
+  try {
+    ai = getAiClient();
+  } catch (e: any) {
+    return {
+      reply: 'Hệ thống AI hiện chưa được cấu hình khóa kết nối. Thầy có thể sửa trực tiếp đáp án trên từng câu hỏi phía bên trái rất nhanh chóng và thuận tiện.',
+    };
+  }
+
+  const models = ['gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-4-argon', 'gemini-3.8-flash'];
   let lastErr: any = null;
 
   const systemInstruction = `Bạn là Trợ lý AI chuyên gia bộ môn Tin học THCS (Lớp 6, 7, 8, 9) của trường THCS Nam Cửa Việt.
@@ -634,33 +717,37 @@ YÊU CẦU MỚI TỪ GIÁO VIÊN:
 
   for (const modelName of models) {
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: [prompt],
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: { type: Type.STRING },
-              updatedAnswers: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    number: { type: Type.INTEGER },
-                    correctAnswer: { type: Type.STRING },
-                    explanation: { type: Type.STRING },
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: [prompt],
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                reply: { type: Type.STRING },
+                updatedAnswers: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      number: { type: Type.INTEGER },
+                      correctAnswer: { type: Type.STRING },
+                      explanation: { type: Type.STRING },
+                    },
+                    required: ['number', 'correctAnswer'],
                   },
-                  required: ['number', 'correctAnswer'],
                 },
               },
+              required: ['reply'],
             },
-            required: ['reply'],
           },
-        },
-      });
+        }),
+        8000,
+        `Chat model ${modelName} timed out`
+      );
 
       const parsed = JSON.parse(response.text || '{}');
       const updatedAnswers = Array.isArray(parsed.updatedAnswers)
@@ -679,9 +766,31 @@ YÊU CẦU MỚI TỪ GIÁO VIÊN:
       };
     } catch (err: any) {
       lastErr = err;
-      console.warn(`chatExamAssistant failed on ${modelName}:`, err?.message || err);
+      console.warn(`chatExamAssistant warning on ${modelName}:`, err?.message || err);
     }
   }
 
-  throw new Error(lastErr?.message || 'Không thể kết nối với AI lúc này. Vui lòng thử lại.');
+  // Graceful rule-based response if AI models are busy
+  const lowerMsg = params.message.toLowerCase();
+  const ansRegex = /(?:câu\s*)?(\d+)[\s\:\-\.\=]*([A-D])\b/gi;
+  const manualAnswers: { number: number; correctAnswer: 'A' | 'B' | 'C' | 'D'; explanation: string }[] = [];
+  let m;
+  while ((m = ansRegex.exec(params.message)) !== null) {
+    manualAnswers.push({
+      number: parseInt(m[1]),
+      correctAnswer: m[2].toUpperCase() as any,
+      explanation: 'Cập nhật theo yêu cầu của Thầy',
+    });
+  }
+
+  if (manualAnswers.length > 0) {
+    return {
+      reply: `✓ Đã cập nhật đáp án cho ${manualAnswers.length} câu theo tin nhắn của Thầy: ${manualAnswers.map((a) => `Câu ${a.number} -> ${a.correctAnswer}`).join(', ')}.`,
+      updatedAnswers: manualAnswers,
+    };
+  }
+
+  return {
+    reply: 'Hệ thống AI hiện đang bận do lượng truy cập cao. Thầy có thể trực tiếp chọn đáp án (A, B, C, D) cho từng câu hỏi ở bảng bên trái hoặc gửi tin nhắn dạng "1A 2B 3C..." để tôi cập nhật tức thì!',
+  };
 }

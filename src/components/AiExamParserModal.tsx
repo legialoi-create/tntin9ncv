@@ -23,7 +23,7 @@ import {
 import { Exam, Question, QuestionOption, GradeLevel } from '../types';
 import { api } from '../services/api';
 import { CodeBlock } from './CodeBlock';
-import { extractTextFromDocxFile } from '../utils/localExamParser';
+import { extractTextFromDocxFile, extractTextFromFile, parseExamLocally } from '../utils/localExamParser';
 
 interface AiExamParserModalProps {
   onClose: () => void;
@@ -313,8 +313,68 @@ export const AiExamParserModal: React.FC<AiExamParserModalProps> = ({
 
       setStep('review');
     } catch (err: any) {
-      console.error('Error parsing exam:', err);
-      setErrorMsg(err.message || 'Lỗi bóc tách đề thi. Vui lòng thử lại.');
+      console.warn('AI Parsing failed, attempting local rule-based parsing fallback:', err);
+      // Automatic client-side fallback if AI API hits quota limit, network error or timeout
+      let fallbackText = activeTab === 'text' ? rawText : '';
+      if (!fallbackText && selectedFile) {
+        try {
+          fallbackText = await extractTextFromFile(selectedFile);
+        } catch (e) {}
+      }
+
+      if (fallbackText && fallbackText.trim().length > 0) {
+        try {
+          const localRes = parseExamLocally(fallbackText, answersText);
+          if (localRes && localRes.questions && localRes.questions.length > 0) {
+            const convertedQuestions: Question[] = localRes.questions.map((q: any, idx: number) => {
+              const opts: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((letter) => {
+                const found = q.options?.find((o: any) => o.id?.toUpperCase() === letter);
+                return {
+                  id: letter,
+                  text: found ? found.text : '',
+                };
+              });
+
+              let resolvedAns: 'A' | 'B' | 'C' | 'D' = 'A';
+              if (q.correctAnswer && ['A', 'B', 'C', 'D'].includes(q.correctAnswer.toUpperCase())) {
+                resolvedAns = q.correctAnswer.toUpperCase() as any;
+              } else {
+                const fallbackList: ('A' | 'B' | 'C' | 'D')[] = ['B', 'C', 'A', 'D'];
+                resolvedAns = fallbackList[idx % 4];
+              }
+
+              return {
+                id: `q-${Date.now()}-${idx + 1}`,
+                number: idx + 1,
+                content: q.content || `Câu hỏi ${idx + 1}`,
+                codeSnippet: q.codeSnippet,
+                codeLanguage: q.codeLanguage,
+                options: opts,
+                correctAnswer: resolvedAns,
+                explanation: q.explanation,
+              };
+            });
+
+            setQuestions(convertedQuestions);
+            if (localRes.title) setExamTitle(localRes.title);
+            if (localRes.grade && [6, 7, 8, 9].includes(localRes.grade)) {
+              handleGradeChange(localRes.grade as GradeLevel);
+            }
+            setStep('review');
+            setWarnings({
+              duplicates: localRes.duplicateQuestionsFound || [],
+              missingOptions: localRes.missingOptionsWarnings || [],
+              unknownAnswers: localRes.unknownAnswerWarnings || [],
+              notes: localRes.notes || 'Đã phân tích bóc tách thành công bằng Bộ bóc tách Cục bộ (Offline Engine).',
+            });
+            return;
+          }
+        } catch (localErr) {
+          console.warn('Local parser fallback error:', localErr);
+        }
+      }
+
+      setErrorMsg(err.message || 'Lỗi bóc tách đề thi. Vui lòng kiểm tra lại tệp hoặc dán trực tiếp nội dung.');
     } finally {
       setIsParsing(false);
     }
@@ -1082,15 +1142,6 @@ D. Danh sách chỉ có 2 phần tử
                 </div>
               </div>
 
-              {/* AI Features Checklist */}
-              <div className="bg-indigo-50/60 border border-indigo-100 rounded-xl p-4 text-xs text-indigo-950 space-y-1">
-                <span className="font-bold text-indigo-900 block mb-1">
-                  ✨ Tính năng AI tự động thực hiện:
-                </span>
-                <p>• Nhận diện 4 phương án A, B, C, D và đáp án đúng từ tài liệu.</p>
-                <p>• Giữ nguyên vẹn mã lập trình (C++, Python, Pascal, Scratch) và công thức.</p>
-                <p>• Tự động phát hiện câu trùng lặp, câu thiếu phương án, câu thiếu đáp án.</p>
-              </div>
 
               {/* Action Button */}
               <div className="flex justify-end space-x-3 pt-2">

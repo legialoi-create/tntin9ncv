@@ -435,7 +435,12 @@ var DatabaseManager = class {
       for (const p of parsedList) {
         if (Array.isArray(p.exams)) {
           for (const ex of p.exams) {
-            if (!ex || !ex.id || deletedExamIdsSet.has(ex.id)) continue;
+            if (!ex || !ex.id) continue;
+            const exUpperId = ex.id.trim().toUpperCase();
+            const exUpperCode = (ex.code || "").trim().toUpperCase();
+            if (deletedExamIdsSet.has(exUpperId) || exUpperCode && deletedExamIdsSet.has(exUpperCode)) {
+              continue;
+            }
             const existing = examMap.get(ex.id);
             if (!existing) {
               examMap.set(ex.id, {
@@ -463,7 +468,8 @@ var DatabaseManager = class {
         if (Array.isArray(p.sessions)) {
           for (const s of p.sessions) {
             if (!s || !s.id || !s.examId) continue;
-            if (deletedExamIdsSet.has(s.examId)) continue;
+            const sUpperExamId = String(s.examId).trim().toUpperCase();
+            if (deletedExamIdsSet.has(sUpperExamId)) continue;
             const existing = sessionMap.get(s.id);
             if (!existing) {
               sessionMap.set(s.id, s);
@@ -504,9 +510,20 @@ var DatabaseManager = class {
           }
         }
       }
+      const classesWithCustomRoster = /* @__PURE__ */ new Set();
+      for (const p of parsedList) {
+        if (Array.isArray(p.students)) {
+          for (const st of p.students) {
+            if (st && st.class) {
+              classesWithCustomRoster.add(st.class.trim().toUpperCase());
+            }
+          }
+        }
+      }
       const studentMap = /* @__PURE__ */ new Map();
       for (const defS of DEFAULT_STUDENTS) {
         const clsUpper = (defS.class || "").trim().toUpperCase();
+        if (classesWithCustomRoster.has(clsUpper)) continue;
         if (!deletedStudentIdsSet.has(defS.id) && !deletedClassNamesSet.has(clsUpper)) {
           studentMap.set(defS.id, {
             ...defS,
@@ -1132,9 +1149,21 @@ var getAiClient = () => {
     }
   });
 };
+var withTimeout = (promise, timeoutMs, errorMsg) => {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(errorMsg)), timeoutMs);
+    promise.then((val) => {
+      clearTimeout(timer);
+      resolve(val);
+    }).catch((err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+};
 function parseExamLocally(rawText, answersText) {
-  const lines = rawText.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) {
+  const cleanInput = (rawText || "").trim();
+  if (!cleanInput) {
     throw new Error("T\xE0i li\u1EC7u tr\u1ED1ng, kh\xF4ng t\xECm th\u1EA5y n\u1ED9i dung \u0111\u1EC3 ph\xE2n t\xEDch.");
   }
   const externalAnswers = {};
@@ -1146,7 +1175,7 @@ function parseExamLocally(rawText, answersText) {
     }
   }
   const answerSectionRegex = /(?:bảng\s*đáp\s*án|đáp\s*án|hướng\s*dẫn\s*chấm|key\s*đáp\s*án|phần\s*đáp\s*án)[\s\:\-\n]+([\s\S]*)$/i;
-  const answerSectionMatch = rawText.match(answerSectionRegex);
+  const answerSectionMatch = cleanInput.match(answerSectionRegex);
   if (answerSectionMatch && answerSectionMatch[1]) {
     const ansKeySection = answerSectionMatch[1];
     const regex = /(?:câu\s*)?(\d+)[\s\.\-\:\)]+([A-D])\b/gi;
@@ -1158,16 +1187,24 @@ function parseExamLocally(rawText, answersText) {
       }
     }
   }
-  let textForQuestions = rawText;
+  let textForQuestions = cleanInput;
   if (answerSectionMatch && typeof answerSectionMatch.index === "number" && answerSectionMatch.index > 80) {
-    textForQuestions = rawText.slice(0, answerSectionMatch.index);
+    textForQuestions = cleanInput.slice(0, answerSectionMatch.index);
   }
   let grade = void 0;
-  if (/tin\s*học\s*6|lớp\s*6|khối\s*6/i.test(rawText)) grade = 6;
-  else if (/tin\s*học\s*7|lớp\s*7|khối\s*7/i.test(rawText)) grade = 7;
-  else if (/tin\s*học\s*8|lớp\s*8|khối\s*8/i.test(rawText)) grade = 8;
-  else if (/tin\s*học\s*9|lớp\s*9|khối\s*9/i.test(rawText)) grade = 9;
-  const questionSplitter = /(?:^|\n)(?:câu\s*(\d+)[\.\:\)]|\b(\d+)[\.\:\)]\s+)/gi;
+  if (/tin\s*học\s*6|lớp\s*6|khối\s*6/i.test(cleanInput)) grade = 6;
+  else if (/tin\s*học\s*7|lớp\s*7|khối\s*7/i.test(cleanInput)) grade = 7;
+  else if (/tin\s*học\s*8|lớp\s*8|khối\s*8/i.test(cleanInput)) grade = 8;
+  else if (/tin\s*học\s*9|lớp\s*9|khối\s*9/i.test(cleanInput)) grade = 9;
+  let detectedTitle = "";
+  const firstLines = cleanInput.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (firstLines.length > 0) {
+    const candidate = firstLines[0];
+    if (!/^(?:câu|bài|\d+[\.\:\)])/i.test(candidate) && candidate.length < 120 && (candidate.toUpperCase().includes("\u0110\u1EC0") || candidate.toUpperCase().includes("KI\u1EC2M TRA") || candidate.toUpperCase().includes("TIN H\u1ECCC"))) {
+      detectedTitle = candidate.replace(/^[\#\*\-\s]+|[\#\*\-\s]+$/g, "").trim();
+    }
+  }
+  const questionSplitter = /(?:^|\n)(?:(?:câu|bài)\s*(\d+)[\.\:\)\-\s]|\b(\d+)[\.\:\)\/]\s+)/gi;
   const chunks = [];
   let match;
   const matches = [];
@@ -1184,9 +1221,9 @@ function parseExamLocally(rawText, answersText) {
       chunks.push({ num: current.num || i + 1, text: chunkText });
     }
   } else {
-    const blocks = textForQuestions.split(/\n\s*\n/);
+    const blocks = textForQuestions.split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
     blocks.forEach((blk, idx) => {
-      chunks.push({ num: idx + 1, text: blk.trim() });
+      chunks.push({ num: idx + 1, text: blk });
     });
   }
   const questions = [];
@@ -1221,18 +1258,31 @@ function parseExamLocally(rawText, answersText) {
       codeLanguage = "pascal";
     }
     const optionMatches = [];
-    const optRegex = /(?:^|\s|\n)([A-D])[\.\:\)]\s*([^\n\r]+)/g;
-    let optM;
-    while ((optM = optRegex.exec(chunkText)) !== null) {
-      const optId = optM[1].toUpperCase();
-      let optText = optM[2].trim();
-      let isHint = false;
-      if (optText.startsWith("*") || optText.endsWith("*") || /[\(\[]x[\)\]]/i.test(optText) || /\(đúng\)/i.test(optText) || /✓/.test(optText)) {
-        isHint = true;
-        optText = optText.replace(/^[\*\s✓]+|[\*\s✓]+$/g, "").trim();
-      }
-      if (!optionMatches.some((o) => o.id === optId)) {
-        optionMatches.push({ id: optId, text: optText, isCorrectHint: isHint });
+    const optMarkerRegex = /(?:^|[\n\r]|\s{2,}|\t)(?:(?:\(|\[)?([A-D]|[a-d])(?:\)|\])?[\.\:\)\/\-]\s*)/g;
+    const optMarkerPositions = [];
+    let oMatch;
+    while ((oMatch = optMarkerRegex.exec(chunkText)) !== null) {
+      const letter = oMatch[1].toUpperCase();
+      optMarkerPositions.push({
+        optId: letter,
+        start: oMatch.index,
+        end: oMatch.index + oMatch[0].length
+      });
+    }
+    if (optMarkerPositions.length > 0) {
+      for (let i = 0; i < optMarkerPositions.length; i++) {
+        const curOpt = optMarkerPositions[i];
+        const nextStart = i < optMarkerPositions.length - 1 ? optMarkerPositions[i + 1].start : chunkText.length;
+        let optBody = chunkText.slice(curOpt.end, nextStart).trim();
+        optBody = optBody.replace(/(?:đáp\s*án|đ\/a|key|chọn|đáp\s*án\s*đúng)[\s\:\-\.\=]*[A-D]\b/gi, "").trim();
+        let isHint = false;
+        if (optBody.startsWith("*") || optBody.endsWith("*") || /[\(\[]x[\)\]]/i.test(optBody) || /\(đúng\)/i.test(optBody) || /✓/.test(optBody)) {
+          isHint = true;
+          optBody = optBody.replace(/^[\*\s✓]+|[\*\s✓]+$/g, "").trim();
+        }
+        if (!optionMatches.some((o) => o.id === curOpt.optId)) {
+          optionMatches.push({ id: curOpt.optId, text: optBody, isCorrectHint: isHint });
+        }
       }
     }
     if (!detectedAnswer) {
@@ -1240,9 +1290,8 @@ function parseExamLocally(rawText, answersText) {
       if (hint) detectedAnswer = hint.id;
     }
     let questionContent = chunkText;
-    const firstOptIndex = chunkText.search(/(?:^|\s|\n)[A-D][\.\:\)]/);
-    if (firstOptIndex > 0) {
-      questionContent = chunkText.slice(0, firstOptIndex).trim();
+    if (optMarkerPositions.length > 0) {
+      questionContent = chunkText.slice(0, optMarkerPositions[0].start).trim();
     }
     questionContent = questionContent.replace(/(?:đáp\s*án|đ\/a|key|chọn|đáp\s*án\s*đúng)[\s\:\-\.\=]*[A-D]\b/gi, "").trim();
     const normalizedContent = questionContent.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -1254,8 +1303,8 @@ function parseExamLocally(rawText, answersText) {
     const options = [];
     ["A", "B", "C", "D"].forEach((optId) => {
       const found = optionMatches.find((o) => o.id === optId);
-      if (found) {
-        options.push({ id: optId, text: found.text });
+      if (found && found.text && found.text.trim()) {
+        options.push({ id: optId, text: found.text.trim() });
       } else {
         options.push({ id: optId, text: `Ph\u01B0\u01A1ng \xE1n ${optId}` });
       }
@@ -1277,28 +1326,34 @@ function parseExamLocally(rawText, answersText) {
       codeLanguage,
       options,
       correctAnswer: detectedAnswer,
-      explanation: isAutoGuessed ? "\u0110\xE1p \xE1n m\u1EB7c \u0111\u1ECBnh (\u0111ang ch\u1EDD AI ho\u1EB7c gi\xE1o vi\xEAn duy\u1EC7t)" : void 0
+      explanation: isAutoGuessed ? "\u0110\xE1p \xE1n \u0111\u01B0\u1EE3c kh\u1EDFi t\u1EA1o m\u1EB7c \u0111\u1ECBnh (Th\u1EA7y c\xF3 th\u1EC3 s\u1EEDa l\u1EA1i)" : void 0
     });
   });
+  const finalTitle = detectedTitle || (grade ? `\u0110\u1EC1 ki\u1EC3m tra Tin h\u1ECDc ${grade} - THCS Nam C\u1EEDa Vi\u1EC7t` : "\u0110\u1EC1 ki\u1EC3m tra Tin h\u1ECDc - THCS Nam C\u1EEDa Vi\u1EC7t");
   return {
-    title: grade ? `Ki\u1EC3m tra Tin h\u1ECDc ${grade} - THCS Nam C\u1EEDa Vi\u1EC7t` : "\u0110\u1EC1 ki\u1EC3m tra Tin h\u1ECDc THCS Nam C\u1EEDa Vi\u1EC7t",
+    title: finalTitle,
     grade,
     questions,
     duplicateQuestionsFound,
     missingOptionsWarnings,
     unknownAnswerWarnings,
-    notes: "B\xF3c t\xE1ch th\xE0nh c\xF4ng b\u1EB1ng b\u1ED9 ph\xE2n t\xEDch th\xF4ng minh c\u1EE7a h\u1EC7 th\u1ED1ng."
+    notes: "B\xF3c t\xE1ch th\xE0nh c\xF4ng b\u1EB1ng b\u1ED9 ph\xE2n t\xEDch t\u1EF1 \u0111\u1ED9ng th\xF4ng minh."
   };
 }
 async function solveQuestionsWithAI(questions, selectedModel) {
   if (!questions || questions.length === 0) {
     return [];
   }
-  const ai = getAiClient();
-  const defaultModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-4-argon"];
-  const preferredModel = selectedModel && selectedModel !== "auto" ? selectedModel : null;
+  let ai;
+  try {
+    ai = getAiClient();
+  } catch (e) {
+    console.warn("solveQuestionsWithAI getAiClient error:", e?.message || e);
+    return [];
+  }
+  const defaultModels = ["gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-4-argon", "gemini-3.8-flash"];
+  const preferredModel = selectedModel && selectedModel !== "auto" && selectedModel !== "local" ? selectedModel : null;
   const aiModelsToTry = preferredModel ? [preferredModel, ...defaultModels.filter((m) => m !== preferredModel)] : defaultModels;
-  let lastErr = null;
   const systemInstruction = `B\u1EA1n l\xE0 chuy\xEAn gia gi\xE1o vi\xEAn b\u1ED9 m\xF4n Tin h\u1ECDc THCS (L\u1EDBp 6, 7, 8, 9) gi\xE0u kinh nghi\u1EC7m t\u1EA1i Vi\u1EC7t Nam.
 Nhi\u1EC7m v\u1EE5: Gi\u1EA3i chi ti\u1EBFt v\xE0 ch\u1ECDn \u0110\xC1P \xC1N \u0110\xDANG CH\xCDNH X\xC1C NH\u1EA4T (A, B, C ho\u1EB7c D) cho t\u1EEBng c\xE2u h\u1ECFi tr\u1EAFc nghi\u1EC7m Tin h\u1ECDc.
 QUY T\u1EAEC C\u1EA6N TU\xC2N TH\u1EE6 TUY\u1EC6T \u0110\u1ED0I:
@@ -1319,26 +1374,30 @@ ${JSON.stringify(
   )}`;
   for (const modelName of aiModelsToTry) {
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: [prompt],
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                number: { type: Type.INTEGER },
-                correctAnswer: { type: Type.STRING },
-                explanation: { type: Type.STRING }
-              },
-              required: ["number", "correctAnswer", "explanation"]
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: [prompt],
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  number: { type: Type.INTEGER },
+                  correctAnswer: { type: Type.STRING },
+                  explanation: { type: Type.STRING }
+                },
+                required: ["number", "correctAnswer", "explanation"]
+              }
             }
           }
-        }
-      });
+        }),
+        8e3,
+        `Model ${modelName} timed out`
+      );
       const parsed = JSON.parse(response.text || "[]");
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed.map((item) => ({
@@ -1348,11 +1407,10 @@ ${JSON.stringify(
         }));
       }
     } catch (err) {
-      lastErr = err;
-      console.warn(`solveQuestionsWithAI failed on ${modelName}:`, err?.message || err);
+      console.warn(`solveQuestionsWithAI warning on ${modelName}:`, err?.message || err);
     }
   }
-  throw new Error(lastErr?.message || "Kh\xF4ng th\u1EC3 gi\u1EA3i \u0111\xE1p \xE1n b\u1EB1ng AI l\xFAc n\xE0y");
+  return [];
 }
 async function parseExamWithAI(params) {
   let textContent = params.rawText || "";
@@ -1389,7 +1447,13 @@ async function parseExamWithAI(params) {
       console.warn("PDFParse extraction warning:", err);
     }
   }
-  const defaultModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-4-argon"];
+  if (params.selectedModel === "local") {
+    if (textContent && textContent.trim().length > 0) {
+      return parseExamLocally(textContent, params.answersText);
+    }
+    throw new Error("Ch\u1EBF \u0111\u1ED9 ph\xE2n t\xEDch C\u1EE5c b\u1ED9 y\xEAu c\u1EA7u v\u0103n b\u1EA3n \u0111\u1EC1 thi ho\u1EB7c t\u1EC7p Word (.docx).");
+  }
+  const defaultModels = ["gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-4-argon", "gemini-3.8-flash"];
   const preferredModel = params.selectedModel && params.selectedModel !== "auto" ? params.selectedModel : null;
   const aiModelsToTry = preferredModel ? [preferredModel, ...defaultModels.filter((m) => m !== preferredModel)] : defaultModels;
   let lastGeminiError = null;
@@ -1404,7 +1468,7 @@ Nhi\u1EC7m v\u1EE5 c\u1EE7a b\u1EA1n l\xE0 b\xF3c t\xE1ch danh s\xE1ch to\xE0n b
    - \u01AFU TI\xCAN 1: N\u1EBFu trong t\xE0i li\u1EC7u c\xF3 \u0111\xE1nh d\u1EA5u \u0111\xE1p \xE1n (b\xF4i \u0111\u1EADm, g\u1EA1ch ch\xE2n, d\u1EA5u *, d\u1EA5u (x), ch\u1EEF "\u0110\xE1p \xE1n: X", ho\u1EB7c b\u1EA3ng \u0111\xE1p \xE1n \u1EDF cu\u1ED1i \u0111\u1EC1 / \u0111\xEDnh k\xE8m), ch\u1ECDn ch\xEDnh x\xE1c ph\u01B0\u01A1ng \xE1n \u0111\xF3.
    - \u01AFU TI\xCAN 2: N\u1EBFu t\xE0i li\u1EC7u KH\xD4NG c\xF3 \u0111\xE1p \xE1n ghi s\u1EB5n, B\u1EA0N L\xC0 GI\xC1O VI\xCAN TIN H\u1ECCC XU\u1EA4T S\u1EAEC, H\xC3Y D\xD9NG CHUY\xCAN M\xD4N \u0110\u1EC2 SUY LU\u1EACN, CH\u1EA0Y TH\u1EEC \u0110O\u1EA0N CODE, T\xCDNH TO\xC1N C\xD4NG TH\u1EE8C EXCEL \u0110\u1EC2 CH\u1ECCN \u0110\xC1P \xC1N \u0110\xDANG CH\xCDNH X\xC1C NH\u1EA4T (A, B, C ho\u1EB7c D).
    - QUY T\u1EAEC B\u1EAET BU\u1ED8C: TUY\u1EC6T \u0110\u1ED0I KH\xD4NG \u0110\u01AF\u1EE2C CH\u1ECCN TO\xC0N B\u1ED8 \u0110\xC1P \xC1N A! \u0110\u1EC1 thi tr\u1EAFc nghi\u1EC7m ph\u1EA3i c\xF3 \u0111\xE1p \xE1n ph\xE2n b\u1ED1 t\u1EF1 nhi\xEAn (A, B, C, D) theo \u0111\xFAng n\u1ED9i dung khoa h\u1ECDc c\u1EE7a t\u1EEBng c\xE2u h\u1ECFi.
-   - Cung c\u1EA5p l\u1EDDi gi\u1EA3i th\xEDch ng\u1EAFn g\u1ECDn (1-2 c\xE2u) v\xE0o tr\u01B0\u1EDDng 'explanation' (v\xED d\u1EE5: gi\u1EA3i th\xEDch v\xEC sao ch\u1ECDn \u0111\xE1p \xE1n \u0111\xF3 ho\u1EB7c ph\xE2n t\xEDch k\u1EBFt qu\u1EA3 c\u1EE7a c\xE2u l\u1EC7nh/c\xF4ng th\u1EE9c).
+   - Cung c\u1EA5p l\u1EDDi gi\u1EA3i th\xEDch ng\u1EAFn g\u1ECDn (1-2 c\xE2u) v\xE0o tr\u01B0\u1EDDng 'explanation'.
 4. \u0110\u01B0a s\u1ED1 c\xE2u b\u1ECB tr\xF9ng v\xE0o 'duplicateQuestionsFound'.
 5. \u0110\u01B0a s\u1ED1 c\xE2u thi\u1EBFu ph\u01B0\u01A1ng \xE1n v\xE0o 'missingOptionsWarnings'.
 6. 'unknownAnswerWarnings': ch\u1EC9 \u0111\u1EC3 l\u1EA1i n\u1EBFu c\xE2u h\u1ECFi \u0111\xF3 ho\xE0n to\xE0n b\u1ECB r\xE1ch/m\u1EA5t ph\u01B0\u01A1ng \xE1n kh\xF4ng th\u1EC3 suy lu\u1EADn.`;
@@ -1438,66 +1502,70 @@ ${params.teacherPrompt}
 (L\u01AFU \xDD QUAN TR\u1ECCNG: H\xE3y \u01B0u ti\xEAn th\u1EF1c hi\u1EC7n \u0111\xFAng theo y\xEAu c\u1EA7u n\xE0y c\u1EE7a gi\xE1o vi\xEAn!)`;
       }
       contents.push(prompt);
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              grade: { type: Type.INTEGER },
-              questions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    number: { type: Type.INTEGER },
-                    content: { type: Type.STRING },
-                    codeSnippet: { type: Type.STRING },
-                    codeLanguage: { type: Type.STRING },
-                    options: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          id: { type: Type.STRING },
-                          text: { type: Type.STRING }
-                        },
-                        required: ["id", "text"]
-                      }
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                grade: { type: Type.INTEGER },
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      number: { type: Type.INTEGER },
+                      content: { type: Type.STRING },
+                      codeSnippet: { type: Type.STRING },
+                      codeLanguage: { type: Type.STRING },
+                      options: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            id: { type: Type.STRING },
+                            text: { type: Type.STRING }
+                          },
+                          required: ["id", "text"]
+                        }
+                      },
+                      correctAnswer: { type: Type.STRING },
+                      explanation: { type: Type.STRING }
                     },
-                    correctAnswer: { type: Type.STRING },
-                    explanation: { type: Type.STRING }
-                  },
-                  required: ["number", "content", "options", "correctAnswer"]
-                }
+                    required: ["number", "content", "options", "correctAnswer"]
+                  }
+                },
+                duplicateQuestionsFound: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER }
+                },
+                missingOptionsWarnings: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER }
+                },
+                unknownAnswerWarnings: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER }
+                },
+                notes: { type: Type.STRING }
               },
-              duplicateQuestionsFound: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER }
-              },
-              missingOptionsWarnings: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER }
-              },
-              unknownAnswerWarnings: {
-                type: Type.ARRAY,
-                items: { type: Type.INTEGER }
-              },
-              notes: { type: Type.STRING }
-            },
-            required: [
-              "questions",
-              "duplicateQuestionsFound",
-              "missingOptionsWarnings",
-              "unknownAnswerWarnings"
-            ]
+              required: [
+                "questions",
+                "duplicateQuestionsFound",
+                "missingOptionsWarnings",
+                "unknownAnswerWarnings"
+              ]
+            }
           }
-        }
-      });
+        }),
+        1e4,
+        `AI model ${modelName} timed out`
+      );
       const parsed = JSON.parse(response.text || "{}");
       if (parsed.questions && parsed.questions.length > 0) {
         parsed.questions.forEach((q, qIdx) => {
@@ -1513,46 +1581,53 @@ ${params.teacherPrompt}
       }
     } catch (err) {
       lastGeminiError = err;
-      console.warn(`Gemini model ${modelName} returned:`, err?.message || err);
+      console.warn(`Gemini model ${modelName} warning:`, err?.message || err);
     }
   }
   if (textContent && textContent.trim().length > 0) {
-    console.info("Falling back to local intelligent exam parser...");
+    console.info("Seamlessly falling back to local intelligent exam parser...");
     const localResult = parseExamLocally(textContent, params.answersText);
     if (localResult.questions.some((q) => localResult.unknownAnswerWarnings.includes(q.number))) {
       try {
         const solved = await solveQuestionsWithAI(localResult.questions);
-        const solvedMap = new Map(solved.map((s) => [s.number, s]));
-        localResult.questions.forEach((q) => {
-          const s = solvedMap.get(q.number);
-          if (s) {
-            q.correctAnswer = s.correctAnswer;
-            q.explanation = s.explanation;
-          }
-        });
-        localResult.unknownAnswerWarnings = [];
-        localResult.notes = "\u0110\xE3 b\xF3c t\xE1ch t\u1EF1 \u0111\u1ED9ng v\xE0 AI gi\u1EA3i, ch\u1ECDn \u0111\xE1p \xE1n \u0111\xFAng ch\xEDnh x\xE1c cho to\xE0n b\u1ED9 c\xE2u h\u1ECFi!";
-        return localResult;
+        if (solved && solved.length > 0) {
+          const solvedMap = new Map(solved.map((s) => [s.number, s]));
+          localResult.questions.forEach((q) => {
+            const s = solvedMap.get(q.number);
+            if (s) {
+              q.correctAnswer = s.correctAnswer;
+              q.explanation = s.explanation;
+            }
+          });
+          localResult.unknownAnswerWarnings = [];
+        }
       } catch (err) {
-        console.warn("Could not auto-solve answers via secondary AI call:", err);
+        console.warn("Optional auto-solve skipped:", err);
       }
     }
-    localResult.notes = "\u0110\xE3 b\xF3c t\xE1ch t\u1EF1 \u0111\u1ED9ng th\xE0nh c\xF4ng b\u1EB1ng b\u1ED9 ph\xE2n t\xEDch c\u1EE5c b\u1ED9 th\xF4ng minh.";
+    localResult.notes = "\u0110\xE3 b\xF3c t\xE1ch t\u1EF1 \u0111\u1ED9ng th\xE0nh c\xF4ng b\u1EB1ng b\u1ED9 ph\xE2n t\xEDch th\xF4ng minh c\u1EE5c b\u1ED9.";
     return localResult;
   }
-  const is429 = lastGeminiError?.message?.includes("429") || lastGeminiError?.status === "RESOURCE_EXHAUSTED";
-  if (is429) {
+  const is429or503 = lastGeminiError?.message?.includes("429") || lastGeminiError?.message?.includes("503") || lastGeminiError?.status === "RESOURCE_EXHAUSTED" || lastGeminiError?.status === "UNAVAILABLE";
+  if (is429or503) {
     throw new Error(
-      "H\u1EA1n m\u1EE9c AI Google h\xF4m nay \u0111\xE3 t\u1EA1m \u0111\u1EA7y (429 Quota Exceeded). Qu\xFD th\u1EA7y vui l\xF2ng chuy\u1EC3n sang d\u1EA1ng d\xE1n tr\u1EF1c ti\u1EBFp n\u1ED9i dung v\u0103n b\u1EA3n \u0111\u1EC1 thi ho\u1EB7c t\u1EA3i file Word (.docx) / PDF v\u0103n b\u1EA3n, h\u1EC7 th\u1ED1ng s\u1EBD b\xF3c t\xE1ch 100% c\xE2u h\u1ECFi ngay l\u1EADp t\u1EE9c!"
+      "H\u1EC7 th\u1ED1ng AI Google \u0111ang c\xF3 l\u01B0u l\u01B0\u1EE3ng truy c\u1EADp cao ho\u1EB7c t\u1EA1m b\u1EADn. Qu\xFD th\u1EA7y vui l\xF2ng chuy\u1EC3n sang d\u1EA1ng d\xE1n tr\u1EF1c ti\u1EBFp n\u1ED9i dung v\u0103n b\u1EA3n \u0111\u1EC1 thi ho\u1EB7c t\u1EA3i t\u1EC7p Word (.docx), h\u1EC7 th\u1ED1ng s\u1EBD b\xF3c t\xE1ch t\u1EE9c th\xEC 100% c\xE2u h\u1ECFi!"
     );
   }
   throw new Error(
-    lastGeminiError?.message || "Kh\xF4ng th\u1EC3 ph\xE2n t\xEDch \u0111\u1EC1 thi l\xFAc n\xE0y. Qu\xFD th\u1EA7y vui l\xF2ng d\xE1n tr\u1EF1c ti\u1EBFp v\u0103n b\u1EA3n \u0111\u1EC1 thi \u0111\u1EC3 h\u1EC7 th\u1ED1ng t\u1EF1 \u0111\u1ED9ng b\xF3c t\xE1ch."
+    lastGeminiError?.message || "Kh\xF4ng th\u1EC3 \u0111\u1ECDc n\u1ED9i dung c\xE2u h\u1ECFi t\u1EEB t\xE0i li\u1EC7u. Qu\xFD th\u1EA7y vui l\xF2ng d\xE1n tr\u1EF1c ti\u1EBFp v\u0103n b\u1EA3n \u0111\u1EC1 thi ho\u1EB7c t\u1EA3i t\u1EC7p Word (.docx) \u0111\u1EC3 h\u1EC7 th\u1ED1ng t\u1EF1 \u0111\u1ED9ng b\xF3c t\xE1ch."
   );
 }
 async function chatExamAssistant(params) {
-  const ai = getAiClient();
-  const models = ["gemini-3.8-flash", "gemini-3.1-flash-lite"];
+  let ai;
+  try {
+    ai = getAiClient();
+  } catch (e) {
+    return {
+      reply: "H\u1EC7 th\u1ED1ng AI hi\u1EC7n ch\u01B0a \u0111\u01B0\u1EE3c c\u1EA5u h\xECnh kh\xF3a k\u1EBFt n\u1ED1i. Th\u1EA7y c\xF3 th\u1EC3 s\u1EEDa tr\u1EF1c ti\u1EBFp \u0111\xE1p \xE1n tr\xEAn t\u1EEBng c\xE2u h\u1ECFi ph\xEDa b\xEAn tr\xE1i r\u1EA5t nhanh ch\xF3ng v\xE0 thu\u1EADn ti\u1EC7n."
+    };
+  }
+  const models = ["gemini-flash-latest", "gemini-3.1-flash-lite", "gemini-4-argon", "gemini-3.8-flash"];
   let lastErr = null;
   const systemInstruction = `B\u1EA1n l\xE0 Tr\u1EE3 l\xFD AI chuy\xEAn gia b\u1ED9 m\xF4n Tin h\u1ECDc THCS (L\u1EDBp 6, 7, 8, 9) c\u1EE7a tr\u01B0\u1EDDng THCS Nam C\u1EEDa Vi\u1EC7t.
 Gi\xE1o vi\xEAn \u0111ang trao \u0111\u1ED5i tr\u1EF1c ti\u1EBFp v\u1EDBi b\u1EA1n v\u1EC1 \u0111\u1EC1 ki\u1EC3m tra tr\u1EAFc nghi\u1EC7m Tin h\u1ECDc hi\u1EC7n t\u1EA1i.
@@ -1584,33 +1659,37 @@ Y\xCAU C\u1EA6U M\u1EDAI T\u1EEA GI\xC1O VI\xCAN:
 "${params.message}"`;
   for (const modelName of models) {
     try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: [prompt],
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: { type: Type.STRING },
-              updatedAnswers: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    number: { type: Type.INTEGER },
-                    correctAnswer: { type: Type.STRING },
-                    explanation: { type: Type.STRING }
-                  },
-                  required: ["number", "correctAnswer"]
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: [prompt],
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                reply: { type: Type.STRING },
+                updatedAnswers: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      number: { type: Type.INTEGER },
+                      correctAnswer: { type: Type.STRING },
+                      explanation: { type: Type.STRING }
+                    },
+                    required: ["number", "correctAnswer"]
+                  }
                 }
-              }
-            },
-            required: ["reply"]
+              },
+              required: ["reply"]
+            }
           }
-        }
-      });
+        }),
+        8e3,
+        `Chat model ${modelName} timed out`
+      );
       const parsed = JSON.parse(response.text || "{}");
       const updatedAnswers = Array.isArray(parsed.updatedAnswers) ? parsed.updatedAnswers.filter((a) => a && a.number && ["A", "B", "C", "D"].includes(a.correctAnswer?.toUpperCase())).map((a) => ({
         number: Number(a.number),
@@ -1623,10 +1702,29 @@ Y\xCAU C\u1EA6U M\u1EDAI T\u1EEA GI\xC1O VI\xCAN:
       };
     } catch (err) {
       lastErr = err;
-      console.warn(`chatExamAssistant failed on ${modelName}:`, err?.message || err);
+      console.warn(`chatExamAssistant warning on ${modelName}:`, err?.message || err);
     }
   }
-  throw new Error(lastErr?.message || "Kh\xF4ng th\u1EC3 k\u1EBFt n\u1ED1i v\u1EDBi AI l\xFAc n\xE0y. Vui l\xF2ng th\u1EED l\u1EA1i.");
+  const lowerMsg = params.message.toLowerCase();
+  const ansRegex = /(?:câu\s*)?(\d+)[\s\:\-\.\=]*([A-D])\b/gi;
+  const manualAnswers = [];
+  let m;
+  while ((m = ansRegex.exec(params.message)) !== null) {
+    manualAnswers.push({
+      number: parseInt(m[1]),
+      correctAnswer: m[2].toUpperCase(),
+      explanation: "C\u1EADp nh\u1EADt theo y\xEAu c\u1EA7u c\u1EE7a Th\u1EA7y"
+    });
+  }
+  if (manualAnswers.length > 0) {
+    return {
+      reply: `\u2713 \u0110\xE3 c\u1EADp nh\u1EADt \u0111\xE1p \xE1n cho ${manualAnswers.length} c\xE2u theo tin nh\u1EAFn c\u1EE7a Th\u1EA7y: ${manualAnswers.map((a) => `C\xE2u ${a.number} -> ${a.correctAnswer}`).join(", ")}.`,
+      updatedAnswers: manualAnswers
+    };
+  }
+  return {
+    reply: 'H\u1EC7 th\u1ED1ng AI hi\u1EC7n \u0111ang b\u1EADn do l\u01B0\u1EE3ng truy c\u1EADp cao. Th\u1EA7y c\xF3 th\u1EC3 tr\u1EF1c ti\u1EBFp ch\u1ECDn \u0111\xE1p \xE1n (A, B, C, D) cho t\u1EEBng c\xE2u h\u1ECFi \u1EDF b\u1EA3ng b\xEAn tr\xE1i ho\u1EB7c g\u1EEDi tin nh\u1EAFn d\u1EA1ng "1A 2B 3C..." \u0111\u1EC3 t\xF4i c\u1EADp nh\u1EADt t\u1EE9c th\xEC!'
+  };
 }
 
 // server.ts
@@ -3419,6 +3517,14 @@ app.post("/api/sessions/sync", (req, res) => {
     }
   }
   res.json({ success: true, synced: count });
+});
+app.delete("/api/sessions/:sessionId", requireTeacherAuth, (req, res) => {
+  const { sessionId } = req.params;
+  if (!sessionId) {
+    return res.status(400).json({ error: "M\xE3 phi\xEAn thi kh\xF4ng h\u1EE3p l\u1EC7" });
+  }
+  db.deleteSession(sessionId);
+  res.json({ success: true, message: `\u0110\xE3 x\xF3a b\xE0i thi ${sessionId} th\xE0nh c\xF4ng` });
 });
 app.use((err, req, res, next) => {
   console.error("[API INTERNAL ERROR]:", err);

@@ -24,6 +24,7 @@ import {
   unmarkDeletedClassInFirestore,
   deleteSingleSubmissionFromFirestore
 } from './firebase';
+import { parseExamLocally } from '../utils/localExamParser';
 
 let teacherToken: string | null = localStorage.getItem('ncv_teacher_token');
 
@@ -246,7 +247,6 @@ export const api = {
     // If user explicitly selected local parser, run locally directly
     if (params.selectedModel === 'local') {
       if (params.rawText && params.rawText.trim().length > 0) {
-        const { parseExamLocally } = await import('../utils/localExamParser');
         return parseExamLocally(params.rawText, params.answersText);
       }
       throw new Error('Chế độ phân tích Cục bộ yêu cầu dán văn bản đề thi hoặc tệp Word (.docx).');
@@ -267,9 +267,8 @@ export const api = {
       }
     } catch (err: any) {
       if (err.message && !err.message.includes('Failed to fetch')) {
-        // If server gave an explicit business error message (e.g. quota, file format), rethrow it
+        // If server gave an explicit business error message (e.g. quota, file format), fallback locally
         if (params.rawText && params.rawText.trim().length > 0) {
-          const { parseExamLocally } = await import('../utils/localExamParser');
           return parseExamLocally(params.rawText, params.answersText);
         }
         throw err;
@@ -278,7 +277,6 @@ export const api = {
 
     // Client-side fallback parsing if server API fails or offline
     if (params.rawText && params.rawText.trim().length > 0) {
-      const { parseExamLocally } = await import('../utils/localExamParser');
       return parseExamLocally(params.rawText, params.answersText);
     }
 
@@ -458,7 +456,11 @@ export const api = {
     localStorage.setItem('ncv_exams_data', JSON.stringify(exams));
 
     // Save to Firebase Firestore for permanent cloud storage across all Vercel cold starts
-    saveExamToFirestore(finalExam).catch(() => {});
+    try {
+      await saveExamToFirestore(finalExam);
+    } catch (e) {
+      console.warn('[Firebase] saveExamToFirestore error:', e);
+    }
 
     try {
       const shouldPost = isNewExam === true || !exam.id || exam.id.startsWith('new-');
@@ -495,16 +497,30 @@ export const api = {
     const cleanId = id.trim();
     const upperId = cleanId.toUpperCase();
 
-    // 1. Unconditionally add to ncv_deleted_exams blacklist and find code
+    // 1. Discover exam code and full alias set from all available sources
     let targetCode = '';
+    const aliases: string[] = [cleanId, upperId];
+
     try {
       const cached = localStorage.getItem('ncv_exams_data');
+      let exams: Exam[] = [];
       if (cached) {
-        const exams: Exam[] = JSON.parse(cached) || [];
-        const target = exams.find((e) => (e.id && e.id.toUpperCase() === upperId) || (e.code && e.code.toUpperCase() === upperId));
-        if (target?.code) targetCode = target.code.trim().toUpperCase();
+        try { exams = JSON.parse(cached) || []; } catch (e) {}
+      }
+      let target = exams.find((e) => (e.id && e.id.toUpperCase() === upperId) || (e.code && e.code.toUpperCase() === upperId));
+      if (!target) {
+        const fbExams = await getExamsFromFirestore().catch(() => []);
+        target = fbExams.find((e) => (e.id && e.id.toUpperCase() === upperId) || (e.code && e.code.toUpperCase() === upperId));
+      }
+      if (target?.code) {
+        targetCode = target.code.trim().toUpperCase();
+        aliases.push(target.code, targetCode);
+      }
+      if (target?.id) {
+        aliases.push(target.id, target.id.toUpperCase());
       }
 
+      // Add to local deleted blacklist
       const delArr = JSON.parse(localStorage.getItem('ncv_deleted_exams') || '[]');
       if (Array.isArray(delArr)) {
         if (!delArr.includes(upperId)) delArr.push(upperId);
@@ -513,25 +529,33 @@ export const api = {
       }
     } catch (e) {}
 
-    // 2. Permanently record in Firebase Firestore deleted_exams collection (So it NEVER resurrects on Vercel)
+    // 2. Permanently record in Firebase Firestore deleted_exams and delete ALL student submissions and scores for this exam
     try {
-      recordDeletedExamInFirestore(upperId, targetCode).catch(() => {});
-      deleteSubmissionsForExamFromFirestore(cleanId, targetCode).catch(() => {});
-    } catch (e) {}
+      await Promise.all([
+        recordDeletedExamInFirestore(upperId, targetCode),
+        deleteSubmissionsForExamFromFirestore(cleanId, targetCode, aliases)
+      ]);
+    } catch (e) {
+      console.warn('[Firebase] deleteExam error:', e);
+    }
 
-    // 3. Purge local storage caches for this exam ID and code
+    // 3. Purge all local storage caches for this exam and its student submissions
     try {
-      localStorage.removeItem(`ncv_submissions_${id}`);
-      localStorage.removeItem(`ncv_reports_cache_${id}`);
-      sessionStorage.removeItem(`ncv_reports_cache_${id}`);
+      localStorage.removeItem(`ncv_submissions_${cleanId}`);
+      localStorage.removeItem(`ncv_submissions_${upperId}`);
+      localStorage.removeItem(`ncv_reports_cache_${cleanId}`);
+      localStorage.removeItem(`ncv_reports_cache_${upperId}`);
+      sessionStorage.removeItem(`ncv_reports_cache_${cleanId}`);
+      sessionStorage.removeItem(`ncv_reports_cache_${upperId}`);
 
       if (targetCode) {
         localStorage.removeItem(`ncv_submissions_${targetCode}`);
         localStorage.removeItem(`ncv_reports_cache_${targetCode}`);
+        sessionStorage.removeItem(`ncv_reports_cache_${targetCode}`);
       }
 
       const selectedId = localStorage.getItem('ncv_selected_exam_id');
-      if (selectedId === id || (targetCode && selectedId === targetCode)) {
+      if (selectedId === cleanId || selectedId === upperId || (targetCode && selectedId === targetCode)) {
         localStorage.removeItem('ncv_selected_exam_id');
       }
 
@@ -546,6 +570,25 @@ export const api = {
         localStorage.setItem('ncv_exams_data', JSON.stringify(filtered));
       }
 
+      // Purge active sessions in progress for this exam
+      try {
+        const activeRaw = localStorage.getItem('ncv_active_sessions');
+        if (activeRaw) {
+          const activeArr = JSON.parse(activeRaw);
+          if (Array.isArray(activeArr)) {
+            const filteredActive = activeArr.filter((s: any) => {
+              if (!s) return false;
+              const sId = String(s.examId || '').trim().toUpperCase();
+              const sCode = String(s.examCode || '').trim().toUpperCase();
+              const matchId = sId === upperId || sId === cleanId.toUpperCase();
+              const matchCode = targetCode ? sCode === targetCode || sId === targetCode : false;
+              return !matchId && !matchCode;
+            });
+            localStorage.setItem('ncv_active_sessions', JSON.stringify(filteredActive));
+          }
+        }
+      } catch (e) {}
+
       // Purge global submissions cache
       try {
         const globalRaw = localStorage.getItem('ncv_submissions_global_all');
@@ -556,7 +599,7 @@ export const api = {
               if (!s) return false;
               const sId = String(s.examId || '').trim().toUpperCase();
               const sCode = String(s.examCode || '').trim().toUpperCase();
-              const matchId = sId === upperId;
+              const matchId = sId === upperId || sId === cleanId.toUpperCase();
               const matchCode = targetCode ? sCode === targetCode || sId === targetCode : false;
               return !matchId && !matchCode;
             });
@@ -565,19 +608,32 @@ export const api = {
         }
       } catch (e) {}
 
-      // Clean up any keys that contain the deleted exam ID
+      // Clean up any keys that contain the deleted exam ID or code
       const keysToRemove: string[] = [];
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key && (key.includes(id) || key.startsWith(`ncv_submissions_${id}`) || key.startsWith(`ncv_reports_cache_${id}`))) {
+        if (
+          key &&
+          (key.includes(cleanId) ||
+            key.startsWith(`ncv_submissions_${cleanId}`) ||
+            key.startsWith(`ncv_reports_cache_${cleanId}`) ||
+            (targetCode && (key.includes(targetCode) || key.startsWith(`ncv_submissions_${targetCode}`))))
+        ) {
           keysToRemove.push(key);
         }
       }
-      keysToRemove.forEach(k => localStorage.removeItem(k));
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+
+      // Broadcast exam deleted event across all browser windows and components
+      window.dispatchEvent(new CustomEvent('ncv_exam_deleted', { detail: { examId: cleanId, examCode: targetCode } }));
+      window.dispatchEvent(new CustomEvent('ncv_submission_update', { detail: {} }));
+      const bc = new BroadcastChannel('ncv_broadcast_sync');
+      bc.postMessage({ type: 'EXAM_DELETED', examId: cleanId, examCode: targetCode });
+      bc.close();
     } catch (e) {}
 
     try {
-      await fetch(`/api/exams/${encodeURIComponent(id)}`, {
+      await fetch(`/api/exams/${encodeURIComponent(cleanId)}`, {
         method: 'DELETE',
         headers: getHeaders(true),
       });
@@ -1975,6 +2031,17 @@ export const api = {
 
     const resolvedId = examObj?.id || cleanExamId;
     const resolvedCode = examObj?.code || '';
+    const upperTargetId = resolvedId.trim().toUpperCase();
+    const upperTargetCode = resolvedCode.trim().toUpperCase();
+
+    // Guard against deleted exams: if exam is deleted, do not load or show proctor sessions
+    try {
+      const delArr = JSON.parse(localStorage.getItem('ncv_deleted_exams') || '[]');
+      if (Array.isArray(delArr) && (delArr.includes(upperTargetId) || (upperTargetCode && delArr.includes(upperTargetCode)))) {
+        return null;
+      }
+    } catch (e) {}
+
     const aliases = [cleanExamId, resolvedId, resolvedCode].filter(Boolean);
 
     // 2. Fetch server data
@@ -2147,6 +2214,17 @@ export const api = {
 
     const resolvedId = examObj?.id || cleanExamId;
     const resolvedCode = examObj?.code || '';
+    const upperTargetId = resolvedId.trim().toUpperCase();
+    const upperTargetCode = resolvedCode.trim().toUpperCase();
+
+    // Guard against deleted exams: if exam is deleted, do not return reports or student scores
+    try {
+      const delArr = JSON.parse(localStorage.getItem('ncv_deleted_exams') || '[]');
+      if (Array.isArray(delArr) && (delArr.includes(upperTargetId) || (upperTargetCode && delArr.includes(upperTargetCode)))) {
+        return null;
+      }
+    } catch (e) {}
+
     const aliases = Array.from(new Set([cleanExamId, resolvedId, resolvedCode].filter(Boolean)));
 
     // 2. Fetch server data
