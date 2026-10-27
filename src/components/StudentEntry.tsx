@@ -299,7 +299,7 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
   useEffect(() => {
     if (!studentClass) return;
     setIsLoadingStudents(true);
-    api.getStudents(studentClass)
+    api.getStudents(studentClass, false)
       .then((students) => {
         setClassStudents(students);
         setSelectedStudentId('');

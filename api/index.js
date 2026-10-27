@@ -319,13 +319,48 @@ function verifyPassword(inputPassword, storedPasswordOrHash) {
   const storedTrimmed = storedPasswordOrHash.trim();
   return trimmedInput === storedTrimmed || trimmedInput.toLowerCase() === storedTrimmed.toLowerCase() || collapsedInput.toLowerCase() === storedTrimmed.toLowerCase() || noSpaceInput.toLowerCase() === storedTrimmed.replace(/\s+/g, "").toLowerCase();
 }
-function generateStudentUsername(fullName, className) {
+function generateStudentUsername(fullName, className, classStudentsList, studentId) {
   if (!fullName) return "";
-  const words = fullName.trim().split(/\s+/).filter(Boolean);
-  const lastTwo = words.length >= 2 ? words.slice(-2).join("") : words.join("");
-  const cleanName = lastTwo.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const cleanClass = (className || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-  return `${cleanName}${cleanClass}`;
+  const cleanStr = (str) => (str || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  const get2WordClean = (nameStr) => {
+    const words = (nameStr || "").trim().split(/\s+/).filter(Boolean);
+    const selected = words.length >= 2 ? words.slice(-2).join("") : words.join("");
+    return cleanStr(selected);
+  };
+  const getFullClean = (nameStr) => {
+    const words = (nameStr || "").trim().split(/\s+/).filter(Boolean);
+    return cleanStr(words.join(""));
+  };
+  const cur2WordClean = get2WordClean(fullName);
+  const cand2 = `${cur2WordClean}${cleanClass}`;
+  if (!classStudentsList || classStudentsList.length === 0) {
+    return cand2;
+  }
+  const curNormName = fullName.trim().toLowerCase();
+  const colliding2WordStudents = classStudentsList.filter((st) => {
+    if (!st || !st.name) return false;
+    return get2WordClean(st.name) === cur2WordClean;
+  });
+  if (colliding2WordStudents.length <= 1) {
+    return cand2;
+  }
+  const fullClean = `${getFullClean(fullName)}${cleanClass}`;
+  const identicalFullNameStudents = colliding2WordStudents.filter((st) => {
+    return st.name && getFullClean(st.name) === getFullClean(fullName);
+  });
+  if (identicalFullNameStudents.length > 1) {
+    let index = -1;
+    if (studentId) {
+      index = identicalFullNameStudents.findIndex((st) => st.id === studentId);
+    }
+    if (index === -1) {
+      index = identicalFullNameStudents.findIndex((st) => st.name.trim().toLowerCase() === curNormName);
+    }
+    const suffixNum = index >= 0 ? index + 1 : 1;
+    return `${fullClean}${suffixNum}`;
+  }
+  return fullClean;
 }
 function getDefaultStudentPassword(className) {
   const cleanClass = (className || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
@@ -336,6 +371,7 @@ var DEFAULT_STUDENTS = SEED_APP_DATA.students || [];
 var INITIAL_EXAMS = SEED_APP_DATA.exams || [];
 var DatabaseManager = class {
   constructor() {
+    this.persistTimer = null;
     try {
       this.ensureDir();
       this.data = this.load();
@@ -584,16 +620,16 @@ var DatabaseManager = class {
     this.saveData(initialData);
     return initialData;
   }
-  saveData(data) {
+  saveData(data, includeBackups = true) {
     try {
-      const serialized = JSON.stringify(data, null, 2);
+      const serialized = includeBackups ? JSON.stringify(data, null, 2) : JSON.stringify(data);
       const isVercel = Boolean(process.env.VERCEL || process.env.NOW_BUILD || process.env.VERCEL_ENV);
-      const targets = isVercel ? ["/tmp/app_data.json", DB_FILE] : Array.from(/* @__PURE__ */ new Set([
+      const targets = isVercel ? ["/tmp/app_data.json", DB_FILE] : includeBackups ? Array.from(/* @__PURE__ */ new Set([
         DB_FILE,
         path.join(DATA_DIR, "app_data.backup.json"),
         DATA_FILE,
         "/tmp/app_data.json"
-      ]));
+      ])) : [DB_FILE];
       for (const targetPath of targets) {
         try {
           const dir = path.dirname(targetPath);
@@ -608,8 +644,21 @@ var DatabaseManager = class {
       console.warn("saveData error:", e);
     }
   }
-  persist() {
-    this.saveData(this.data);
+  persist(immediate = true) {
+    if (immediate) {
+      if (this.persistTimer) {
+        clearTimeout(this.persistTimer);
+        this.persistTimer = null;
+      }
+      this.saveData(this.data, true);
+      return;
+    }
+    if (!this.persistTimer) {
+      this.persistTimer = setTimeout(() => {
+        this.persistTimer = null;
+        this.saveData(this.data, false);
+      }, 1500);
+    }
   }
   // Exams
   getExams() {
@@ -634,7 +683,7 @@ var DatabaseManager = class {
         this.data.exams.push({ ...initExam, isOpen: true, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
       }
     }
-    this.persist();
+    this.persist(true);
     return this.data.exams;
   }
   getExam(id) {
@@ -642,28 +691,16 @@ var DatabaseManager = class {
       return this.data.exams && this.data.exams.length > 0 ? this.data.exams.find((e) => e.isOpen) || this.data.exams[0] : void 0;
     }
     const clean = id.trim();
-    let found = (this.data.exams || []).find((e) => e.id === clean || e.code && e.code.toUpperCase() === clean.toUpperCase());
-    if (!found) {
-      this.data = this.load();
-      found = (this.data.exams || []).find((e) => e.id === clean || e.code && e.code.toUpperCase() === clean.toUpperCase());
-    }
-    return found;
+    return (this.data.exams || []).find((e) => e.id === clean || e.code && e.code.toUpperCase() === clean.toUpperCase());
   }
   getExamByCode(code) {
     if (!code || !String(code).trim()) {
       return this.data.exams && this.data.exams.length > 0 ? this.data.exams.find((e) => e.isOpen) || this.data.exams[0] : void 0;
     }
     const normalized = String(code).trim().toUpperCase();
-    let found = (this.data.exams || []).find(
+    return (this.data.exams || []).find(
       (e) => e.code && e.code.trim().toUpperCase() === normalized || e.id && e.id.trim().toUpperCase() === normalized
     );
-    if (!found) {
-      this.data = this.load();
-      found = (this.data.exams || []).find(
-        (e) => e.code && e.code.trim().toUpperCase() === normalized || e.id && e.id.trim().toUpperCase() === normalized
-      );
-    }
-    return found;
   }
   saveExam(exam) {
     if (this.data.deletedExamIds) {
@@ -675,7 +712,7 @@ var DatabaseManager = class {
     } else {
       this.data.exams.unshift(exam);
     }
-    this.persist();
+    this.persist(true);
   }
   deleteExam(id) {
     const clean = id.trim();
@@ -707,7 +744,7 @@ var DatabaseManager = class {
       const sId = String(s.examId).trim().toUpperCase();
       return sId !== upperRealId && (upperCode ? sId !== upperCode : true) && sId !== upperInput;
     });
-    this.persist();
+    this.persist(true);
     return true;
   }
   // Sessions
@@ -743,18 +780,19 @@ var DatabaseManager = class {
       }
     );
   }
-  saveSession(session) {
+  saveSession(session, immediate) {
     const idx = this.data.sessions.findIndex((s) => s.id === session.id);
     if (idx >= 0) {
       this.data.sessions[idx] = session;
     } else {
       this.data.sessions.unshift(session);
     }
-    this.persist();
+    const shouldImmediate = immediate !== void 0 ? immediate : session.status === "submitted" || session.status === "locked";
+    this.persist(shouldImmediate);
   }
   deleteSession(sessionId) {
     this.data.sessions = this.data.sessions.filter((s) => s.id !== sessionId);
-    this.persist();
+    this.persist(true);
   }
   // Classes & Students
   getClasses() {
@@ -854,7 +892,7 @@ var DatabaseManager = class {
     const defaultPass = getDefaultStudentPassword(className);
     const normalized = classStudents.map((s) => ({
       ...s,
-      username: s.username || generateStudentUsername(s.name, s.class || className),
+      username: s.username || generateStudentUsername(s.name, s.class || className, classStudents, s.id),
       password: s.password || defaultPass,
       isPasswordChanged: !!s.isPasswordChanged
     }));
@@ -873,9 +911,10 @@ var DatabaseManager = class {
   generateAccountsForClass(className) {
     const trimmed = className.trim().toLowerCase();
     const defaultPass = getDefaultStudentPassword(className);
+    const studentsInClass = this.data.students.filter((s) => s.class.trim().toLowerCase() === trimmed);
     this.data.students.forEach((s) => {
       if (s.class.trim().toLowerCase() === trimmed) {
-        s.username = generateStudentUsername(s.name, s.class);
+        s.username = generateStudentUsername(s.name, s.class, studentsInClass, s.id);
         if (!s.password) {
           s.password = defaultPass;
           s.isPasswordChanged = false;
@@ -892,7 +931,8 @@ var DatabaseManager = class {
       (s) => s.id === studentIdOrKey || s.id.toLowerCase() === key || s.sbd && s.sbd.toLowerCase() === key || s.username && s.username.toLowerCase() === key
     );
     if (student) {
-      student.username = generateStudentUsername(student.name, student.class);
+      const studentsInClass = this.data.students.filter((s) => s.class.trim().toLowerCase() === student.class.trim().toLowerCase());
+      student.username = generateStudentUsername(student.name, student.class, studentsInClass, student.id);
       student.password = getDefaultStudentPassword(student.class);
       student.isPasswordChanged = false;
       this.persist();
@@ -903,9 +943,10 @@ var DatabaseManager = class {
   resetClassPasswords(className) {
     const trimmed = (className || "").trim().toLowerCase();
     const defaultPass = getDefaultStudentPassword(className);
+    const studentsInClass = this.data.students.filter((s) => s.class && s.class.trim().toLowerCase() === trimmed);
     this.data.students.forEach((s) => {
       if (s.class && s.class.trim().toLowerCase() === trimmed) {
-        s.username = generateStudentUsername(s.name, s.class);
+        s.username = generateStudentUsername(s.name, s.class, studentsInClass, s.id);
         s.password = defaultPass;
         s.isPasswordChanged = false;
       }
@@ -1983,8 +2024,11 @@ app.get("/api/exams", (req, res) => {
           grade: e.grade,
           targetClasses: e.targetClasses,
           durationMinutes: e.durationMinutes,
+          startTime: e.startTime,
+          endTime: e.endTime,
           totalPoints: e.totalPoints,
           questionCount: Array.isArray(e.questions) ? e.questions.length : 0,
+          randomQuestionCount: e.randomQuestionCount,
           isOpen: e.isOpen,
           maxAttempts: Number(e.maxAttempts) > 0 ? Number(e.maxAttempts) : 1,
           maxViolationsBeforeLock: e.maxViolationsBeforeLock || 3,
@@ -2023,6 +2067,9 @@ app.get("/api/exams/:id", (req, res) => {
       grade: exam.grade,
       targetClasses: exam.targetClasses,
       durationMinutes: exam.durationMinutes,
+      startTime: exam.startTime,
+      endTime: exam.endTime,
+      randomQuestionCount: exam.randomQuestionCount,
       totalPoints: exam.totalPoints,
       isOpen: exam.isOpen,
       maxAttempts: Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1,
@@ -2326,12 +2373,37 @@ var handleValidateEntry = (req, res) => {
     if (!examCode || !finalStudentName || !finalStudentClass) {
       return res.status(400).json({ error: "Vui l\xF2ng nh\u1EADp \u0111\u1EA7y \u0111\u1EE7 th\xF4ng tin: M\xE3 \u0111\u1EC1, T\xEAn \u0111\u0103ng nh\u1EADp (ho\u1EB7c H\u1ECD t\xEAn, L\u1EDBp)" });
     }
+    if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
+      const existingExam = db.getExamByCode(examCode) || db.getExam(req.body.examSnapshot.id);
+      if (!existingExam) {
+        db.saveExam(req.body.examSnapshot);
+      }
+    }
     const exam = db.getExamByCode(examCode);
     if (!exam) {
       return res.status(404).json({ error: "B\xE0i ki\u1EC3m tra kh\xF4ng t\u1ED3n t\u1EA1i ho\u1EB7c \u0111\xE3 b\u1ECB g\u1EE1. Vui l\xF2ng ki\u1EC3m tra l\u1EA1i." });
     }
     if (!exam.isOpen && !isTeacherReq) {
       return res.status(403).json({ error: `B\xE0i ki\u1EC3m tra "${exam.title}" hi\u1EC7n \u0111ang \u0111\xF3ng. Vui l\xF2ng li\xEAn h\u1EC7 th\u1EA7y L\xEA Gia L\u1EE3i \u0111\u1EC3 m\u1EDF ph\xF2ng thi.` });
+    }
+    const nowMs = Date.now();
+    if (exam.startTime && !isTeacherReq) {
+      const sMs = new Date(exam.startTime).getTime();
+      if (!isNaN(sMs) && nowMs < sMs) {
+        const startStr = new Date(sMs).toLocaleString("vi-VN");
+        return res.status(403).json({
+          error: `B\xE0i ki\u1EC3m tra "${exam.title}" ch\u01B0a \u0111\u1EBFn gi\u1EDD b\u1EAFt \u0111\u1EA7u! Ca thi s\u1EBD m\u1EDF v\xE0o l\xFAc: ${startStr}. Em h\xE3y quay l\u1EA1i \u0111\xFAng gi\u1EDD nh\xE9.`
+        });
+      }
+    }
+    if (exam.endTime && !isTeacherReq) {
+      const eMs = new Date(exam.endTime).getTime();
+      if (!isNaN(eMs) && nowMs > eMs) {
+        const endStr = new Date(eMs).toLocaleString("vi-VN");
+        return res.status(403).json({
+          error: `B\xE0i ki\u1EC3m tra "${exam.title}" \u0111\xE3 h\u1EBFt h\u1EA1n v\xE0o l\xFAc: ${endStr}. Ca thi \u0111\xE3 k\u1EBFt th\xFAc.`
+        });
+      }
     }
     if (exam.targetClasses && exam.targetClasses.length > 0) {
       const cleanSClass = finalStudentClass.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -2525,11 +2597,13 @@ app.post("/api/student/start", (req, res) => {
     const sClassNorm = String(studentClass).trim().toLowerCase();
     const isTestClass = isTeacherReq || sClassNorm.includes("thu") || sClassNorm.includes("th\u1EED") || sClassNorm.includes("test") || sClassNorm.includes("demo") || sClassNorm.includes("gv");
     const cleanExamCode = String(examCode || "").trim();
-    let exam = db.getExamByCode(cleanExamCode);
-    if (!exam) {
-      const allExams = db.getExams();
-      exam = allExams.find((e) => e.isOpen) || allExams[0];
+    if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
+      const existingExam = db.getExamByCode(cleanExamCode) || db.getExam(req.body.examSnapshot.id);
+      if (!existingExam || req.body.examSnapshot.updatedAt && existingExam.updatedAt && req.body.examSnapshot.updatedAt > existingExam.updatedAt) {
+        db.saveExam(req.body.examSnapshot);
+      }
     }
+    const exam = db.getExamByCode(cleanExamCode) || db.getExam(cleanExamCode);
     if (!exam) {
       return res.status(404).json({ error: "B\xE0i ki\u1EC3m tra kh\xF4ng t\u1ED3n t\u1EA1i ho\u1EB7c \u0111\xE3 b\u1ECB x\xF3a." });
     }
@@ -2539,6 +2613,25 @@ app.post("/api/student/start", (req, res) => {
     }
     if (!exam.isOpen && !isTeacherReq && !isTestClass) {
       return res.status(403).json({ error: `B\xE0i ki\u1EC3m tra "${exam.title}" hi\u1EC7n \u0111ang \u0111\xF3ng. Vui l\xF2ng li\xEAn h\u1EC7 th\u1EA7y L\xEA Gia L\u1EE3i \u0111\u1EC3 m\u1EDF ph\xF2ng thi.` });
+    }
+    const checkNowMs = Date.now();
+    if (exam.startTime && !isTeacherReq && !isTestClass) {
+      const sMs = new Date(exam.startTime).getTime();
+      if (!isNaN(sMs) && checkNowMs < sMs) {
+        const startStr = new Date(sMs).toLocaleString("vi-VN");
+        return res.status(403).json({
+          error: `B\xE0i ki\u1EC3m tra "${exam.title}" ch\u01B0a \u0111\u1EBFn gi\u1EDD b\u1EAFt \u0111\u1EA7u! Ca thi s\u1EBD m\u1EDF v\xE0o l\xFAc: ${startStr}. Em h\xE3y quay l\u1EA1i \u0111\xFAng gi\u1EDD nh\xE9.`
+        });
+      }
+    }
+    if (exam.endTime && !isTeacherReq && !isTestClass) {
+      const eMs = new Date(exam.endTime).getTime();
+      if (!isNaN(eMs) && checkNowMs > eMs) {
+        const endStr = new Date(eMs).toLocaleString("vi-VN");
+        return res.status(403).json({
+          error: `B\xE0i ki\u1EC3m tra "${exam.title}" \u0111\xE3 h\u1EBFt h\u1EA1n v\xE0o l\xFAc: ${endStr}. Ca thi \u0111\xE3 k\u1EBFt th\xFAc.`
+        });
+      }
     }
     const existingSessions = db.getSessions(exam.id) || [];
     const studentPrevSessions = existingSessions.filter(
@@ -2610,6 +2703,8 @@ app.post("/api/student/start", (req, res) => {
         startedAt: prevSession.startedAt,
         expiresAt: prevSession.expiresAt,
         questions: studentQuestions2,
+        questionOrder: prevSession.questionOrder,
+        optionOrder: prevSession.optionOrder,
         savedAnswers: prevSession.answers,
         flaggedQuestions: prevSession.flaggedQuestions || [],
         violationCount: prevSession.violationCount || 0,
@@ -2702,6 +2797,8 @@ app.post("/api/student/start", (req, res) => {
       startedAt: session.startedAt,
       expiresAt: session.expiresAt,
       questions: studentQuestions,
+      questionOrder,
+      optionOrder,
       savedAnswers: session.answers,
       flaggedQuestions: [],
       violationCount: 0,
@@ -2832,8 +2929,8 @@ app.post("/api/student/answer", (req, res) => {
     }
   }
   session.lastHeartbeat = (/* @__PURE__ */ new Date()).toISOString();
-  db.saveSession(session);
-  res.json({ success: true, savedAnswers: session.answers });
+  db.saveSession(session, false);
+  res.json({ success: true });
 });
 app.post("/api/student/violation", (req, res) => {
   const { sessionId, type, description, examId, studentName, studentClass, sbd } = req.body;
@@ -2968,7 +3065,7 @@ app.post("/api/student/heartbeat", (req, res) => {
   if (violationCount !== void 0) {
     session.violationCount = violationCount;
   }
-  db.saveSession(session);
+  db.saveSession(session, false);
   res.json({
     success: true,
     isLocked: session.status === "locked",
@@ -3009,11 +3106,14 @@ app.post("/api/student/submit", (req, res) => {
     startedAt,
     attemptNumber
   } = req.body;
-  let session = sessionId ? db.getSession(sessionId) : void 0;
-  let exam = session ? db.getExam(session.examId) : examId ? db.getExam(examId) : examCode ? db.getExamByCode(examCode) : void 0;
-  if (!exam && db.getExams().length > 0) {
-    exam = db.getExams()[0];
+  if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
+    const existingExam = db.getExam(req.body.examSnapshot.id) || (examCode ? db.getExamByCode(examCode) : void 0);
+    if (!existingExam || req.body.examSnapshot.updatedAt && existingExam.updatedAt && req.body.examSnapshot.updatedAt > existingExam.updatedAt) {
+      db.saveExam(req.body.examSnapshot);
+    }
   }
+  let session = sessionId ? db.getSession(sessionId) : void 0;
+  let exam = session ? db.getExam(session.examId) : examId ? db.getExam(examId) || db.getExamByCode(examId) : examCode ? db.getExamByCode(examCode) : void 0;
   if (!exam) {
     return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y b\xE0i thi" });
   }
@@ -3062,7 +3162,7 @@ app.get("/api/proctor/:examId", requireTeacherAuth, (req, res) => {
     const expiresMs = new Date(s.expiresAt).getTime();
     const remainingSeconds = Math.max(0, Math.floor((expiresMs - now) / 1e3));
     const lastActiveMs = new Date(s.lastHeartbeat).getTime();
-    const isDisconnected = s.status === "in_progress" && now - lastActiveMs > 35e3;
+    const isDisconnected = s.status === "in_progress" && now - lastActiveMs > 6e4;
     const answeredCount = Object.keys(s.answers || {}).length;
     let computedStatus = s.status;
     if (computedStatus === "in_progress") {

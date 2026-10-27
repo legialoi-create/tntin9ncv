@@ -201,16 +201,9 @@ export async function getSubmissionsFromFirestore(
   }
 
   try {
-    // 0. Load deleted exams blacklist to ensure submissions from deleted exams are never returned
-    const deletedSet = new Set<string>();
-    try {
-      const deletedSnap = await getDocs(collection(firestore, 'deleted_exams'));
-      deletedSnap.forEach((d) => {
-        const data = d.data();
-        if (data?.id) deletedSet.add(String(data.id).trim().toUpperCase());
-        if (d.id) deletedSet.add(d.id.trim().toUpperCase());
-      });
-    } catch (e) {}
+    // 0. Load deleted exams blacklist from memory cache to ensure submissions from deleted exams are never returned
+    const deletedArr = await getDeletedExamsFromFirestore();
+    const deletedSet = new Set<string>(deletedArr);
 
     const colRef = collection(firestore, 'submissions');
     const snap = await getDocs(colRef);
@@ -355,6 +348,11 @@ export async function deleteSubmissionsForExamFromFirestore(
 export async function recordDeletedExamInFirestore(examId: string, examCode?: string): Promise<void> {
   if (!examId) return;
   cachedDeletedExams = null;
+  cachedExams = null;
+  try {
+    sessionStorage.removeItem('ncv_fb_del_exams');
+    sessionStorage.removeItem('ncv_fb_exams');
+  } catch (e) {}
   const cleanId = examId.trim();
   const upperId = cleanId.toUpperCase();
   const upperCode = examCode ? examCode.trim().toUpperCase() : '';
@@ -399,13 +397,25 @@ export async function recordDeletedExamInFirestore(examId: string, examCode?: st
   }
 }
 
-// 5. Get all deleted exam IDs/codes from Firestore (with 60-second in-memory cache to minimize read ops)
+// 5. Get all deleted exam IDs/codes from Firestore (with 5-minute memory + sessionStorage cache)
 let cachedDeletedExams: { ids: string[]; timestamp: number } | null = null;
 
 export async function getDeletedExamsFromFirestore(forceRefresh = false): Promise<string[]> {
   const now = Date.now();
-  if (!forceRefresh && cachedDeletedExams && now - cachedDeletedExams.timestamp < 60000) {
-    return cachedDeletedExams.ids;
+  if (!forceRefresh) {
+    if (cachedDeletedExams && now - cachedDeletedExams.timestamp < 300000) {
+      return cachedDeletedExams.ids;
+    }
+    try {
+      const ss = sessionStorage.getItem('ncv_fb_del_exams');
+      if (ss) {
+        const parsed = JSON.parse(ss);
+        if (parsed && Array.isArray(parsed.ids) && now - parsed.timestamp < 300000) {
+          cachedDeletedExams = parsed;
+          return parsed.ids;
+        }
+      }
+    } catch (e) {}
   }
 
   const ids: string[] = [];
@@ -421,6 +431,9 @@ export async function getDeletedExamsFromFirestore(forceRefresh = false): Promis
       }
     });
     cachedDeletedExams = { ids, timestamp: now };
+    try {
+      sessionStorage.setItem('ncv_fb_del_exams', JSON.stringify(cachedDeletedExams));
+    } catch (e) {}
   } catch (err) {
     console.warn('[Firebase] getDeletedExamsFromFirestore error:', err);
     if (cachedDeletedExams) return cachedDeletedExams.ids;
@@ -432,6 +445,9 @@ export async function getDeletedExamsFromFirestore(forceRefresh = false): Promis
 export async function unmarkDeletedExamInFirestore(examId: string, examCode?: string): Promise<void> {
   if (!examId) return;
   cachedDeletedExams = null;
+  try {
+    sessionStorage.removeItem('ncv_fb_del_exams');
+  } catch (e) {}
   const upperId = examId.trim().toUpperCase();
   const upperCode = examCode ? examCode.trim().toUpperCase() : '';
   try {
@@ -454,6 +470,9 @@ export async function saveExamToFirestore(exam: any): Promise<void> {
   if (!exam || !exam.id) return;
   cachedExams = null; // Invalidate cache on write
   try {
+    sessionStorage.removeItem('ncv_fb_exams');
+  } catch (e) {}
+  try {
     const upperId = String(exam.id).trim().toUpperCase();
     const upperCode = exam.code ? String(exam.code).trim().toUpperCase() : '';
     await unmarkDeletedExamInFirestore(upperId, upperCode);
@@ -466,11 +485,23 @@ export async function saveExamToFirestore(exam: any): Promise<void> {
   }
 }
 
-// 8. Get custom exams saved in Firestore (with 60-second in-memory cache)
+// 8. Get custom exams saved in Firestore (with 5-minute memory + sessionStorage cache)
 export async function getExamsFromFirestore(forceRefresh = false): Promise<any[]> {
   const now = Date.now();
-  if (!forceRefresh && cachedExams && now - cachedExams.timestamp < 60000) {
-    return cachedExams.list;
+  if (!forceRefresh) {
+    if (cachedExams && now - cachedExams.timestamp < 300000) {
+      return cachedExams.list;
+    }
+    try {
+      const ss = sessionStorage.getItem('ncv_fb_exams');
+      if (ss) {
+        const parsed = JSON.parse(ss);
+        if (parsed && Array.isArray(parsed.list) && now - parsed.timestamp < 300000) {
+          cachedExams = parsed;
+          return parsed.list;
+        }
+      }
+    } catch (e) {}
   }
 
   const exams: any[] = [];
@@ -492,6 +523,9 @@ export async function getExamsFromFirestore(forceRefresh = false): Promise<any[]
       }
     });
     cachedExams = { list: exams, timestamp: now };
+    try {
+      sessionStorage.setItem('ncv_fb_exams', JSON.stringify(cachedExams));
+    } catch (e) {}
   } catch (err) {
     console.warn('[Firebase] getExamsFromFirestore error:', err);
     if (cachedExams) return cachedExams.list;
@@ -520,6 +554,9 @@ export async function saveStudentsToFirestore(students: any[]): Promise<boolean>
     });
     await Promise.all(promises);
     cachedStudents = null; // Invalidate cache on student write
+    try {
+      sessionStorage.removeItem('ncv_fb_students');
+    } catch (e) {}
     return true;
   } catch (err) {
     console.warn('[Firebase] saveStudentsToFirestore error:', err);
@@ -527,17 +564,30 @@ export async function saveStudentsToFirestore(students: any[]): Promise<boolean>
   }
 }
 
-// In-memory cache for students with 60-second TTL
+// In-memory + sessionStorage cache for students with 5-minute TTL
 let cachedStudents: { list: any[]; timestamp: number } | null = null;
 
-// 10. Get students from Firestore (cached 60s to minimize Firestore reads)
+// 10. Get students from Firestore (cached 5m to minimize Firestore reads)
 export async function getStudentsFromFirestore(className?: string, forceRefresh = false): Promise<any[]> {
   const now = Date.now();
   const targetClass = className ? className.trim().toUpperCase() : '';
 
-  if (!forceRefresh && cachedStudents && now - cachedStudents.timestamp < 60000) {
-    if (!targetClass) return cachedStudents.list;
-    return cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+  if (!forceRefresh) {
+    if (cachedStudents && now - cachedStudents.timestamp < 300000) {
+      if (!targetClass) return cachedStudents.list;
+      return cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+    }
+    try {
+      const ss = sessionStorage.getItem('ncv_fb_students');
+      if (ss) {
+        const parsed = JSON.parse(ss);
+        if (parsed && Array.isArray(parsed.list) && now - parsed.timestamp < 300000) {
+          cachedStudents = parsed;
+          if (!targetClass) return parsed.list;
+          return parsed.list.filter((s: any) => String(s.class || '').trim().toUpperCase() === targetClass);
+        }
+      }
+    } catch (e) {}
   }
 
   const list: any[] = [];
@@ -559,6 +609,9 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
       }
     });
     cachedStudents = { list, timestamp: now };
+    try {
+      sessionStorage.setItem('ncv_fb_students', JSON.stringify(cachedStudents));
+    } catch (e) {}
   } catch (err) {
     console.warn('[Firebase] getStudentsFromFirestore error:', err);
     if (cachedStudents) {
@@ -575,6 +628,9 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
 export async function deleteStudentFromFirestore(studentId: string): Promise<void> {
   if (!studentId) return;
   cachedStudents = null; // Invalidate cache
+  try {
+    sessionStorage.removeItem('ncv_fb_students');
+  } catch (e) {}
   const docId = `st_${studentId}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   try {
     await deleteDoc(doc(firestore, 'students', docId));
@@ -587,6 +643,9 @@ export async function deleteStudentFromFirestore(studentId: string): Promise<voi
 export async function deleteClassStudentsFromFirestore(className: string): Promise<void> {
   if (!className) return;
   cachedStudents = null; // Invalidate cache
+  try {
+    sessionStorage.removeItem('ncv_fb_students');
+  } catch (e) {}
   const targetClass = className.trim().toUpperCase();
   try {
     const colRef = collection(firestore, 'students');
@@ -632,7 +691,7 @@ export async function saveClassesToFirestore(classes: any[]): Promise<void> {
 // 14. Get classes from Firestore (cached 60s to minimize read ops)
 export async function getClassesFromFirestore(forceRefresh = false): Promise<any[]> {
   const now = Date.now();
-  if (!forceRefresh && cachedClasses && now - cachedClasses.timestamp < 60000) {
+  if (!forceRefresh && cachedClasses && now - cachedClasses.timestamp < 300000) {
     return cachedClasses.list;
   }
 
@@ -702,7 +761,7 @@ export async function recordDeletedClassInFirestore(className: string): Promise<
 // 17. Get Deleted Classes from Firestore (cached 60s)
 export async function getDeletedClassesFromFirestore(forceRefresh = false): Promise<string[]> {
   const now = Date.now();
-  if (!forceRefresh && cachedDeletedClasses && now - cachedDeletedClasses.timestamp < 60000) {
+  if (!forceRefresh && cachedDeletedClasses && now - cachedDeletedClasses.timestamp < 300000) {
     return cachedDeletedClasses.ids;
   }
 

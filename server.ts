@@ -303,8 +303,11 @@ app.get('/api/exams', (req: Request, res: Response) => {
           grade: e.grade,
           targetClasses: e.targetClasses,
           durationMinutes: e.durationMinutes,
+          startTime: e.startTime,
+          endTime: e.endTime,
           totalPoints: e.totalPoints,
           questionCount: Array.isArray(e.questions) ? e.questions.length : 0,
+          randomQuestionCount: e.randomQuestionCount,
           isOpen: e.isOpen,
           maxAttempts: Number(e.maxAttempts) > 0 ? Number(e.maxAttempts) : 1,
           maxViolationsBeforeLock: e.maxViolationsBeforeLock || 3,
@@ -347,6 +350,9 @@ app.get('/api/exams/:id', (req: Request, res: Response) => {
       grade: exam.grade,
       targetClasses: exam.targetClasses,
       durationMinutes: exam.durationMinutes,
+      startTime: exam.startTime,
+      endTime: exam.endTime,
+      randomQuestionCount: exam.randomQuestionCount,
       totalPoints: exam.totalPoints,
       isOpen: exam.isOpen,
       maxAttempts: Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1,
@@ -702,6 +708,13 @@ const handleValidateEntry = (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin: Mã đề, Tên đăng nhập (hoặc Họ tên, Lớp)' });
     }
 
+    if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
+      const existingExam = db.getExamByCode(examCode) || db.getExam(req.body.examSnapshot.id);
+      if (!existingExam) {
+        db.saveExam(req.body.examSnapshot);
+      }
+    }
+
     const exam = db.getExamByCode(examCode);
     if (!exam) {
       return res.status(404).json({ error: 'Bài kiểm tra không tồn tại hoặc đã bị gỡ. Vui lòng kiểm tra lại.' });
@@ -984,11 +997,14 @@ app.post('/api/student/start', (req: Request, res: Response) => {
     const isTestClass = isTeacherReq || sClassNorm.includes('thu') || sClassNorm.includes('thử') || sClassNorm.includes('test') || sClassNorm.includes('demo') || sClassNorm.includes('gv');
 
     const cleanExamCode = String(examCode || '').trim();
-    let exam = db.getExamByCode(cleanExamCode);
-    if (!exam) {
-      const allExams = db.getExams();
-      exam = allExams.find(e => e.isOpen) || allExams[0];
+    if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
+      const existingExam = db.getExamByCode(cleanExamCode) || db.getExam(req.body.examSnapshot.id);
+      if (!existingExam || (req.body.examSnapshot.updatedAt && existingExam.updatedAt && req.body.examSnapshot.updatedAt > existingExam.updatedAt)) {
+        db.saveExam(req.body.examSnapshot);
+      }
     }
+
+    const exam = db.getExamByCode(cleanExamCode) || db.getExam(cleanExamCode);
 
     if (!exam) {
       return res.status(404).json({ error: 'Bài kiểm tra không tồn tại hoặc đã bị xóa.' });
@@ -1111,6 +1127,8 @@ app.post('/api/student/start', (req: Request, res: Response) => {
       startedAt: prevSession.startedAt,
       expiresAt: prevSession.expiresAt,
       questions: studentQuestions,
+      questionOrder: prevSession.questionOrder,
+      optionOrder: prevSession.optionOrder,
       savedAnswers: prevSession.answers,
       flaggedQuestions: prevSession.flaggedQuestions || [],
       violationCount: prevSession.violationCount || 0,
@@ -1225,6 +1243,8 @@ app.post('/api/student/start', (req: Request, res: Response) => {
     startedAt: session.startedAt,
     expiresAt: session.expiresAt,
     questions: studentQuestions,
+    questionOrder,
+    optionOrder,
     savedAnswers: session.answers,
     flaggedQuestions: [],
     violationCount: 0,
@@ -1382,9 +1402,9 @@ app.post('/api/student/answer', (req: Request, res: Response) => {
   }
 
   session.lastHeartbeat = new Date().toISOString();
-  db.saveSession(session);
+  db.saveSession(session, false);
 
-  res.json({ success: true, savedAnswers: session.answers });
+  res.json({ success: true });
 });
 
 // Step D: Anti-cheat Violation Reporting
@@ -1539,7 +1559,7 @@ app.post('/api/student/heartbeat', (req: Request, res: Response) => {
   if (violationCount !== undefined) {
     session.violationCount = violationCount;
   }
-  db.saveSession(session);
+  db.saveSession(session, false);
 
   res.json({
     success: true,
@@ -1588,12 +1608,18 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     attemptNumber
   } = req.body;
 
+  if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
+    const existingExam = db.getExam(req.body.examSnapshot.id) || (examCode ? db.getExamByCode(examCode) : undefined);
+    if (!existingExam || (req.body.examSnapshot.updatedAt && existingExam.updatedAt && req.body.examSnapshot.updatedAt > existingExam.updatedAt)) {
+      db.saveExam(req.body.examSnapshot);
+    }
+  }
+
   let session = sessionId ? db.getSession(sessionId) : undefined;
 
-  let exam = session ? db.getExam(session.examId) : (examId ? db.getExam(examId) : (examCode ? db.getExamByCode(examCode) : undefined));
-  if (!exam && db.getExams().length > 0) {
-    exam = db.getExams()[0];
-  }
+  let exam = session
+    ? db.getExam(session.examId)
+    : (examId ? (db.getExam(examId) || db.getExamByCode(examId)) : (examCode ? db.getExamByCode(examCode) : undefined));
 
   if (!exam) {
     return res.status(404).json({ error: 'Không tìm thấy bài thi' });
@@ -1651,7 +1677,7 @@ app.get('/api/proctor/:examId', requireTeacherAuth, (req: Request, res: Response
     const expiresMs = new Date(s.expiresAt).getTime();
     const remainingSeconds = Math.max(0, Math.floor((expiresMs - now) / 1000));
     const lastActiveMs = new Date(s.lastHeartbeat).getTime();
-    const isDisconnected = s.status === 'in_progress' && (now - lastActiveMs > 35000);
+    const isDisconnected = s.status === 'in_progress' && (now - lastActiveMs > 60000);
 
     const answeredCount = Object.keys(s.answers || {}).length;
 

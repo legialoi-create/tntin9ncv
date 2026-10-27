@@ -252,7 +252,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       if (!navigator.onLine) {
         setIsOffline(true);
         setOfflineSeconds((prev) => {
-          const next = prev + 5;
+          const next = prev + 20;
           if (next >= 120 && !longDisconnectionModal) {
             setLongDisconnectionModal(true);
           }
@@ -267,19 +267,21 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
             studentClass: studentInfo.class,
             sbd: studentInfo.sbd,
             violationCount: violationCount,
-            answers: answers,
             status: isLocked ? 'locked' : 'in_progress',
             attemptNumber: currentSession.attemptNumber || 1
           });
           if (res.isLocked) {
             setIsLocked(true);
+          } else if (isLocked) {
+            setIsLocked(false);
+            setViolationCount(0);
           }
           setIsOffline(false);
           setOfflineSeconds(0);
         } catch (e) {
           setIsOffline(true);
           setOfflineSeconds((prev) => {
-            const next = prev + 5;
+            const next = prev + 20;
             if (next >= 120 && !longDisconnectionModal) {
               setLongDisconnectionModal(true);
             }
@@ -287,41 +289,44 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
           });
         }
       }
-    }, 5000);
+    }, 20000);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       clearInterval(hbInterval);
     };
-  }, [currentSession.sessionId, submitResult, isLocked, longDisconnectionModal]);
+  }, [currentSession.sessionId, submitResult, isLocked, longDisconnectionModal, violationCount]);
 
-  // Periodic polling when locked to see if teacher unlocked
+  // Fast unlock check ONLY while locked (every 6 seconds instead of 3s)
   useEffect(() => {
     if (!isLocked || submitResult) return;
     const interval = setInterval(async () => {
       try {
-        const check = await api.validateStudentEntry({
-          examCode: examInfo.code,
+        const res = await api.heartbeat({
+          sessionId: currentSession.sessionId,
+          examId: examInfo.id,
           studentName: studentInfo.name,
           studentClass: studentInfo.class,
           sbd: studentInfo.sbd,
+          violationCount: violationCount,
+          status: 'locked',
+          attemptNumber: currentSession.attemptNumber || 1
         });
-        if (check.valid && !check.isLocked) {
+        if (!res.isLocked) {
           setIsLocked(false);
           setViolationCount(0);
         }
       } catch (e) {
         // ignore
       }
-    }, 3000);
+    }, 6000);
     return () => clearInterval(interval);
-  }, [isLocked, examInfo.code, studentInfo, submitResult]);
+  }, [isLocked, currentSession.sessionId, examInfo.id, studentInfo, submitResult, violationCount, currentSession.attemptNumber]);
 
   const roomEntryTimeRef = useRef(Date.now());
-  const lastSyncRef = useRef<number>(Date.now());
 
-  // 1. Register active session in Firestore so Teacher Live Proctoring sees student immediately
+  // 1. Register active session in Firestore once on entry so Teacher Live Proctoring sees student immediately
   useEffect(() => {
     saveStudentSessionToFirestore({
       sessionId: currentSession.sessionId,
@@ -339,31 +344,19 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     }).catch(() => {});
   }, [currentSession.sessionId, examInfo.id, examInfo.code, studentInfo.name, studentInfo.class, studentInfo.sbd, questions.length]);
 
-  // 2. Optimized checkpoint sync: Keep answers in local buffer during exam (0 writes per answer click).
-  // Only sync progress periodically every 3 minutes or when locked to minimize Firestore writes.
+  // 2. Zero periodic Firestore writes during exam: only sync to Firestore if student gets locked
   const answersRef = useRef(answers);
   answersRef.current = answers;
 
   useEffect(() => {
-    if (submitResult) return;
-
-    const syncCheckpoint = () => {
-      const currentAnsCount = Object.keys(answersRef.current).length;
-      updateSessionProgressInFirestore({
-        sessionId: currentSession.sessionId,
-        answeredCount: currentAnsCount,
-        violationCount,
-        isLocked
-      }).catch(() => {});
-    };
-
-    if (isLocked) {
-      syncCheckpoint();
-      return;
-    }
-
-    const interval = setInterval(syncCheckpoint, 180000); // 3-minute interval
-    return () => clearInterval(interval);
+    if (submitResult || !isLocked) return;
+    const currentAnsCount = Object.keys(answersRef.current).length;
+    updateSessionProgressInFirestore({
+      sessionId: currentSession.sessionId,
+      answeredCount: currentAnsCount,
+      violationCount,
+      isLocked: true
+    }).catch(() => {});
   }, [isLocked, violationCount, submitResult, currentSession.sessionId]);
 
   // Record Violation Function

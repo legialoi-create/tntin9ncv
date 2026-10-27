@@ -333,36 +333,37 @@ export const api = {
       }
     } catch (e) {}
 
-    // 2. Cross-device and cross-coldboot check: Load deleted exams blacklist from Firebase Firestore
-    try {
-      const fbDeleted = await getDeletedExamsFromFirestore();
-      fbDeleted.forEach((id) => deletedExamsSet.add(id));
-      localStorage.setItem('ncv_deleted_exams', JSON.stringify(Array.from(deletedExamsSet)));
-    } catch (e) {}
-
-    // 3. Fetch from backend API
+    // 2. Parallel fetch from backend API and cached Firebase Firestore (Vercel cold-start proof + zero waterfall delay)
     let serverData: Exam[] = [];
-    try {
-      const res = await fetch('/api/exams', {
-        headers: getHeaders(asTeacher),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          serverData = data;
-        }
-      }
-    } catch (e) {}
-
-    // 4. Fetch persistent exams from Firebase Firestore
     let fbExams: Exam[] = [];
-    try {
-      fbExams = await getExamsFromFirestore();
-    } catch (e) {}
 
-    // 5. Merge all sources, strictly EXCLUDING any exam in deletedExamsSet
-    // Priority: localExams & fbExams take precedence over server seed data.
-    // When the same exam exists in multiple sources, the one with the newest updatedAt timestamp wins.
+    await Promise.all([
+      (async () => {
+        try {
+          const res = await fetch('/api/exams', {
+            headers: getHeaders(asTeacher),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data)) serverData = data;
+          }
+        } catch (e) {}
+      })(),
+      (async () => {
+        try {
+          const fbDeleted = await getDeletedExamsFromFirestore();
+          fbDeleted.forEach((id) => deletedExamsSet.add(id));
+          localStorage.setItem('ncv_deleted_exams', JSON.stringify(Array.from(deletedExamsSet)));
+        } catch (e) {}
+      })(),
+      (async () => {
+        try {
+          fbExams = await getExamsFromFirestore();
+        } catch (e) {}
+      })()
+    ]);
+
+    // 3. Merge all sources, strictly EXCLUDING any exam in deletedExamsSet
     const examMap = new Map<string, Exam>();
     const allCandidates = [...localExams, ...fbExams, ...serverData];
 
@@ -379,8 +380,14 @@ export const api = {
       } else {
         const existingTime = new Date(existing.updatedAt || existing.createdAt || 0).getTime();
         const incomingTime = new Date(e.updatedAt || e.createdAt || 0).getTime();
-        if (incomingTime > existingTime) {
-          examMap.set(e.id, e);
+        // Preserve questions array from Firestore/local when merging with student-stripped serverData
+        const mergedQuestions = (Array.isArray(e.questions) && e.questions.length > 0)
+          ? e.questions
+          : existing.questions;
+        if (incomingTime >= existingTime) {
+          examMap.set(e.id, { ...existing, ...e, questions: mergedQuestions });
+        } else if (!existing.questions && mergedQuestions) {
+          examMap.set(e.id, { ...existing, questions: mergedQuestions });
         }
       }
     });
@@ -388,8 +395,7 @@ export const api = {
     const cleanExams = Array.from(examMap.values());
     localStorage.setItem('ncv_exams_data', JSON.stringify(cleanExams));
 
-    // If Firestore had 0 exams but we have exams, save them permanently to Firestore
-    if (fbExams.length === 0 && cleanExams.length > 0) {
+    if (asTeacher && fbExams.length === 0 && cleanExams.length > 0) {
       cleanExams.forEach((exam) => {
         saveExamToFirestore(exam).catch(() => {});
       });
@@ -749,32 +755,42 @@ export const api = {
       } catch (e) {}
     }
 
-    // Get deleted classes blacklist from both local storage and Cloud Firestore
     const deletedClassesSet = new Set<string>();
     try {
       const delArr = JSON.parse(localStorage.getItem('ncv_deleted_classes') || '[]');
       if (Array.isArray(delArr)) {
         delArr.forEach((c: string) => deletedClassesSet.add(String(c).trim().toUpperCase()));
       }
-      const fbDeleted = await getDeletedClassesFromFirestore();
-      fbDeleted.forEach((c) => deletedClassesSet.add(c));
-      localStorage.setItem('ncv_deleted_classes', JSON.stringify(Array.from(deletedClassesSet)));
     } catch (e) {}
 
-    // Fetch from Firestore
-    let fbClasses: ClassInfo[] = [];
-    try {
-      fbClasses = await getClassesFromFirestore();
-    } catch (e) {}
-
+    // Parallel fetch from server and cached Firestore
     let serverClasses: ClassInfo[] = [];
-    try {
-      const res = await fetch('/api/classes');
-      if (res.ok) {
-        const serverData = await res.json();
-        if (Array.isArray(serverData)) serverClasses = serverData;
-      }
-    } catch (e) {}
+    let fbClasses: ClassInfo[] = [];
+    const isTeacherSession = Boolean(getAuthToken());
+
+    await Promise.all([
+      (async () => {
+        try {
+          const res = await fetch('/api/classes');
+          if (res.ok) {
+            const serverData = await res.json();
+            if (Array.isArray(serverData)) serverClasses = serverData;
+          }
+        } catch (e) {}
+      })(),
+      (async () => {
+        try {
+          const fbDeleted = await getDeletedClassesFromFirestore();
+          fbDeleted.forEach((c) => deletedClassesSet.add(c));
+          localStorage.setItem('ncv_deleted_classes', JSON.stringify(Array.from(deletedClassesSet)));
+        } catch (e) {}
+      })(),
+      (async () => {
+        try {
+          fbClasses = await getClassesFromFirestore();
+        } catch (e) {}
+      })()
+    ]);
 
     const classMap = new Map<string, ClassInfo>();
     [...fbClasses, ...localClasses, ...serverClasses].forEach((c) => {
@@ -792,7 +808,7 @@ export const api = {
     const clean = Array.from(classMap.values());
     if (clean.length > 0) {
       localStorage.setItem('ncv_classes_data', JSON.stringify(clean));
-      if (fbClasses.length === 0) {
+      if (isTeacherSession && fbClasses.length === 0) {
         saveClassesToFirestore(clean).catch(() => {});
       }
       return clean;
@@ -951,15 +967,34 @@ export const api = {
       }
     } catch (e) {}
 
-    // 1. Fetch from Firebase Firestore
+    // 1. Parallel fetch from Server and cached Firebase Firestore (Vercel cold-start proof)
+    let serverStudents: StudentInfo[] = [];
     let fbStudents: StudentInfo[] = [];
-    try {
-      fbStudents = await getStudentsFromFirestore(className);
-    } catch (e) {
-      console.warn('[Firebase] getStudentsFromFirestore error:', e);
-    }
 
-    // 2. Fetch from local cache (teacher's immediate state)
+    await Promise.all([
+      (async () => {
+        try {
+          const res = await fetch(url, {
+            headers: getHeaders(asTeacher),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data)) {
+              serverStudents = data.filter((s) => s && s.id && !deletedStudentIdsSet.has(String(s.id).trim()));
+            }
+          }
+        } catch (e) {}
+      })(),
+      (async () => {
+        try {
+          fbStudents = await getStudentsFromFirestore(className);
+        } catch (e) {
+          console.warn('[Firebase] getStudentsFromFirestore error:', e);
+        }
+      })()
+    ]);
+
+    // 3. Fetch from local cache (teacher's immediate state)
     let localStudents: StudentInfo[] = [];
     const cached = localStorage.getItem('ncv_students_data');
     if (cached) {
@@ -970,20 +1005,6 @@ export const api = {
         }
       } catch (e) {}
     }
-
-    // 3. Fetch from Server
-    let serverStudents: StudentInfo[] = [];
-    try {
-      const res = await fetch(url, {
-        headers: getHeaders(asTeacher),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          serverStudents = data.filter((s) => s && s.id && !deletedStudentIdsSet.has(String(s.id).trim()));
-        }
-      }
-    } catch (e) {}
 
     // 4. Merge all sources safely:
     // Determine which classes already have custom rosters in local storage or Cloud Firestore
@@ -1236,24 +1257,56 @@ export const api = {
       } catch (e) {}
     }
 
+    const normalizePart = (str: string) =>
+      str
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toLowerCase();
+
+    const getLastN = (name: string, n: number) => {
+      const words = (name || '').trim().split(/\s+/).filter(Boolean);
+      const slice = words.length >= n ? words.slice(-n).join('') : words.join('');
+      return normalizePart(slice);
+    };
+
+    const getFullNormalized = (name: string) => {
+      const words = (name || '').trim().split(/\s+/).filter(Boolean);
+      return normalizePart(words.join(''));
+    };
+
+    const computeLocalUsername = (s: StudentInfo, allList: StudentInfo[]) => {
+      const cleanClass = (s.class || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const targetLast2 = getLastN(s.name, 2);
+      const sameClass = allList.filter(
+        (item) => (item.class || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() === cleanClass
+      );
+      const hasLast2Collision = sameClass.some(
+        (other) => other.id !== s.id && getLastN(other.name, 2) === targetLast2
+      );
+      if (!hasLast2Collision) {
+        return `${targetLast2}${cleanClass}`;
+      }
+      const targetFull = getFullNormalized(s.name);
+      const sameFullList = sameClass.filter((item) => getFullNormalized(item.name) === targetFull);
+      if (sameFullList.length <= 1) {
+        return `${targetFull}${cleanClass}`;
+      }
+      const idx = sameFullList.findIndex((item) => item.id === s.id);
+      const suffix = idx >= 0 ? idx + 1 : 1;
+      return `${targetFull}${suffix}${cleanClass}`;
+    };
+
     const updatedStudents = students.map((s) => {
       const isTarget = all || (className && (s.class || '').trim().toLowerCase() === className.trim().toLowerCase());
       if (isTarget) {
-        const words = (s.name || '').trim().split(/\s+/).filter(Boolean);
-        const lastTwo = words.length >= 2 ? words.slice(-2).join('') : words.join('');
-        const cleanName = lastTwo
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/đ/g, 'd')
-          .replace(/Đ/g, 'D')
-          .replace(/[^a-zA-Z0-9]/g, '')
-          .toLowerCase();
-        const cleanClass = (s.class || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-        const username = `${cleanName}${cleanClass}`;
+        const username = computeLocalUsername(s, students);
         const defaultPassword = `${(s.class || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}123`;
         return {
           ...s,
-          username: s.username || username,
+          username,
           password: s.password || defaultPassword,
           isPasswordChanged: s.isPasswordChanged || false,
         };
@@ -1379,12 +1432,28 @@ export const api = {
     username?: string;
     password?: string;
   }) => {
+    let realExamSnapshot: any = null;
+    try {
+      const cached = localStorage.getItem('ncv_exams_data');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) {
+          const targetCode = String(params.examCode || '').trim().toUpperCase();
+          realExamSnapshot = parsed.find(
+            (e: any) =>
+              String(e.code || '').trim().toUpperCase() === targetCode ||
+              String(e.id || '').trim().toUpperCase() === targetCode
+          );
+        }
+      }
+    } catch (e) {}
+
     let res: Response | null = null;
     try {
       res = await fetch('/api/student/validate-entry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...params, examSnapshot: realExamSnapshot }),
       });
 
       if (res.ok) {
@@ -1523,11 +1592,21 @@ export const api = {
     sbd?: string;
     forceNew?: boolean;
   }) => {
+    let cachedExams: Exam[] = [];
+    try {
+      const raw = localStorage.getItem('ncv_exams_data');
+      if (raw) cachedExams = JSON.parse(raw);
+    } catch (e) {}
+    const cleanCode = String(params.examCode || '').trim().toUpperCase();
+    const matchedCachedExam = (cachedExams || []).find(
+      (e) => (e.code && e.code.toUpperCase() === cleanCode) || (e.id && e.id.toUpperCase() === cleanCode)
+    );
+
     try {
       const res = await fetch('/api/student/start', {
         method: 'POST',
         headers: getHeaders(true),
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...params, examSnapshot: matchedCachedExam }),
       });
 
       let serverSession: any = null;
@@ -1537,6 +1616,8 @@ export const api = {
           startedAt: string;
           expiresAt: string;
           questions: StudentQuestion[];
+          questionOrder?: string[];
+          optionOrder?: Record<string, Record<string, string>>;
           savedAnswers: Record<string, 'A' | 'B' | 'C' | 'D'>;
           flaggedQuestions: string[];
           violationCount: number;
@@ -1547,6 +1628,16 @@ export const api = {
       }
 
       if (serverSession) {
+        try {
+          sessionStorage.setItem(
+            `ncv_session_meta_${serverSession.sessionId}`,
+            JSON.stringify({
+              questionOrder: serverSession.questionOrder,
+              optionOrder: serverSession.optionOrder,
+              examId: matchedCachedExam?.id || params.examCode
+            })
+          );
+        } catch (e) {}
         // Register student session in Firebase Firestore so Live Proctoring immediately reflects student entry
         try {
           saveStudentSessionToFirestore({
@@ -1618,14 +1709,7 @@ export const api = {
     }
 
     // High-resilience client-side fallback: ensure student can ALWAYS take their exam even during Vercel cold starts/downtime
-    let cachedExams: Exam[] = [];
-    try {
-      const raw = localStorage.getItem('ncv_exams_data');
-      if (raw) cachedExams = JSON.parse(raw);
-    } catch (e) {}
-
-    const cleanCode = String(params.examCode || '').trim().toUpperCase();
-    let exam = (cachedExams || []).find(e => (e.code && e.code.toUpperCase() === cleanCode) || (e.id && e.id.toUpperCase() === cleanCode));
+    let exam = matchedCachedExam;
     if (!exam) {
       exam = (SEED_APP_DATA.exams as any[]).find(e => (e.code && e.code.toUpperCase() === cleanCode) || (e.id && e.id.toUpperCase() === cleanCode));
     }
@@ -1668,7 +1752,12 @@ export const api = {
     const pickedQ = shuffledQ.slice(0, targetCount);
 
     const shouldShuffleOpts = exam?.shuffleOptions !== false;
+    const fallbackQuestionOrder: string[] = [];
+    const fallbackOptionOrder: Record<string, Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'>> = {};
+    const gradedFallbackQuestions: any[] = [];
+
     const studentQuestions: StudentQuestion[] = pickedQ.map((q: any, idx: number) => {
+      fallbackQuestionOrder.push(q.id);
       let optIds: ('A' | 'B' | 'C' | 'D')[] = ['A', 'B', 'C', 'D'];
       if (shouldShuffleOpts) {
         optIds = [...optIds].sort(() => Math.random() - 0.5);
@@ -1679,6 +1768,15 @@ export const api = {
         C: optIds[2] || 'C',
         D: optIds[3] || 'D',
       };
+      fallbackOptionOrder[q.id] = mapping;
+
+      let newCorrectDisplayId: 'A' | 'B' | 'C' | 'D' = q.correctAnswer;
+      (['A', 'B', 'C', 'D'] as const).forEach((displayId) => {
+        if (mapping[displayId] === q.correctAnswer) {
+          newCorrectDisplayId = displayId;
+        }
+      });
+
       const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map(displayId => {
         const origOptId = mapping[displayId];
         const origOpt = (q.options || []).find((o: any) => o && o.id === origOptId);
@@ -1686,6 +1784,12 @@ export const api = {
           id: displayId,
           text: origOpt ? origOpt.text : ''
         };
+      });
+
+      gradedFallbackQuestions.push({
+        ...q,
+        options: mappedOptions,
+        correctAnswer: newCorrectDisplayId
       });
 
       return {
@@ -1706,8 +1810,16 @@ export const api = {
     try {
       sessionStorage.setItem(`ncv_fallback_exam_${sessionId}`, JSON.stringify({
         ...exam,
-        questions: pickedQ
+        questions: gradedFallbackQuestions
       }));
+      sessionStorage.setItem(
+        `ncv_session_meta_${sessionId}`,
+        JSON.stringify({
+          questionOrder: fallbackQuestionOrder,
+          optionOrder: fallbackOptionOrder,
+          examId: exam?.id || cleanCode
+        })
+      );
     } catch (e) {}
 
     const fallbackSession = {
@@ -1887,6 +1999,29 @@ export const api = {
         }
       } catch (e) {}
     }
+
+    // Attach session meta (questionOrder, optionOrder) and examSnapshot for Vercel cold-start accuracy
+    try {
+      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${sessionId}`);
+      if (metaRaw) {
+        const meta = JSON.parse(metaRaw);
+        if (!payload.questionOrder && meta.questionOrder) payload.questionOrder = meta.questionOrder;
+        if (!payload.optionOrder && meta.optionOrder) payload.optionOrder = meta.optionOrder;
+      }
+      const cachedExamsRaw = localStorage.getItem('ncv_exams_data');
+      if (cachedExamsRaw) {
+        const arr = JSON.parse(cachedExamsRaw);
+        if (Array.isArray(arr)) {
+          const targetId = String(payload.examId || payload.examCode || '').trim().toUpperCase();
+          const matched = arr.find(
+            (e: any) =>
+              String(e.id || '').trim().toUpperCase() === targetId ||
+              String(e.code || '').trim().toUpperCase() === targetId
+          );
+          if (matched) payload.examSnapshot = matched;
+        }
+      }
+    } catch (e) {}
 
     let result: any = null;
     try {

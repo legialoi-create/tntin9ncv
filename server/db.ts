@@ -437,18 +437,22 @@ class DatabaseManager {
     return initialData;
   }
 
-  private saveData(data: DatabaseSchema) {
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private saveData(data: DatabaseSchema, includeBackups = true) {
     try {
-      const serialized = JSON.stringify(data, null, 2);
+      const serialized = includeBackups ? JSON.stringify(data, null, 2) : JSON.stringify(data);
       const isVercel = Boolean(process.env.VERCEL || process.env.NOW_BUILD || process.env.VERCEL_ENV);
       const targets = isVercel
         ? ['/tmp/app_data.json', DB_FILE]
-        : Array.from(new Set([
+        : includeBackups
+        ? Array.from(new Set([
             DB_FILE,
             path.join(DATA_DIR, 'app_data.backup.json'),
             DATA_FILE,
             '/tmp/app_data.json'
-          ]));
+          ]))
+        : [DB_FILE];
 
       for (const targetPath of targets) {
         try {
@@ -466,8 +470,23 @@ class DatabaseManager {
     }
   }
 
-  private persist() {
-    this.saveData(this.data);
+  private persist(immediate = true) {
+    if (immediate) {
+      if (this.persistTimer) {
+        clearTimeout(this.persistTimer);
+        this.persistTimer = null;
+      }
+      this.saveData(this.data, true);
+      return;
+    }
+
+    // Debounce high-frequency writes (heartbeats, option clicks for 100+ concurrent students)
+    if (!this.persistTimer) {
+      this.persistTimer = setTimeout(() => {
+        this.persistTimer = null;
+        this.saveData(this.data, false);
+      }, 1500);
+    }
   }
 
   // Exams
@@ -495,7 +514,7 @@ class DatabaseManager {
         this.data.exams.push({ ...(initExam as Exam), isOpen: true, updatedAt: new Date().toISOString() });
       }
     }
-    this.persist();
+    this.persist(true);
     return this.data.exams;
   }
 
@@ -504,12 +523,7 @@ class DatabaseManager {
       return (this.data.exams && this.data.exams.length > 0) ? (this.data.exams.find(e => e.isOpen) || this.data.exams[0]) : undefined;
     }
     const clean = id.trim();
-    let found = (this.data.exams || []).find(e => e.id === clean || (e.code && e.code.toUpperCase() === clean.toUpperCase()));
-    if (!found) {
-      this.data = this.load();
-      found = (this.data.exams || []).find(e => e.id === clean || (e.code && e.code.toUpperCase() === clean.toUpperCase()));
-    }
-    return found;
+    return (this.data.exams || []).find(e => e.id === clean || (e.code && e.code.toUpperCase() === clean.toUpperCase()));
   }
 
   public getExamByCode(code: string): Exam | undefined {
@@ -517,18 +531,10 @@ class DatabaseManager {
       return (this.data.exams && this.data.exams.length > 0) ? (this.data.exams.find(e => e.isOpen) || this.data.exams[0]) : undefined;
     }
     const normalized = String(code).trim().toUpperCase();
-    let found = (this.data.exams || []).find(
+    return (this.data.exams || []).find(
       e => (e.code && e.code.trim().toUpperCase() === normalized) ||
            (e.id && e.id.trim().toUpperCase() === normalized)
     );
-    if (!found) {
-      this.data = this.load();
-      found = (this.data.exams || []).find(
-        e => (e.code && e.code.trim().toUpperCase() === normalized) ||
-             (e.id && e.id.trim().toUpperCase() === normalized)
-      );
-    }
-    return found;
   }
 
   public saveExam(exam: Exam): void {
@@ -541,7 +547,7 @@ class DatabaseManager {
     } else {
       this.data.exams.unshift(exam);
     }
-    this.persist();
+    this.persist(true);
   }
 
   public deleteExam(id: string): boolean {
@@ -578,7 +584,7 @@ class DatabaseManager {
       const sId = String(s.examId).trim().toUpperCase();
       return sId !== upperRealId && (upperCode ? sId !== upperCode : true) && sId !== upperInput;
     });
-    this.persist();
+    this.persist(true);
     return true;
   }
 
@@ -626,19 +632,20 @@ class DatabaseManager {
     );
   }
 
-  public saveSession(session: ExamSession): void {
+  public saveSession(session: ExamSession, immediate?: boolean): void {
     const idx = this.data.sessions.findIndex(s => s.id === session.id);
     if (idx >= 0) {
       this.data.sessions[idx] = session;
     } else {
       this.data.sessions.unshift(session);
     }
-    this.persist();
+    const shouldImmediate = immediate !== undefined ? immediate : (session.status === 'submitted' || session.status === 'locked');
+    this.persist(shouldImmediate);
   }
 
   public deleteSession(sessionId: string): void {
     this.data.sessions = this.data.sessions.filter(s => s.id !== sessionId);
-    this.persist();
+    this.persist(true);
   }
 
   // Classes & Students
