@@ -88,6 +88,13 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
     }
   };
 
+  const [reportNotice, setReportNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const showReportNotice = (type: 'success' | 'error', text: string) => {
+    setReportNotice({ type, text });
+    setTimeout(() => setReportNotice(null), 4500);
+  };
+
   const confirmDeleteSubmission = async () => {
     if (!submissionToDelete) return;
     const targetSessionId = submissionToDelete.sessionId;
@@ -95,9 +102,10 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
     try {
       await api.deleteSubmission(targetSessionId, currentExamId);
       setSubmissionToDelete(null);
+      showReportNotice('success', 'Đã xóa kết quả bài thi của học sinh thành công');
       await fetchReports(false);
     } catch (err: any) {
-      alert('Lỗi xóa bài thi: ' + (err?.message || 'Vui lòng thử lại'));
+      showReportNotice('error', 'Lỗi xóa bài thi: ' + (err?.message || 'Vui lòng thử lại'));
     } finally {
       setIsDeletingSubmission(false);
     }
@@ -140,8 +148,9 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
+      showReportNotice('success', 'Đã xuất bảng điểm Excel (.xlsx) thành công');
     } catch (err: any) {
-      alert('Lỗi xuất tệp Excel: ' + (err.message || 'Vui lòng kiểm tra lại'));
+      showReportNotice('error', 'Lỗi xuất tệp Excel: ' + (err.message || 'Vui lòng kiểm tra lại'));
     }
   };
 
@@ -263,6 +272,23 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
           </div>
         </div>
       </div>
+
+      {reportNotice && (
+        <div
+          className={`p-3.5 rounded-xl text-xs font-semibold flex items-center space-x-2 border transition ${
+            reportNotice.type === 'success'
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+              : 'bg-red-50 text-red-800 border-red-200'
+          }`}
+        >
+          {reportNotice.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+          )}
+          <span>{reportNotice.text}</span>
+        </div>
+      )}
 
       {/* Summary KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">

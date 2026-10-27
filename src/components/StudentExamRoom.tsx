@@ -492,6 +492,33 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     };
   }, [handleViolation, submitResult, isLocked]);
 
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+
+  // Sync active session state to sessionStorage so F5 reload preserves answers & retake session
+  useEffect(() => {
+    if (submitResult) {
+      try {
+        sessionStorage.removeItem('ncv_active_exam_state');
+      } catch (e) {}
+      return;
+    }
+    try {
+      sessionStorage.setItem(
+        'ncv_active_exam_state',
+        JSON.stringify({
+          sessionData: {
+            ...currentSession,
+            savedAnswers: answers,
+            flaggedQuestions: Array.from(flagged),
+            violationCount,
+          },
+          examInfo,
+          studentInfo,
+        })
+      );
+    } catch (e) {}
+  }, [currentSession, answers, flagged, violationCount, examInfo, studentInfo, submitResult]);
+
   // Handle Option Select (Autosave immediately)
   const handleSelectOption = async (optionId: 'A' | 'B' | 'C' | 'D') => {
     if (isLocked || submitResult) return;
@@ -539,11 +566,40 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     }
   };
 
+  // Keyboard navigation & quick option selection for computer lab convenience
+  useEffect(() => {
+    if (isLocked || submitResult || showSubmitConfirm || warningModal.show) return;
+    const onKeyNav = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setCurrentIdx((i) => Math.max(0, i - 1));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setCurrentIdx((i) => Math.min(questions.length - 1, i + 1));
+      } else if (e.key === '1' || e.key === 'a' || e.key === 'A') {
+        handleSelectOption('A');
+      } else if (e.key === '2' || e.key === 'b' || e.key === 'B') {
+        handleSelectOption('B');
+      } else if (e.key === '3' || e.key === 'c' || e.key === 'C') {
+        handleSelectOption('C');
+      } else if (e.key === '4' || e.key === 'd' || e.key === 'D') {
+        handleSelectOption('D');
+      }
+    };
+    window.addEventListener('keydown', onKeyNav);
+    return () => window.removeEventListener('keydown', onKeyNav);
+  }, [isLocked, submitResult, showSubmitConfirm, warningModal.show, questions.length, currentQ?.id, answers]);
+
   // Submit action
   const handleFinalSubmit = async () => {
     if (isSubmitting) return;
     setIsSubmitting(true);
     setShowSubmitConfirm(false);
+    setErrorBanner(null);
 
     try {
       const res = await api.submitExam({
@@ -560,12 +616,15 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         startedAt: currentSession.startedAt
       });
       setSubmitResult(res);
+      try {
+        sessionStorage.removeItem('ncv_active_exam_state');
+      } catch (e) {}
       // Exit fullscreen peacefully
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
       }
     } catch (err: any) {
-      alert('Có lỗi xảy ra khi nộp bài: ' + (err.message || 'Vui lòng thử lại'));
+      setErrorBanner('Có lỗi xảy ra khi nộp bài: ' + (err.message || 'Vui lòng thử lại'));
     } finally {
       setIsSubmitting(false);
     }
@@ -575,6 +634,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
   const handleRetake = async () => {
     if (isRetaking) return;
     setIsRetaking(true);
+    setErrorBanner(null);
     try {
       const res = await api.startExam({
         examCode: examInfo.code,
@@ -592,7 +652,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       setSubmitResult(null);
       enterFullscreen();
     } catch (err: any) {
-      alert('Không thể bắt đầu làm lại bài thi: ' + (err.message || 'Lỗi hệ thống'));
+      setErrorBanner('Không thể bắt đầu làm lại bài thi: ' + (err.message || 'Lỗi hệ thống'));
     } finally {
       setIsRetaking(false);
     }
@@ -713,6 +773,12 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
 
           {/* Action Buttons: Retake & Exit */}
           <div className="space-y-3">
+            {errorBanner && (
+              <div className="p-3 bg-red-950/80 border border-red-500/60 text-red-200 rounded-xl text-xs font-medium text-left flex items-start space-x-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>{errorBanner}</span>
+              </div>
+            )}
             {Boolean(submitResult.canRetake || (submitResult.attemptsRemaining && submitResult.attemptsRemaining > 0)) && (
               <div className="bg-slate-900/90 border border-emerald-500/30 rounded-xl p-3 space-y-2">
                 <button
@@ -1099,6 +1165,22 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
           </button>
         </div>
       </header>
+
+      {/* ERROR BANNER */}
+      {errorBanner && (
+        <div className="bg-red-950/90 border-b border-red-500/60 px-4 py-2 text-xs text-red-200 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span>{errorBanner}</span>
+          </div>
+          <button
+            onClick={() => setErrorBanner(null)}
+            className="text-red-300 hover:text-white font-bold px-2 py-0.5 rounded cursor-pointer"
+          >
+            Đóng
+          </button>
+        </div>
+      )}
 
       {/* VIOLATION STATUS BADGE */}
       {violationCount > 0 && (

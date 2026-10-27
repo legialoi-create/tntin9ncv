@@ -120,10 +120,11 @@ export const LiveProctoring: React.FC<LiveProctoringProps> = ({ exams, selectedE
     try {
       const res = await api.proctorAction({ sessionId, action, value });
       setActionMessage(res.message || 'Thao tác thành công');
-      setTimeout(() => setActionMessage(null), 3000);
+      setTimeout(() => setActionMessage(null), 4000);
       fetchProctorData(false);
     } catch (err: any) {
-      alert('Lỗi thao tác: ' + (err.message || 'Vui lòng thử lại'));
+      setActionMessage('⚠️ Lỗi thao tác: ' + (err.message || 'Vui lòng thử lại'));
+      setTimeout(() => setActionMessage(null), 5000);
     }
   };
 

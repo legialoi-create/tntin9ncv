@@ -663,14 +663,23 @@ export async function deleteClassStudentsFromFirestore(className: string): Promi
   }
 }
 
-// In-memory cache for classes and deleted classes (60-second TTL)
+// In-memory + sessionStorage cache for classes and deleted classes (5-minute TTL)
 let cachedClasses: { list: any[]; timestamp: number } | null = null;
 let cachedDeletedClasses: { ids: string[]; timestamp: number } | null = null;
+
+function invalidateClassesCache() {
+  cachedClasses = null;
+  cachedDeletedClasses = null;
+  try {
+    sessionStorage.removeItem('ncv_fb_classes');
+    sessionStorage.removeItem('ncv_fb_del_classes');
+  } catch (e) {}
+}
 
 // 13. Save classes metadata to Firestore
 export async function saveClassesToFirestore(classes: any[]): Promise<void> {
   if (!Array.isArray(classes)) return;
-  cachedClasses = null; // Invalidate cache on write
+  invalidateClassesCache();
   try {
     const promises = classes.map((c) => {
       if (!c || !c.name) return Promise.resolve();
@@ -688,11 +697,23 @@ export async function saveClassesToFirestore(classes: any[]): Promise<void> {
   }
 }
 
-// 14. Get classes from Firestore (cached 60s to minimize read ops)
+// 14. Get classes from Firestore (cached 5m to minimize read ops)
 export async function getClassesFromFirestore(forceRefresh = false): Promise<any[]> {
   const now = Date.now();
-  if (!forceRefresh && cachedClasses && now - cachedClasses.timestamp < 300000) {
-    return cachedClasses.list;
+  if (!forceRefresh) {
+    if (cachedClasses && now - cachedClasses.timestamp < 300000) {
+      return cachedClasses.list;
+    }
+    try {
+      const ss = sessionStorage.getItem('ncv_fb_classes');
+      if (ss) {
+        const parsed = JSON.parse(ss);
+        if (parsed && Array.isArray(parsed.list) && now - parsed.timestamp < 300000) {
+          cachedClasses = parsed;
+          return parsed.list;
+        }
+      }
+    } catch (e) {}
   }
 
   const classes: any[] = [];
@@ -716,6 +737,9 @@ export async function getClassesFromFirestore(forceRefresh = false): Promise<any
       }
     });
     cachedClasses = { list: classes, timestamp: now };
+    try {
+      sessionStorage.setItem('ncv_fb_classes', JSON.stringify(cachedClasses));
+    } catch (e) {}
   } catch (err) {
     console.warn('[Firebase] getClassesFromFirestore error:', err);
     if (cachedClasses) return cachedClasses.list;
@@ -726,9 +750,11 @@ export async function getClassesFromFirestore(forceRefresh = false): Promise<any
 // 15. Delete class from Firestore (permanently remove class doc and all student docs in that class)
 export async function deleteClassFromFirestore(className: string): Promise<void> {
   if (!className) return;
-  cachedClasses = null;
-  cachedDeletedClasses = null;
+  invalidateClassesCache();
   cachedStudents = null;
+  try {
+    sessionStorage.removeItem('ncv_fb_students');
+  } catch (e) {}
   const upper = className.trim().toUpperCase();
   const docId = `cls_${upper}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   try {
@@ -745,8 +771,7 @@ export async function deleteClassFromFirestore(className: string): Promise<void>
 // 16. Record Deleted Class in Firestore to prevent resurrection across Vercel cold starts
 export async function recordDeletedClassInFirestore(className: string): Promise<void> {
   if (!className) return;
-  cachedClasses = null;
-  cachedDeletedClasses = null;
+  invalidateClassesCache();
   const upper = className.trim().toUpperCase();
   try {
     await setDoc(doc(firestore, 'deleted_classes', upper), {
@@ -758,11 +783,23 @@ export async function recordDeletedClassInFirestore(className: string): Promise<
   }
 }
 
-// 17. Get Deleted Classes from Firestore (cached 60s)
+// 17. Get Deleted Classes from Firestore (cached 5m)
 export async function getDeletedClassesFromFirestore(forceRefresh = false): Promise<string[]> {
   const now = Date.now();
-  if (!forceRefresh && cachedDeletedClasses && now - cachedDeletedClasses.timestamp < 300000) {
-    return cachedDeletedClasses.ids;
+  if (!forceRefresh) {
+    if (cachedDeletedClasses && now - cachedDeletedClasses.timestamp < 300000) {
+      return cachedDeletedClasses.ids;
+    }
+    try {
+      const ss = sessionStorage.getItem('ncv_fb_del_classes');
+      if (ss) {
+        const parsed = JSON.parse(ss);
+        if (parsed && Array.isArray(parsed.ids) && now - parsed.timestamp < 300000) {
+          cachedDeletedClasses = parsed;
+          return parsed.ids;
+        }
+      }
+    } catch (e) {}
   }
 
   const result: string[] = [];
@@ -777,6 +814,9 @@ export async function getDeletedClassesFromFirestore(forceRefresh = false): Prom
       }
     });
     cachedDeletedClasses = { ids: result, timestamp: now };
+    try {
+      sessionStorage.setItem('ncv_fb_del_classes', JSON.stringify(cachedDeletedClasses));
+    } catch (e) {}
   } catch (err) {
     console.warn('[Firebase] getDeletedClassesFromFirestore error:', err);
     if (cachedDeletedClasses) return cachedDeletedClasses.ids;
@@ -787,8 +827,7 @@ export async function getDeletedClassesFromFirestore(forceRefresh = false): Prom
 // 18. Unmark Deleted Class from Firestore (when teacher creates or restores a class)
 export async function unmarkDeletedClassInFirestore(className: string): Promise<void> {
   if (!className) return;
-  cachedClasses = null;
-  cachedDeletedClasses = null;
+  invalidateClassesCache();
   const upper = className.trim().toUpperCase();
   try {
     await deleteDoc(doc(firestore, 'deleted_classes', upper));

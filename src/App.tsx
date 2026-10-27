@@ -16,14 +16,48 @@ import { TeacherLogin } from './components/TeacherLogin';
 import { TeacherDashboard } from './components/TeacherDashboard';
 
 export default function App() {
-  const [view, setView] = useState<'student_entry' | 'student_exam' | 'teacher'>('student_entry');
+  // Restore active student exam session if browser was accidentally refreshed (F5)
+  const getInitialActiveExam = () => {
+    try {
+      const raw = sessionStorage.getItem('ncv_active_exam_state');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (
+          parsed &&
+          parsed.sessionData &&
+          parsed.examInfo &&
+          parsed.studentInfo &&
+          parsed.sessionData.expiresAt
+        ) {
+          const expiresMs = new Date(parsed.sessionData.expiresAt).getTime();
+          // Restore if session hasn't expired more than 5 minutes ago
+          if (!isNaN(expiresMs) && Date.now() < expiresMs + 300000) {
+            return parsed;
+          }
+        }
+      }
+    } catch (e) {}
+    return null;
+  };
+
+  const initialRestored = getInitialActiveExam();
+
+  const [view, setView] = useState<'student_entry' | 'student_exam' | 'teacher'>(
+    initialRestored ? 'student_exam' : 'student_entry'
+  );
   const [isTeacherLoggedIn, setIsTeacherLoggedIn] = useState(false);
   const [showTeacherLoginModal, setShowTeacherLoginModal] = useState(false);
 
   // Active student exam session state
-  const [activeSessionData, setActiveSessionData] = useState<any | null>(null);
-  const [activeExamInfo, setActiveExamInfo] = useState<any | null>(null);
-  const [activeStudentInfo, setActiveStudentInfo] = useState<any | null>(null);
+  const [activeSessionData, setActiveSessionData] = useState<any | null>(
+    initialRestored ? initialRestored.sessionData : null
+  );
+  const [activeExamInfo, setActiveExamInfo] = useState<any | null>(
+    initialRestored ? initialRestored.examInfo : null
+  );
+  const [activeStudentInfo, setActiveStudentInfo] = useState<any | null>(
+    initialRestored ? initialRestored.studentInfo : null
+  );
 
   // Check existing teacher token on mount
   useEffect(() => {
@@ -54,6 +88,12 @@ export default function App() {
     setActiveExamInfo(examInfo);
     setActiveStudentInfo(studentInfo);
     setView('student_exam');
+    try {
+      sessionStorage.setItem(
+        'ncv_active_exam_state',
+        JSON.stringify({ sessionData, examInfo, studentInfo })
+      );
+    } catch (e) {}
   };
 
   const handleExitExam = () => {
@@ -61,6 +101,9 @@ export default function App() {
     setActiveExamInfo(null);
     setActiveStudentInfo(null);
     setView('student_entry');
+    try {
+      sessionStorage.removeItem('ncv_active_exam_state');
+    } catch (e) {}
   };
 
   const handleTeacherLoginSuccess = (user: any) => {
