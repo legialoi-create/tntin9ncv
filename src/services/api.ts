@@ -28,6 +28,9 @@ import {
 import { parseExamLocally } from '../utils/localExamParser';
 import {
   extractQuestionCorrectAnswer,
+  normalizeQuestionOptions,
+  normalizeSingleQuestionOptionMap,
+  reconstructOptionOrderFromDisplayedQuestions,
   sealExamQuestions,
   unsealExamQuestions,
   sanitizeExamForStudent,
@@ -2360,14 +2363,28 @@ export const api = {
       }
     }
 
+    const fisherYatesShuffle = <T,>(arr: T[]): T[] => {
+      const copy = [...arr];
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+      }
+      return copy;
+    };
+
     const allQ = (exam?.questions && Array.isArray(exam.questions) && exam.questions.length > 0)
       ? [...exam.questions]
       : [...(SEED_APP_DATA.exams[0].questions as any[])];
 
-    const shouldShuffleQ = exam?.shuffleQuestions !== false;
-    const shuffledQ = shouldShuffleQ ? [...allQ].sort(() => Math.random() - 0.5) : [...allQ];
-    const targetCount = (exam?.randomQuestionCount && exam.randomQuestionCount > 0 && exam.randomQuestionCount < shuffledQ.length)
-      ? exam.randomQuestionCount
+    const isRandomSubset = Boolean(
+      exam?.randomQuestionCount &&
+      exam.randomQuestionCount > 0 &&
+      exam.randomQuestionCount < allQ.length
+    );
+    const shouldShuffleQ = exam?.shuffleQuestions !== false || isRandomSubset;
+    const shuffledQ = shouldShuffleQ ? fisherYatesShuffle(allQ) : [...allQ];
+    const targetCount = isRandomSubset
+      ? (exam!.randomQuestionCount as number)
       : shuffledQ.length;
     const pickedQ = shuffledQ.slice(0, targetCount);
 
@@ -2380,7 +2397,7 @@ export const api = {
       fallbackQuestionOrder.push(q.id);
       let optIds: ('A' | 'B' | 'C' | 'D')[] = ['A', 'B', 'C', 'D'];
       if (shouldShuffleOpts) {
-        optIds = [...optIds].sort(() => Math.random() - 0.5);
+        optIds = fisherYatesShuffle(optIds);
       }
       const mapping: Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'> = {
         A: optIds[0] || 'A',
@@ -2390,9 +2407,13 @@ export const api = {
       };
       fallbackOptionOrder[q.id] = mapping;
 
+      const normalizedOrigOptions = normalizeQuestionOptions(q.options);
       const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((displayId, optIdx) => {
         const origOptId = mapping[displayId];
-        const origOpt = (q.options || []).find((o: any) => o && String(o.id || '').trim().toUpperCase() === origOptId) || (q.options || [])[['A', 'B', 'C', 'D'].indexOf(origOptId)] || (q.options || [])[optIdx];
+        const origOpt =
+          normalizedOrigOptions.find((o) => o.id === origOptId) ||
+          normalizedOrigOptions[['A', 'B', 'C', 'D'].indexOf(origOptId)] ||
+          normalizedOrigOptions[optIdx];
         return {
           id: displayId,
           text: origOpt ? origOpt.text : ''
@@ -2400,7 +2421,8 @@ export const api = {
       });
 
       gradedFallbackQuestions.push({
-        ...q
+        ...q,
+        options: normalizedOrigOptions
       });
 
       return {
@@ -2498,6 +2520,9 @@ export const api = {
     questionId: string;
     optionId?: 'A' | 'B' | 'C' | 'D';
     flagged?: boolean;
+    examId?: string;
+    questionOrder?: string[];
+    sealedOptionOrder?: string;
   }) => {
     try {
       const key = `ncv_session_${params.sessionId}_answers`;
@@ -2512,16 +2537,16 @@ export const api = {
 
     const meta = loadEncryptedSessionMeta(params.sessionId);
     const metaPayload: Record<string, any> = {
-      questionOrder: meta.questionOrder,
-      sealedOptionOrder: meta.sealedOptionOrder || meta.optionOrder,
-      examId: meta.examId,
+      questionOrder: params.questionOrder || meta.questionOrder,
+      sealedOptionOrder: params.sealedOptionOrder || meta.sealedOptionOrder || meta.optionOrder,
+      examId: params.examId || meta.examId,
     };
 
     try {
       const res = await fetch('/api/student/answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...metaPayload, ...params }),
+        body: JSON.stringify({ ...params, ...metaPayload }),
       });
       if (res.ok) {
         return await safeJson(res, 'Lỗi lưu đáp án');
@@ -2534,19 +2559,22 @@ export const api = {
     sessionId: string;
     type: string;
     description: string;
+    examId?: string;
+    questionOrder?: string[];
+    sealedOptionOrder?: string;
   }) => {
     const meta = loadEncryptedSessionMeta(params.sessionId);
     const metaPayload: Record<string, any> = {
-      questionOrder: meta.questionOrder,
-      sealedOptionOrder: meta.sealedOptionOrder || meta.optionOrder,
-      examId: meta.examId,
+      questionOrder: params.questionOrder || meta.questionOrder,
+      sealedOptionOrder: params.sealedOptionOrder || meta.sealedOptionOrder || meta.optionOrder,
+      examId: params.examId || meta.examId,
     };
 
     try {
       const res = await fetch('/api/student/violation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...metaPayload, ...params }),
+        body: JSON.stringify({ ...params, ...metaPayload }),
       });
       if (res.ok) {
         return await safeJson<{
@@ -2570,6 +2598,7 @@ export const api = {
     questionOrder?: string[];
     optionOrder?: Record<string, Record<string, string>>;
     sealedOptionOrder?: string;
+    displayedQuestions?: StudentQuestion[];
     violationCount?: number;
     attemptNumber?: number;
     bestScoreSoFar?: number;
@@ -2594,6 +2623,7 @@ export const api = {
         questionOrder: resolvedQuestionOrder,
         optionOrder: params.optionOrder,
         sealedOptionOrder: resolvedSealedOptionOrder,
+        displayedQuestions: params.displayedQuestions,
         violationCount: Math.max(Number(params.violationCount) || 3, 3),
         attemptNumber: params.attemptNumber,
         bestScoreSoFar: params.bestScoreSoFar,
@@ -2630,19 +2660,21 @@ export const api = {
     answers?: Record<string, string>;
     status?: string;
     attemptNumber?: number;
+    questionOrder?: string[];
+    sealedOptionOrder?: string;
   }) => {
     const meta = loadEncryptedSessionMeta(params.sessionId);
     const metaPayload: Record<string, any> = {
-      questionOrder: meta.questionOrder,
-      sealedOptionOrder: meta.sealedOptionOrder || meta.optionOrder,
-      examId: meta.examId,
+      questionOrder: params.questionOrder || meta.questionOrder,
+      sealedOptionOrder: params.sealedOptionOrder || meta.sealedOptionOrder || meta.optionOrder,
+      examId: params.examId || meta.examId,
     };
 
     try {
       const res = await fetch('/api/student/heartbeat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...metaPayload, ...params }),
+        body: JSON.stringify({ ...params, ...metaPayload }),
       });
       if (res.ok) {
         return await safeJson<{ success: boolean; isLocked?: boolean; status?: string }>(
@@ -2665,6 +2697,7 @@ export const api = {
     questionOrder?: string[];
     optionOrder?: Record<string, Record<string, string>>;
     sealedOptionOrder?: string;
+    displayedQuestions?: StudentQuestion[];
     violationCount?: number;
     attemptNumber?: number;
     bestScoreSoFar?: number;
@@ -2812,10 +2845,18 @@ export const api = {
         let correct = 0;
         let incorrect = 0;
 
-        const decodedOptOrder = unsealOptionOrder(
+        const reconstructedOptOrder = reconstructOptionOrderFromDisplayedQuestions(
+          payload.displayedQuestions,
+          allQuestions
+        );
+        const unsealedOptOrder = unsealOptionOrder(
           payload.sealedOptionOrder || payload.optionOrder,
           sessionId
         );
+        const decodedOptOrder: Record<string, any> = {
+          ...reconstructedOptOrder,
+          ...(unsealedOptOrder || {}),
+        };
 
         for (const q of questionsToGrade) {
           if (!q || !q.id) continue;
@@ -2824,19 +2865,8 @@ export const api = {
           if (!displayChoice) continue;
 
           const safeKey = String(q.id).replace(/[\/\.]/g, '_');
-          const mapping: any = decodedOptOrder ? (decodedOptOrder[q.id] || decodedOptOrder[safeKey]) : undefined;
-          let origChoice = displayChoice;
-          if (Array.isArray(mapping) && mapping.length >= 4) {
-            const idx = ['A', 'B', 'C', 'D'].indexOf(displayChoice);
-            if (idx !== -1 && mapping[idx]) {
-              const normMapped = normalizeOptKey(mapping[idx], q.options);
-              if (normMapped) origChoice = normMapped;
-            }
-          } else if (mapping && typeof mapping === 'object') {
-            const mappedVal = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
-            const normMapped = normalizeOptKey(mappedVal, q.options);
-            if (normMapped) origChoice = normMapped;
-          }
+          const normMapping = normalizeSingleQuestionOptionMap(decodedOptOrder[q.id] || decodedOptOrder[safeKey]);
+          const origChoice = normMapping ? (normMapping[displayChoice] || displayChoice) : displayChoice;
 
           const expectedAnswer = extractQuestionCorrectAnswer(q, exam?.id) || normalizeOptKey(q.correctAnswer, q.options);
           if (origChoice === expectedAnswer) {
@@ -2919,6 +2949,14 @@ export const api = {
         result.canRetake = effectiveCanRetake;
       }
 
+      const resolvedSealedOpt =
+        payload.sealedOptionOrder ||
+        (payload.optionOrder
+          ? (typeof payload.optionOrder === 'string'
+              ? payload.optionOrder
+              : sealOptionOrder(payload.optionOrder, sessionId))
+          : undefined);
+
       const submissionItem = {
         sessionId,
         examId: examId || examCode,
@@ -2937,7 +2975,11 @@ export const api = {
         attemptNumber: effectiveAttemptsMade,
         submittedAt: result.submittedAt || new Date().toISOString(),
         status: 'submitted',
-        violationCount: payload.violationCount || 0
+        violationCount: payload.violationCount || 0,
+        answers: payload.answers || {},
+        questionOrder: payload.questionOrder,
+        optionOrder: resolvedSealedOpt,
+        sealedOptionOrder: resolvedSealedOpt
       };
 
       // 1. Save to examId key
@@ -2988,6 +3030,7 @@ export const api = {
         body: JSON.stringify({
           sessions: [{
             id: sessionId,
+            sessionId,
             examId: examId || examCode,
             examCode: examCode || examId,
             studentName: payload.studentName || 'Học sinh',
@@ -3001,7 +3044,9 @@ export const api = {
             submittedAt: result.submittedAt || new Date().toISOString(),
             attemptNumber: effectiveAttemptsMade,
             violationCount: payload.violationCount || 0,
-            answers: payload.answers || {}
+            answers: payload.answers || {},
+            questionOrder: payload.questionOrder,
+            sealedOptionOrder: resolvedSealedOpt
           }]
         })
       }).catch(() => {});
@@ -3027,7 +3072,7 @@ export const api = {
           status: 'submitted',
           answers: payload.answers || {},
           questionOrder: payload.questionOrder,
-          optionOrder: payload.sealedOptionOrder || payload.optionOrder
+          optionOrder: resolvedSealedOpt as any
         });
       } catch (e) {
         console.warn('[Firebase] Save submission warning:', e);
@@ -3464,25 +3509,18 @@ export const api = {
     const goodCount = scores.filter(s => s >= 8.0).length;
     const passRate = totalStudents > 0 ? Math.round((passCount / totalStudents) * 100) : 0;
 
-    const distribution = [
-      { range: '0 - <5.0', count: scores.filter(s => s < 5.0).length },
-      { range: '5.0 - <6.5', count: scores.filter(s => s >= 5.0 && s < 6.5).length },
-      { range: '6.5 - <8.0', count: scores.filter(s => s >= 6.5 && s < 8.0).length },
-      { range: '8.0 - 10', count: scores.filter(s => s >= 8.0).length }
-    ];
-
     // 7. Build full class rosters in exact class list order (including non-participating students with blank score)
     const [allClasses, allStudents] = await Promise.all([
       api.getClasses().catch(() => [] as ClassInfo[]),
       api.getStudents().catch(() => [] as StudentInfo[])
     ]);
 
-    const normClass = (c: any) => String(c || '').trim().toUpperCase();
+    const normClass = (c: any) => normalizeClassName(c);
     const classSet = new Map<string, string>(); // UPPER -> display class name
     const addClassCandidate = (cName: any) => {
       const raw = String(cName || '').trim();
-      const upper = raw.toUpperCase();
-      if (!upper || upper === 'ALL' || upper === 'TẤT CẢ') return;
+      const upper = normClass(raw);
+      if (!upper || upper === 'ALL' || upper === 'TẤT CẢ' || upper === 'TAT CA') return;
       if (!classSet.has(upper)) {
         classSet.set(upper, raw);
       }
@@ -3491,7 +3529,7 @@ export const api = {
     // Priority 1: Explicit targetClasses on the exam
     const explicitTargets = (examObj?.targetClasses || []).filter((c) => {
       const u = normClass(c);
-      return u && u !== 'ALL' && u !== 'TẤT CẢ';
+      return u && u !== 'ALL' && u !== 'TẤT CẢ' && u !== 'TAT CA';
     });
     explicitTargets.forEach(addClassCandidate);
 
@@ -3540,13 +3578,13 @@ export const api = {
       const rowsForThisClass: any[] = [];
 
       classStudents.forEach((st, idx) => {
-        const stNameNorm = String(st.name || '').trim().toLowerCase();
+        const stNameNorm = normalizeStudentName(st.name || '');
         const stSbdNorm = String(st.sbd || '').trim().toLowerCase();
 
         const matchedSub = classSubs.find((sub) => {
           const subKey = String(sub.sessionId || `${sub.name}_${sub.class}`);
           if (usedSubKeys.has(subKey)) return false;
-          const subNameNorm = String(sub.name || sub.studentName || '').trim().toLowerCase();
+          const subNameNorm = normalizeStudentName(sub.name || sub.studentName || '');
           const subSbdNorm = String(sub.sbd || '').trim().toLowerCase();
           if (stNameNorm && subNameNorm === stNameNorm) return true;
           if (stSbdNorm && subSbdNorm && subSbdNorm === stSbdNorm) return true;
@@ -3608,20 +3646,86 @@ export const api = {
       rosterSubmissions.push(...rowsForThisClass);
     }
 
+    const buildClassDistribution = (rows: any[]) => {
+      let notParticipated = 0;
+      let range0to5 = 0;
+      let range5to65 = 0;
+      let range65to8 = 0;
+      let range8to10 = 0;
+
+      rows.forEach((r) => {
+        const participated =
+          r &&
+          r.hasParticipated !== false &&
+          r.status !== 'not_participated' &&
+          r.score !== null &&
+          r.score !== undefined &&
+          r.score !== '';
+        if (!participated) {
+          notParticipated++;
+          return;
+        }
+        const sc = Number(r.score ?? 0);
+        if (sc < 5.0) {
+          range0to5++;
+        } else if (sc < 6.5) {
+          range5to65++;
+        } else if (sc < 8.0) {
+          range65to8++;
+        } else {
+          range8to10++;
+        }
+      });
+
+      const counts = [notParticipated, range0to5, range5to65, range65to8, range8to10];
+      const total = rows.length;
+      const pcts = (() => {
+        if (total <= 0) return [0, 0, 0, 0, 0];
+        const exact = counts.map((c) => (c * 100) / total);
+        const floored = exact.map((v) => Math.floor(v));
+        const rem = 100 - floored.reduce((a, b) => a + b, 0);
+        const order = counts
+          .map((c, i) => ({ i, frac: exact[i] - floored[i], c }))
+          .filter((x) => x.c > 0)
+          .sort((a, b) => b.frac - a.frac || b.c - a.c || a.i - b.i);
+        for (let k = 0; k < rem && k < order.length; k++) {
+          floored[order[k].i] += 1;
+        }
+        return floored;
+      })();
+
+      const labels = ['Chưa làm', '0 đến 5', '5 đến 6,5', '6,5 đến 8', '8 đến 10'];
+      return labels.map((range, idx) => ({
+        range,
+        count: counts[idx],
+        percentage: pcts[idx],
+        totalStudents: total
+      }));
+    };
+
+    const effectiveAllRows = rosterSubmissions.length > 0 ? rosterSubmissions : combinedSubmissions;
+    const distribution = buildClassDistribution(effectiveAllRows);
+    const classDistributions: Record<string, any[]> = {};
+    for (const clsName of targetClassList) {
+      classDistributions[clsName] = buildClassDistribution(rosterByClass[clsName] || []);
+    }
+
     const mergedReport: any = {
       examId: resolvedId,
       examCode: resolvedCode,
       examTitle: examObj?.title || serverData?.examTitle || 'Bài kiểm tra',
       totalSubmissions: rawSubmissions.length,
       totalStudentsCount: totalStudents,
+      totalRosterStudentsCount: effectiveAllRows.length,
       averageScore: avgScore,
       highestScore,
       lowestScore,
       passCount,
       goodCount,
       passRate,
-      distribution: serverData?.distribution || distribution,
-      scoreDistribution: serverData?.scoreDistribution || distribution,
+      distribution,
+      scoreDistribution: distribution,
+      classDistributions,
       questionAnalysis: serverData?.questionAnalysis || [],
       classBreakdown: serverData?.classBreakdown || {},
       questionStats: serverData?.questionStats || [],
@@ -4110,19 +4214,10 @@ export const api = {
         const displayChoice = normalizeKey(rawAns, q.options);
         if (!displayChoice) continue;
 
-        let origChoice = displayChoice;
-        const mapping: any = sub.optionOrder ? (sub.optionOrder[q.id] || sub.optionOrder[safeKey]) : undefined;
-        if (Array.isArray(mapping) && mapping.length >= 4) {
-          const idx = ['A', 'B', 'C', 'D'].indexOf(displayChoice);
-          if (idx !== -1 && mapping[idx]) {
-            const normMapped = normalizeKey(mapping[idx], q.options);
-            if (normMapped) origChoice = normMapped;
-          }
-        } else if (mapping && typeof mapping === 'object') {
-          const mappedVal = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
-          const normMapped = normalizeKey(mappedVal, q.options);
-          if (normMapped) origChoice = normMapped;
-        }
+        const normMap = normalizeSingleQuestionOptionMap(
+          sub.optionOrder ? (sub.optionOrder[q.id] || sub.optionOrder[safeKey]) : undefined
+        );
+        const origChoice = normMap ? (normMap[displayChoice] || displayChoice) : displayChoice;
 
         const expected = extractQuestionCorrectAnswer(q, examObj.id) || normalizeKey(q.correctAnswer, q.options);
         if (origChoice === expected) {

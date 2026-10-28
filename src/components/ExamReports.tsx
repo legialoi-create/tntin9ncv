@@ -475,42 +475,201 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Score distribution */}
         <div className="lg:col-span-5 bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
-          <div>
-            <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide mb-3 flex items-center space-x-1.5">
-              <TrendingUp className="w-4 h-4 text-indigo-600" />
-              <span>Biểu đồ phân bố điểm số</span>
-            </h3>
-            <p className="text-xs text-slate-500 mb-4">
-              Số lượng học sinh theo từng khoảng điểm thi
-            </p>
+          {(() => {
+            const computeClassDist = (rows: any[]) => {
+              let notDone = 0;
+              let b0_5 = 0;
+              let b5_65 = 0;
+              let b65_8 = 0;
+              let b8_10 = 0;
 
-            <div className="space-y-3">
-              {reportData?.distribution?.map((dist: any) => {
-                const total = reportData?.totalSubmissions || 1;
-                const pct = total > 0 ? Math.round((dist.count / total) * 100) : 0;
-                return (
-                  <div key={dist.range} className="space-y-1">
-                    <div className="flex justify-between text-xs font-semibold">
-                      <span className="text-slate-700">{dist.range} điểm</span>
-                      <span className="text-slate-500">
-                        {dist.count} HS ({pct}%)
-                      </span>
-                    </div>
-                    <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-indigo-600 rounded-full transition-all duration-500"
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
+              rows.forEach((r: any) => {
+                const participated =
+                  r &&
+                  r.hasParticipated !== false &&
+                  r.status !== 'not_participated' &&
+                  r.score !== null &&
+                  r.score !== undefined &&
+                  r.score !== '';
+                if (!participated) {
+                  notDone++;
+                  return;
+                }
+                const sc = Number(r.score ?? 0);
+                if (sc < 5.0) b0_5++;
+                else if (sc < 6.5) b5_65++;
+                else if (sc < 8.0) b65_8++;
+                else b8_10++;
+              });
+
+              const counts = [notDone, b0_5, b5_65, b65_8, b8_10];
+              const total = rows.length;
+              const pcts = (() => {
+                if (total <= 0) return [0, 0, 0, 0, 0];
+                const exact = counts.map((c) => (c * 100) / total);
+                const floored = exact.map((v) => Math.floor(v));
+                const rem = 100 - floored.reduce((a, b) => a + b, 0);
+                const order = counts
+                  .map((c, i) => ({ i, frac: exact[i] - floored[i], c }))
+                  .filter((x) => x.c > 0)
+                  .sort((a, b) => b.frac - a.frac || b.c - a.c || a.i - b.i);
+                for (let k = 0; k < rem && k < order.length; k++) {
+                  floored[order[k].i] += 1;
+                }
+                return floored;
+              })();
+
+              const items = [
+                { range: 'Chưa làm', count: counts[0], pct: pcts[0], barColor: 'bg-slate-400', badgeColor: 'text-slate-600' },
+                { range: '0 đến 5', count: counts[1], pct: pcts[1], barColor: 'bg-red-500', badgeColor: 'text-red-600' },
+                { range: '5 đến 6,5', count: counts[2], pct: pcts[2], barColor: 'bg-amber-500', badgeColor: 'text-amber-700' },
+                { range: '6,5 đến 8', count: counts[3], pct: pcts[3], barColor: 'bg-blue-600', badgeColor: 'text-blue-700' },
+                { range: '8 đến 10', count: counts[4], pct: pcts[4], barColor: 'bg-emerald-600', badgeColor: 'text-emerald-700' }
+              ];
+              const totalPct = total > 0 ? pcts.reduce((a, b) => a + b, 0) : 0;
+              return { items, total, totalPct, counts, pcts };
+            };
+
+            const activeRowsForDist =
+              filterClass === 'ALL'
+                ? rosterSubmissions
+                : rosterSubmissions.filter(
+                    (s: any) => String(s.class || s.studentClass || '').toUpperCase() === filterClass.toUpperCase()
+                  );
+            const currentDist = computeClassDist(activeRowsForDist);
+
+            return (
+              <>
+                <div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide flex items-center space-x-1.5">
+                      <TrendingUp className="w-4 h-4 text-indigo-600" />
+                      <span>Biểu đồ phân bố điểm số</span>
+                    </h3>
+                    {classList.length > 0 && (
+                      <select
+                        value={filterClass}
+                        onChange={(e) => setFilterClass(e.target.value)}
+                        className="px-2.5 py-1 text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg outline-none cursor-pointer"
+                        title="Chọn lớp để xem thống kê đủ 100% sĩ số của lớp"
+                      >
+                        <option value="ALL">Tất cả lớp ({rosterSubmissions.length} HS)</option>
+                        {classList.map((c) => {
+                          const clsRows = rosterSubmissions.filter(
+                            (s: any) => String(s.class || s.studentClass || '').toUpperCase() === c.toUpperCase()
+                          );
+                          return (
+                            <option key={c} value={c}>
+                              Lớp {c} ({clsRows.length} HS)
+                            </option>
+                          );
+                        })}
+                      </select>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          </div>
 
-          <div className="mt-5 pt-3 border-t border-slate-100 text-[11px] text-slate-400">
-            Dữ liệu được cập nhật tự động ngay khi học sinh nộp bài.
-          </div>
+                  <p className="text-xs text-slate-500 mb-3">
+                    Thống kê trên tổng sĩ số{' '}
+                    <b className="text-slate-800">
+                      {filterClass === 'ALL' ? `tất cả lớp (${currentDist.total} HS)` : `lớp ${filterClass} (${currentDist.total} HS)`}
+                    </b>{' '}
+                    — Đảm bảo tổng tỷ lệ đủ <b className="text-emerald-700">{currentDist.total > 0 ? `${currentDist.totalPct}%` : '0%'}</b>
+                  </p>
+
+                  <div className="space-y-2.5">
+                    {currentDist.items.map((dist) => (
+                      <div key={dist.range} className="space-y-1">
+                        <div className="flex justify-between text-xs font-semibold">
+                          <span className="text-slate-700">
+                            {dist.range === 'Chưa làm' ? 'Chưa làm (Vắng thi)' : `${dist.range} điểm`}
+                          </span>
+                          <span className={dist.badgeColor}>
+                            {dist.count}/{currentDist.total} HS ({dist.pct}%)
+                          </span>
+                        </div>
+                        <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full ${dist.barColor} rounded-full transition-all duration-500`}
+                            style={{ width: `${dist.pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Per-class 100% breakdown table when multiple classes exist */}
+                  {classList.length > 0 && (
+                    <div className="mt-4 pt-3 border-t border-slate-100">
+                      <div className="text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center justify-between">
+                        <span>Thống kê chi tiết từng lớp (Đủ 100%/lớp)</span>
+                        <span className="text-[10px] font-normal text-slate-400">Bấm vào lớp để lọc</span>
+                      </div>
+                      <div className="overflow-x-auto max-h-44 overflow-y-auto rounded-lg border border-slate-200">
+                        <table className="w-full text-[11px] text-center">
+                          <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 sticky top-0">
+                            <tr>
+                              <th className="py-1.5 px-2 text-left">Lớp</th>
+                              <th className="py-1.5 px-1.5">Sĩ số</th>
+                              <th className="py-1.5 px-1.5 text-slate-600">Chưa làm</th>
+                              <th className="py-1.5 px-1.5 text-red-600">0-5</th>
+                              <th className="py-1.5 px-1.5 text-amber-700">5-6,5</th>
+                              <th className="py-1.5 px-1.5 text-blue-700">6,5-8</th>
+                              <th className="py-1.5 px-1.5 text-emerald-700">8-10</th>
+                              <th className="py-1.5 px-1.5 text-indigo-700">Tổng</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {classList.map((cls) => {
+                              const clsRows = rosterSubmissions.filter(
+                                (s: any) => String(s.class || s.studentClass || '').toUpperCase() === cls.toUpperCase()
+                              );
+                              const d = computeClassDist(clsRows);
+                              const isSelected = filterClass.toUpperCase() === cls.toUpperCase();
+                              return (
+                                <tr
+                                  key={cls}
+                                  onClick={() => setFilterClass(isSelected ? 'ALL' : cls)}
+                                  className={`cursor-pointer transition ${
+                                    isSelected ? 'bg-indigo-50/80 font-bold' : 'hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <td className="py-1.5 px-2 text-left font-bold text-slate-800">{cls}</td>
+                                  <td className="py-1.5 px-1.5 font-semibold text-slate-700">{d.total}</td>
+                                  <td className="py-1.5 px-1.5 text-slate-600">
+                                    {d.counts[0]} <span className="text-[10px] text-slate-400">({d.pcts[0]}%)</span>
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-red-600">
+                                    {d.counts[1]} <span className="text-[10px] text-red-400">({d.pcts[1]}%)</span>
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-amber-700">
+                                    {d.counts[2]} <span className="text-[10px] text-amber-500">({d.pcts[2]}%)</span>
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-blue-700">
+                                    {d.counts[3]} <span className="text-[10px] text-blue-400">({d.pcts[3]}%)</span>
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-emerald-700">
+                                    {d.counts[4]} <span className="text-[10px] text-emerald-500">({d.pcts[4]}%)</span>
+                                  </td>
+                                  <td className="py-1.5 px-1.5 font-bold text-indigo-700">
+                                    {d.total > 0 ? `${d.totalPct}%` : '0%'}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                  <span>Tổng số: <b className="text-slate-800">{currentDist.total}/{currentDist.total} HS</b></span>
+                  <span className="font-bold text-emerald-700">Tổng tỷ lệ: {currentDist.total > 0 ? `${currentDist.totalPct}%` : '0%'}</span>
+                </div>
+              </>
+            );
+          })()}
         </div>
 
         {/* Hardest Questions Table */}

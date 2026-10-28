@@ -41,6 +41,9 @@ import { parseExamWithAI, solveQuestionsWithAI, chatExamAssistant } from './serv
 import type { Exam, ExamSession, Question, QuestionOption, StudentQuestion } from './src/types.ts';
 import {
   extractQuestionCorrectAnswer,
+  normalizeQuestionOptions,
+  normalizeSingleQuestionOptionMap,
+  reconstructOptionOrderFromDisplayedQuestions,
   unsealExamQuestions,
   sealOptionOrder,
   unsealOptionOrder,
@@ -431,18 +434,19 @@ app.post('/api/exams/:id/duplicate', requireTeacherAuth, (req: Request, res: Res
     return res.status(404).json({ error: 'Không tìm thấy bài kiểm tra' });
   }
 
-  const newCode = `${exam.code}-COPY-${Math.floor(100 + Math.random() * 900)}`;
+  const unsealedSource = unsealExamQuestions(exam);
+  const newCode = `${unsealedSource.code}-COPY-${Math.floor(100 + Math.random() * 900)}`;
   const duplicated: Exam = {
-    ...exam,
+    ...unsealedSource,
     id: `exam-${Date.now()}`,
-    title: `${exam.title} (Bản sao)`,
+    title: `${unsealedSource.title} (Bản sao)`,
     code: newCode,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
 
   db.saveExam(duplicated);
-  res.json(duplicated);
+  res.json(unsealExamQuestions(duplicated));
 });
 
 app.post('/api/exams/:id/toggle', requireTeacherAuth, (req: Request, res: Response) => {
@@ -1250,15 +1254,40 @@ app.post('/api/student/start', (req: Request, res: Response) => {
     }
 
     // Build question list for existing session
+    if (!prevSession.optionOrder || typeof prevSession.optionOrder !== 'object') {
+      prevSession.optionOrder = {};
+    }
+    if (!Array.isArray(prevSession.questionOrder) || prevSession.questionOrder.length === 0) {
+      prevSession.questionOrder = (exam.questions || []).filter(Boolean).map(q => q.id);
+    }
+    let sessionOrderUpdated = false;
     const studentQuestions: StudentQuestion[] = (prevSession.questionOrder || [])
       .map((qId, idx) => {
-        const origQ = (exam.questions || []).find(q => q && q.id === qId);
+        const origQ = (exam.questions || []).find(q => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, '_') === String(qId).replace(/[\/\.]/g, '_')));
         if (!origQ) return null;
-        // Re-map options according to saved option order
-        const optMap = (prevSession.optionOrder && prevSession.optionOrder[qId]) || { A: 'A', B: 'B', C: 'C', D: 'D' };
+        const normalizedOrigOptions = normalizeQuestionOptions(origQ.options);
+        let optMap = normalizeSingleQuestionOptionMap(getQuestionOptionMapping(prevSession.optionOrder, origQ.id) || getQuestionOptionMapping(prevSession.optionOrder, qId));
+        if (!optMap) {
+          let optIds: ('A' | 'B' | 'C' | 'D')[] = ['A', 'B', 'C', 'D'];
+          if (exam.shuffleOptions !== false) {
+            optIds = shuffleArray(optIds);
+          }
+          optMap = {
+            A: optIds[0] || 'A',
+            B: optIds[1] || 'B',
+            C: optIds[2] || 'C',
+            D: optIds[3] || 'D',
+          };
+          prevSession.optionOrder[origQ.id] = optMap;
+          sessionOrderUpdated = true;
+        } else if (!prevSession.optionOrder[origQ.id]) {
+          prevSession.optionOrder[origQ.id] = optMap;
+          sessionOrderUpdated = true;
+        }
+
         const options: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((displayId, optIdx) => {
-          const origOptId = normalizeOptionKey(optMap[displayId]) || displayId;
-          const origOpt = (origQ.options || []).find(o => o && normalizeOptionKey(o.id) === origOptId) || (origQ.options || [])[['A', 'B', 'C', 'D'].indexOf(origOptId)] || (origQ.options || [])[optIdx];
+          const origOptId = normalizeOptionKey(optMap![displayId]) || displayId;
+          const origOpt = normalizedOrigOptions.find(o => o.id === origOptId) || normalizedOrigOptions[['A', 'B', 'C', 'D'].indexOf(origOptId)] || normalizedOrigOptions[optIdx];
           return {
             id: displayId,
             text: origOpt ? origOpt.text : ''
@@ -1276,6 +1305,10 @@ app.post('/api/student/start', (req: Request, res: Response) => {
         };
       })
       .filter(Boolean) as StudentQuestion[];
+
+    if (sessionOrderUpdated) {
+      db.saveSession(prevSession, false);
+    }
 
     const prevScores = submittedSessions.map(s => s.score ?? 0);
     if (req.body?.clientBestScore !== undefined && !isNaN(Number(req.body.clientBestScore))) {
@@ -1333,9 +1366,10 @@ app.post('/api/student/start', (req: Request, res: Response) => {
     ? (exam.randomQuestionCount as number)
     : totalQuestionsInBank;
 
-  // Always shuffle questions randomly for each attempt to guarantee fresh test layout
+  // Shuffle questions according to exam settings (or when drawing a random subset)
   const rawQuestions = Array.isArray(exam.questions) ? exam.questions.filter(Boolean) : [];
-  const shuffledBank = shuffleArray([...rawQuestions]);
+  const shouldShuffleQuestions = exam.shuffleQuestions !== false || isRandomSubset;
+  const shuffledBank = shouldShuffleQuestions ? shuffleArray([...rawQuestions]) : [...rawQuestions];
   // Pick targetQuestionCount questions for this specific attempt
   const qList = shuffledBank.slice(0, targetQuestionCount).filter(q => q && q.id);
   const questionOrder = qList.map(q => q.id);
@@ -1358,11 +1392,13 @@ app.post('/api/student/start', (req: Request, res: Response) => {
       optionOrder[origQ.id] = mapping;
     }
 
+    const normalizedOrigOptions = normalizeQuestionOptions(origQ?.options);
     const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((displayId, optIdx) => {
       const origOptId = mapping[displayId];
-      const origOpt = (origQ && Array.isArray(origQ.options))
-        ? (origQ.options.find(o => o && normalizeOptionKey(o.id) === origOptId) || origQ.options[['A', 'B', 'C', 'D'].indexOf(origOptId)] || origQ.options[optIdx])
-        : undefined;
+      const origOpt =
+        normalizedOrigOptions.find(o => o.id === origOptId) ||
+        normalizedOrigOptions[['A', 'B', 'C', 'D'].indexOf(origOptId)] ||
+        normalizedOrigOptions[optIdx];
       return {
         id: displayId,
         text: origOpt ? (origOpt.text || '') : ''
@@ -1556,16 +1592,10 @@ app.post('/api/student/answer', (req: Request, res: Response) => {
   }
 
   if (resolvedOptOrder && typeof resolvedOptOrder === 'object' && Object.keys(resolvedOptOrder).length > 0) {
-    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-      session.optionOrder = resolvedOptOrder as any;
-    } else {
-      session.optionOrder = { ...(resolvedOptOrder as any), ...session.optionOrder };
-    }
+    session.optionOrder = { ...(session.optionOrder || {}), ...(resolvedOptOrder as any) };
   }
   if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-      session.questionOrder = questionOrder;
-    }
+    session.questionOrder = questionOrder;
   }
 
   if (session.status === 'submitted') {
@@ -1636,16 +1666,10 @@ app.post('/api/student/violation', (req: Request, res: Response) => {
   }
 
   if (resolvedOptOrder && typeof resolvedOptOrder === 'object' && Object.keys(resolvedOptOrder).length > 0) {
-    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-      session.optionOrder = resolvedOptOrder as any;
-    } else {
-      session.optionOrder = { ...(resolvedOptOrder as any), ...session.optionOrder };
-    }
+    session.optionOrder = { ...(session.optionOrder || {}), ...(resolvedOptOrder as any) };
   }
   if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-      session.questionOrder = questionOrder;
-    }
+    session.questionOrder = questionOrder;
   }
 
   if (session.status === 'submitted') {
@@ -1761,16 +1785,10 @@ app.post('/api/student/heartbeat', (req: Request, res: Response) => {
   }
 
   if (resolvedOptOrder && typeof resolvedOptOrder === 'object' && Object.keys(resolvedOptOrder).length > 0) {
-    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-      session.optionOrder = resolvedOptOrder as any;
-    } else {
-      session.optionOrder = { ...(resolvedOptOrder as any), ...session.optionOrder };
-    }
+    session.optionOrder = { ...(session.optionOrder || {}), ...(resolvedOptOrder as any) };
   }
   if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-      session.questionOrder = questionOrder;
-    }
+    session.questionOrder = questionOrder;
   }
 
   // If already submitted, preserve submission and score
@@ -1812,6 +1830,7 @@ app.post('/api/student/lock-exit', (req: Request, res: Response) => {
     questionOrder,
     optionOrder,
     sealedOptionOrder,
+    displayedQuestions,
     violationCount,
     attemptNumber,
     examSnapshot,
@@ -1832,7 +1851,12 @@ app.post('/api/student/lock-exit', (req: Request, res: Response) => {
     syncPreviousStudentSessions(previousSessions, exam.id);
   }
 
-  const resolvedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ''));
+  const reconstructedOptOrder = reconstructOptionOrderFromDisplayedQuestions(displayedQuestions, exam?.questions);
+  const unsealedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ''));
+  const resolvedOptOrder = {
+    ...reconstructedOptOrder,
+    ...(unsealedOptOrder || {}),
+  };
 
   if (!session && sessionId && exam) {
     session = {
@@ -1868,9 +1892,9 @@ app.post('/api/student/lock-exit', (req: Request, res: Response) => {
     session.answers = { ...session.answers, ...answers };
   }
   if (resolvedOptOrder && typeof resolvedOptOrder === 'object' && Object.keys(resolvedOptOrder).length > 0) {
-    session.optionOrder = { ...(resolvedOptOrder as any), ...(session.optionOrder || {}) };
+    session.optionOrder = { ...(session.optionOrder || {}), ...(resolvedOptOrder as any) };
   }
-  if (Array.isArray(questionOrder) && questionOrder.length > 0 && (!session.questionOrder || session.questionOrder.length === 0)) {
+  if (Array.isArray(questionOrder) && questionOrder.length > 0) {
     session.questionOrder = questionOrder;
   }
 
@@ -1916,6 +1940,7 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     questionOrder,
     optionOrder,
     sealedOptionOrder,
+    displayedQuestions,
     violationCount,
     startedAt,
     attemptNumber
@@ -1959,7 +1984,12 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     clientAttemptsMade
   );
 
-  const resolvedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ''));
+  const reconstructedOptOrder = reconstructOptionOrderFromDisplayedQuestions(displayedQuestions, exam.questions);
+  const unsealedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ''));
+  const resolvedOptOrder = {
+    ...reconstructedOptOrder,
+    ...(unsealedOptOrder || {}),
+  };
 
   if (!session) {
     const sId = sessionId || `ses-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
@@ -1988,18 +2018,12 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     if (answers && typeof answers === 'object') {
       session.answers = { ...session.answers, ...answers };
     }
-    // Critical: Restore optionOrder and questionOrder if session was previously auto-created by heartbeat/answer with empty optionOrder
+    // Critical: Client's authoritative optionOrder and questionOrder always override auto-created defaults
     if (resolvedOptOrder && typeof resolvedOptOrder === 'object' && Object.keys(resolvedOptOrder).length > 0) {
-      if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-        session.optionOrder = resolvedOptOrder as any;
-      } else {
-        session.optionOrder = { ...(resolvedOptOrder as any), ...session.optionOrder };
-      }
+      session.optionOrder = { ...(session.optionOrder || {}), ...(resolvedOptOrder as any) };
     }
     if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-      if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-        session.questionOrder = questionOrder;
-      }
+      session.questionOrder = questionOrder;
     }
     if (violationCount !== undefined) {
       session.violationCount = violationCount;
@@ -2274,13 +2298,26 @@ app.get('/api/reports/:examId', requireTeacherAuth, (req: Request, res: Response
     }
   }
 
-  // Score distribution bins based on students' best scores
+  // Score distribution bins based on full class roster (including Chưa làm)
+  const allStudentsForReport = db.getStudents() || [];
+  const targetClassesForReport = Array.isArray(exam.targetClasses) && exam.targetClasses.length > 0
+    ? exam.targetClasses.map(c => normalizeClassName(c)).filter(c => c && c !== 'ALL' && c !== 'TẤT CẢ')
+    : [];
+  const rosterStudentsForExam = allStudentsForReport.filter(st => {
+    const stCls = normalizeClassName(st.class);
+    if (targetClassesForReport.length > 0) return targetClassesForReport.includes(stCls);
+    if (exam.grade) return stCls.startsWith(String(exam.grade));
+    return true;
+  });
+  const totalRosterCount = Math.max(rosterStudentsForExam.length, totalStudentsCount);
+  const notParticipatedCount = Math.max(0, totalRosterCount - totalStudentsCount);
+
   const distribution = [
-    { range: '0 - 1.9', count: studentScores.filter(s => s < 2).length },
-    { range: '2.0 - 4.9', count: studentScores.filter(s => s >= 2 && s < 5).length },
-    { range: '5.0 - 6.4', count: studentScores.filter(s => s >= 5 && s < 6.5).length },
-    { range: '6.5 - 7.9', count: studentScores.filter(s => s >= 6.5 && s < 8).length },
-    { range: '8.0 - 10', count: studentScores.filter(s => s >= 8).length }
+    { range: 'Chưa làm', count: notParticipatedCount },
+    { range: '0 đến 5', count: studentScores.filter(s => s < 5).length },
+    { range: '5 đến 6,5', count: studentScores.filter(s => s >= 5 && s < 6.5).length },
+    { range: '6,5 đến 8', count: studentScores.filter(s => s >= 6.5 && s < 8).length },
+    { range: '8 đến 10', count: studentScores.filter(s => s >= 8).length }
   ];
 
   // Hardest questions analysis
@@ -2654,16 +2691,40 @@ app.post('/api/sessions/sync', (req: Request, res: Response) => {
 
   let count = 0;
   for (const incoming of sessions) {
-    if (!incoming || !incoming.id || !incoming.examId) continue;
-    const existing = db.getSession(incoming.id);
+    if (!incoming) continue;
+    const sId = String(incoming.id || incoming.sessionId || '').trim();
+    const eId = String(incoming.examId || incoming.examCode || '').trim();
+    if (!sId || !eId) continue;
+
+    const decodedOptOrder = unsealOptionOrder(incoming.sealedOptionOrder || incoming.optionOrder, sId);
+    const existing = db.getSession(sId);
     if (!existing) {
-      db.saveSession(incoming);
+      db.saveSession({
+        ...incoming,
+        id: sId,
+        examId: eId,
+        questionOrder: Array.isArray(incoming.questionOrder) ? incoming.questionOrder : [],
+        optionOrder: (decodedOptOrder && typeof decodedOptOrder === 'object') ? (decodedOptOrder as any) : {},
+        answers: (incoming.answers && typeof incoming.answers === 'object') ? incoming.answers : {},
+      });
       count++;
     } else {
       let changed = false;
       if (incoming.status === 'submitted' && existing.status !== 'submitted') {
         existing.status = 'submitted';
         existing.submittedAt = incoming.submittedAt || new Date().toISOString();
+        changed = true;
+      }
+      if (incoming.answers && typeof incoming.answers === 'object' && Object.keys(incoming.answers).length > 0) {
+        existing.answers = { ...(existing.answers || {}), ...incoming.answers };
+        changed = true;
+      }
+      if (Array.isArray(incoming.questionOrder) && incoming.questionOrder.length > 0) {
+        existing.questionOrder = incoming.questionOrder;
+        changed = true;
+      }
+      if (decodedOptOrder && typeof decodedOptOrder === 'object' && Object.keys(decodedOptOrder).length > 0) {
+        existing.optionOrder = { ...(existing.optionOrder || {}), ...(decodedOptOrder as any) };
         changed = true;
       }
       if (incoming.score !== undefined && (existing.score === undefined || incoming.score > existing.score)) {

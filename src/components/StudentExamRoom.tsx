@@ -140,6 +140,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         questionOrder: currentSession.questionOrder || (currentSession.questions ? currentSession.questions.map(q => q.id) : undefined),
         optionOrder: currentSession.optionOrder,
         sealedOptionOrder: currentSession.sealedOptionOrder,
+        displayedQuestions: currentSession.questions,
         violationCount,
         attemptNumber: currentSession.attemptNumber || 1,
         bestScoreSoFar: currentSession.bestScoreSoFar,
@@ -294,7 +295,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
             sbd: studentInfo.sbd,
             violationCount: violationCount,
             status: isLocked ? 'locked' : 'in_progress',
-            attemptNumber: currentSession.attemptNumber || 1
+            attemptNumber: currentSession.attemptNumber || 1,
+            questionOrder: currentSession.questionOrder,
+            sealedOptionOrder: currentSession.sealedOptionOrder
           });
           if (res.isLocked) {
             setIsLocked(true);
@@ -322,7 +325,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       window.removeEventListener('offline', handleOffline);
       clearInterval(hbInterval);
     };
-  }, [currentSession.sessionId, submitResult, isLocked, longDisconnectionModal, violationCount]);
+  }, [currentSession.sessionId, currentSession.questionOrder, currentSession.sealedOptionOrder, submitResult, isLocked, longDisconnectionModal, violationCount]);
 
   // Fast unlock check ONLY while locked (every 6 seconds instead of 3s)
   useEffect(() => {
@@ -337,7 +340,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
           sbd: studentInfo.sbd,
           violationCount: violationCount,
           status: 'locked',
-          attemptNumber: currentSession.attemptNumber || 1
+          attemptNumber: currentSession.attemptNumber || 1,
+          questionOrder: currentSession.questionOrder,
+          sealedOptionOrder: currentSession.sealedOptionOrder
         });
         if (!res.isLocked) {
           setIsLocked(false);
@@ -348,7 +353,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       }
     }, 6000);
     return () => clearInterval(interval);
-  }, [isLocked, currentSession.sessionId, examInfo.id, studentInfo, submitResult, violationCount, currentSession.attemptNumber]);
+  }, [isLocked, currentSession.sessionId, currentSession.questionOrder, currentSession.sealedOptionOrder, examInfo.id, studentInfo, submitResult, violationCount, currentSession.attemptNumber]);
 
   const roomEntryTimeRef = useRef(Date.now());
 
@@ -366,7 +371,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       attemptNumber: currentSession.attemptNumber || 1,
       totalQuestions: questions.length,
       violationCount: violationCount,
-      answeredCount: Object.keys(answers).length
+      answeredCount: Object.keys(answers).length,
+      questionOrder: currentSession.questionOrder || questions.map(q => q.id),
+      optionOrder: (currentSession.sealedOptionOrder || currentSession.optionOrder) as any
     }).catch(() => {});
   }, [currentSession.sessionId, examInfo.id, examInfo.code, studentInfo.name, studentInfo.class, studentInfo.sbd, questions.length]);
 
@@ -405,6 +412,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
           sessionId: currentSession.sessionId,
           type,
           description,
+          examId: examInfo.id,
+          questionOrder: currentSession.questionOrder,
+          sealedOptionOrder: currentSession.sealedOptionOrder,
         });
 
         const newCount = res.violationCount;
@@ -562,6 +572,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         sessionId: currentSession.sessionId,
         questionId: currentQ.id,
         optionId,
+        examId: examInfo.id,
+        questionOrder: currentSession.questionOrder,
+        sealedOptionOrder: currentSession.sealedOptionOrder,
       });
     } catch (err) {
       console.warn('Autosave warning, saved in local backup:', err);
@@ -586,6 +599,9 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         sessionId: currentSession.sessionId,
         questionId: currentQ.id,
         flagged: isNowFlagged,
+        examId: examInfo.id,
+        questionOrder: currentSession.questionOrder,
+        sealedOptionOrder: currentSession.sealedOptionOrder,
       });
     } catch (err) {
       console.warn('Failed to update flagged question:', err);
@@ -639,6 +655,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         questionOrder: currentSession.questionOrder || (currentSession.questions ? currentSession.questions.map(q => q.id) : undefined),
         optionOrder: currentSession.optionOrder,
         sealedOptionOrder: currentSession.sealedOptionOrder,
+        displayedQuestions: currentSession.questions,
         attemptNumber: currentSession.attemptNumber || 1,
         bestScoreSoFar: currentSession.bestScoreSoFar,
         violationCount: violationCount,

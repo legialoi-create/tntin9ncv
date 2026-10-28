@@ -43,23 +43,40 @@ export function normalizeUsername(username: unknown): string {
 
 /**
  * Chuẩn hoá đáp án về đúng 'A' | 'B' | 'C' | 'D'
+ * Hỗ trợ cả mảng QuestionOption[] ([{id:'A', text:'...'}]) và object ({A:'...', B:'...'})
  */
 export function normalizeOptionKey(
   val: unknown,
-  options?: { A?: string; B?: string; C?: string; D?: string }
+  options?: Array<{ id?: string; text?: string }> | { A?: string; B?: string; C?: string; D?: string }
 ): 'A' | 'B' | 'C' | 'D' | '' {
   if (val === undefined || val === null) return '';
   const raw = String(val).normalize('NFC').trim();
-  if (!raw) return '';
+  if (!raw || raw.startsWith('ncv$v2$')) return '';
   const upper = raw.toUpperCase();
   if (upper === 'A' || upper === 'B' || upper === 'C' || upper === 'D') {
     return upper as 'A' | 'B' | 'C' | 'D';
   }
-  const prefixMatch = upper.match(/^([A-D])[\.\)\:\-\s]/);
-  if (prefixMatch && (!options || !Object.values(options).some(v => String(v).trim().toUpperCase() === upper))) {
-    return prefixMatch[1] as 'A' | 'B' | 'C' | 'D';
+  const prefixMatch = upper.match(
+    /^(?:ĐÁP\s*ÁN|PHƯƠNG\s*ÁN|CHỌN|KEY|CÂU)?[\s\:\-\.\(\[]*([A-D])(?:[\.\)\]\:\-\s]|$)/i
+  );
+  if (prefixMatch && prefixMatch[1]) {
+    const letter = prefixMatch[1].toUpperCase();
+    if (letter === 'A' || letter === 'B' || letter === 'C' || letter === 'D') {
+      return letter as 'A' | 'B' | 'C' | 'D';
+    }
   }
-  if (options) {
+  if (Array.isArray(options) && options.length > 0) {
+    const rawLower = raw.toLowerCase();
+    const matchedOpt = options.find(
+      (o) => o && String(o.text ?? '').normalize('NFC').trim().toLowerCase() === rawLower
+    );
+    if (matchedOpt && matchedOpt.id) {
+      const optId = String(matchedOpt.id).trim().toUpperCase();
+      if (optId === 'A' || optId === 'B' || optId === 'C' || optId === 'D') {
+        return optId as 'A' | 'B' | 'C' | 'D';
+      }
+    }
+  } else if (options && typeof options === 'object') {
     for (const [k, v] of Object.entries(options)) {
       if (String(v ?? '').normalize('NFC').trim().toLowerCase() === raw.toLowerCase()) {
         const ku = k.trim().toUpperCase();
@@ -70,6 +87,144 @@ export function normalizeOptionKey(
     }
   }
   return '';
+}
+
+/**
+ * Chuẩn hoá 4 phương án A, B, C, D của một câu hỏi để đảm bảo luôn theo đúng thứ tự chuẩn A, B, C, D
+ */
+export function normalizeQuestionOptions(
+  rawOptions: unknown
+): Array<{ id: 'A' | 'B' | 'C' | 'D'; text: string }> {
+  const letters: Array<'A' | 'B' | 'C' | 'D'> = ['A', 'B', 'C', 'D'];
+  if (Array.isArray(rawOptions) && rawOptions.length > 0) {
+    return letters.map((letter, idx) => {
+      const byId = rawOptions.find(
+        (o: any) => o && typeof o === 'object' && normalizeOptionKey(o.id) === letter
+      );
+      const fallbackItem = rawOptions[idx];
+      const chosen = byId || fallbackItem;
+      let text = '';
+      if (typeof chosen === 'string') {
+        text = chosen.trim();
+      } else if (chosen && typeof chosen === 'object') {
+        text = String(chosen.text ?? chosen.content ?? '').trim();
+      }
+      return {
+        id: letter,
+        text,
+      };
+    });
+  }
+  if (rawOptions && typeof rawOptions === 'object') {
+    const obj = rawOptions as Record<string, any>;
+    return letters.map((letter) => ({
+      id: letter,
+      text: String(obj[letter] ?? obj[letter.toLowerCase()] ?? '').trim(),
+    }));
+  }
+  return letters.map((letter) => ({ id: letter, text: '' }));
+}
+
+/**
+ * Chuẩn hoá bản đồ đảo đáp án của 1 câu hỏi về dạng { A: '...', B: '...', C: '...', D: '...' }
+ */
+export function normalizeSingleQuestionOptionMap(
+  rawMap: unknown
+): Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'> | null {
+  const letters: Array<'A' | 'B' | 'C' | 'D'> = ['A', 'B', 'C', 'D'];
+  if (!rawMap) return null;
+  if (Array.isArray(rawMap) && rawMap.length >= 4) {
+    const a = normalizeOptionKey(rawMap[0]) || 'A';
+    const b = normalizeOptionKey(rawMap[1]) || 'B';
+    const c = normalizeOptionKey(rawMap[2]) || 'C';
+    const d = normalizeOptionKey(rawMap[3]) || 'D';
+    return { A: a, B: b, C: c, D: d };
+  }
+  if (typeof rawMap === 'object') {
+    const obj = rawMap as Record<string, any>;
+    const result: Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'> = {
+      A: 'A',
+      B: 'B',
+      C: 'C',
+      D: 'D',
+    };
+    let hasValid = false;
+    for (const letter of letters) {
+      const candidate = obj[letter] ?? obj[letter.toLowerCase()];
+      const norm = normalizeOptionKey(candidate);
+      if (norm) {
+        result[letter] = norm;
+        hasValid = true;
+      }
+    }
+    return hasValid ? result : null;
+  }
+  return null;
+}
+
+/**
+ * Khôi phục bản đồ đảo đáp án (optionOrder) từ danh sách câu hỏi hiển thị trên màn hình học sinh (displayedQuestions)
+ * đối chiếu với bộ câu hỏi gốc trong đề thi (examQuestions).
+ * Giúp chấm đúng 100% ngay cả khi phiên thi bị mất kết nối hoặc thiếu sealedOptionOrder.
+ */
+export function reconstructOptionOrderFromDisplayedQuestions(
+  displayedQuestions: unknown,
+  examQuestions: unknown
+): Record<string, Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'>> {
+  const reconstructed: Record<string, Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'>> = {};
+  if (!Array.isArray(displayedQuestions) || !Array.isArray(examQuestions)) {
+    return reconstructed;
+  }
+
+  const letters: Array<'A' | 'B' | 'C' | 'D'> = ['A', 'B', 'C', 'D'];
+  for (const sq of displayedQuestions) {
+    if (!sq || !sq.id || !Array.isArray(sq.options)) continue;
+    const sqId = String(sq.id);
+    const safeSqId = sqId.replace(/[\/\.]/g, '_');
+    const origQ = examQuestions.find(
+      (q: any) =>
+        q &&
+        (String(q.id) === sqId || String(q.id).replace(/[\/\.]/g, '_') === safeSqId)
+    );
+    if (!origQ || !origQ.options) continue;
+
+    const origOpts = normalizeQuestionOptions(origQ.options);
+    const dispOpts = normalizeQuestionOptions(sq.options);
+
+    const usedOrigIds = new Set<'A' | 'B' | 'C' | 'D'>();
+    const mapping: Partial<Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'>> = {};
+    let matchedCount = 0;
+
+    for (const dispOpt of dispOpts) {
+      const dispTextNorm = String(dispOpt.text || '').normalize('NFC').trim().toLowerCase();
+      if (!dispTextNorm) continue;
+      const foundOrig = origOpts.find(
+        (o) =>
+          !usedOrigIds.has(o.id) &&
+          String(o.text || '').normalize('NFC').trim().toLowerCase() === dispTextNorm
+      );
+      if (foundOrig) {
+        mapping[dispOpt.id] = foundOrig.id;
+        usedOrigIds.add(foundOrig.id);
+        matchedCount++;
+      }
+    }
+
+    if (matchedCount >= 3) {
+      const remainingOrig = letters.filter((l) => !usedOrigIds.has(l));
+      let remIdx = 0;
+      const fullMap: Record<'A' | 'B' | 'C' | 'D', 'A' | 'B' | 'C' | 'D'> = {
+        A: mapping.A || remainingOrig[remIdx++] || 'A',
+        B: mapping.B || remainingOrig[remIdx++] || 'B',
+        C: mapping.C || remainingOrig[remIdx++] || 'C',
+        D: mapping.D || remainingOrig[remIdx++] || 'D',
+      };
+      reconstructed[origQ.id] = fullMap;
+      reconstructed[sqId] = fullMap;
+    }
+  }
+
+  return reconstructed;
 }
 
 /**
@@ -195,23 +350,46 @@ export function isSealedValue(val: unknown): boolean {
 
 /**
  * Giải mã đáp án của 1 câu hỏi (tự động nhận diện đáp án đã mã hoá hoặc đáp án gốc)
+ * Ưu tiên đáp án dạng rõ nếu giáo viên vừa chỉnh sửa (q.correctAnswer = 'A'|'B'|'C'|'D'),
+ * sau đó giải mã an toàn với đa khoá dự phòng để không bao giờ bị lệch khi đổi mã đề / nhân bản đề.
  */
 export function extractQuestionCorrectAnswer(q: any, examId?: string): 'A' | 'B' | 'C' | 'D' | '' {
   if (!q) return '';
   const qId = String(q.id || '');
-  const salt = `Q_ANS::${examId || ''}::${qId}`;
-  const saltFallback = `Q_ANS::::${qId}`;
 
-  // Ưu tiên trường _ak hoặc correctAnswer
-  const rawCandidate = q._ak || q.correctAnswer || '';
-  if (isSealedValue(rawCandidate)) {
-    let unsealed = unsealValue(rawCandidate, salt);
-    if (!unsealed) {
-      unsealed = unsealValue(rawCandidate, saltFallback);
-    }
-    return normalizeOptionKey(unsealed, q.options);
+  // 1. Nếu q.correctAnswer đang ở dạng rõ ('A' | 'B' | 'C' | 'D'), ưu tiên tuyệt đối (khi GV vừa sửa đáp án)
+  if (q.correctAnswer && !isSealedValue(q.correctAnswer)) {
+    const plainDirect = normalizeOptionKey(q.correctAnswer, q.options);
+    if (plainDirect) return plainDirect;
   }
-  return normalizeOptionKey(rawCandidate, q.options);
+
+  // 2. Giải mã từ chuỗi đã mã hoá (q.correctAnswer hoặc q._ak)
+  const candidates = [q.correctAnswer, q._ak].filter(Boolean);
+  const candidateSalts = Array.from(
+    new Set([
+      `Q_ANS::${examId || ''}::${qId}`,
+      `Q_ANS::${q._eid || ''}::${qId}`,
+      `Q_ANS::::${qId}`,
+      `Q_ANS::GLOBAL::${qId}`,
+    ])
+  );
+
+  for (const rawCandidate of candidates) {
+    if (isSealedValue(rawCandidate)) {
+      for (const salt of candidateSalts) {
+        const unsealed = unsealValue(rawCandidate, salt);
+        if (unsealed) {
+          const norm = normalizeOptionKey(unsealed, q.options);
+          if (norm) return norm;
+        }
+      }
+    } else {
+      const norm = normalizeOptionKey(rawCandidate, q.options);
+      if (norm) return norm;
+    }
+  }
+
+  return '';
 }
 
 /**
@@ -220,37 +398,60 @@ export function extractQuestionCorrectAnswer(q: any, examId?: string): 'A' | 'B'
 export function extractQuestionExplanation(q: any, examId?: string): string {
   if (!q) return '';
   const qId = String(q.id || '');
-  const salt = `Q_EXP::${examId || ''}::${qId}`;
-  const saltFallback = `Q_EXP::::${qId}`;
-  const rawCandidate = q._ek || q.explanation || '';
-  if (isSealedValue(rawCandidate)) {
-    let unsealed = unsealValue(rawCandidate, salt);
-    if (!unsealed) {
-      unsealed = unsealValue(rawCandidate, saltFallback);
-    }
-    return unsealed;
+  if (q.explanation && !isSealedValue(q.explanation)) {
+    return String(q.explanation);
   }
-  return String(rawCandidate || '');
+  const candidates = [q.explanation, q._ek].filter(Boolean);
+  const candidateSalts = Array.from(
+    new Set([
+      `Q_EXP::${examId || ''}::${qId}`,
+      `Q_EXP::${q._eid || ''}::${qId}`,
+      `Q_EXP::::${qId}`,
+      `Q_EXP::GLOBAL::${qId}`,
+    ])
+  );
+  for (const rawCandidate of candidates) {
+    if (isSealedValue(rawCandidate)) {
+      for (const salt of candidateSalts) {
+        const unsealed = unsealValue(rawCandidate, salt);
+        if (unsealed) return unsealed;
+      }
+    } else {
+      return String(rawCandidate || '');
+    }
+  }
+  return '';
 }
 
 /**
  * Mã hoá toàn bộ đáp án & giải thích trong đề thi trước khi lưu vào Firestore / LocalStorage
- * Học sinh mở DevTools xem Network hay LocalStorage cũng chỉ thấy chuỗi mã hoá ncv$v2$...
- * (Mỗi câu hỏi có IV ngẫu nhiên và Salt theo ID câu hỏi nên 2 câu cùng đáp án A sẽ có chuỗi mã hoá hoàn toàn khác nhau)
+ * Đồng thời chuẩn hoá ID câu hỏi duy nhất và thứ tự phương án gốc A, B, C, D.
  */
 export function sealExamQuestions<T extends Record<string, any>>(exam: T): T {
   if (!exam || !Array.isArray(exam.questions)) return exam;
   const examId = String(exam.id || '');
-  const sealedQuestions = exam.questions.map((q: any) => {
-    const qId = String(q.id || '');
-    const plainAns = extractQuestionCorrectAnswer(q, examId) || 'A';
+  const seenIds = new Set<string>();
+
+  const sealedQuestions = exam.questions.map((q: any, idx: number) => {
+    let qId = String(q?.id || `q-${idx + 1}`).trim();
+    if (!qId || seenIds.has(qId)) {
+      qId = `${qId || 'q'}-${idx + 1}`;
+    }
+    seenIds.add(qId);
+
+    const normalizedOpts = normalizeQuestionOptions(q?.options);
+    const plainAns = extractQuestionCorrectAnswer({ ...q, options: normalizedOpts }, examId) || 'A';
     const plainExp = extractQuestionExplanation(q, examId);
     const sealedAns = sealValue(plainAns, `Q_ANS::${examId}::${qId}`, true);
     const sealedExp = plainExp ? sealValue(plainExp, `Q_EXP::${examId}::${qId}`, true) : '';
     return {
       ...q,
+      id: qId,
+      number: q?.number || idx + 1,
+      options: normalizedOpts,
       correctAnswer: sealedAns,
       _ak: sealedAns,
+      _eid: examId,
       explanation: sealedExp,
       ...(sealedExp ? { _ek: sealedExp } : {}),
     };
@@ -267,10 +468,26 @@ export function sealExamQuestions<T extends Record<string, any>>(exam: T): T {
 export function unsealExamQuestions<T extends Record<string, any>>(exam: T): T {
   if (!exam || !Array.isArray(exam.questions)) return exam;
   const examId = String(exam.id || '');
-  const unsealedQuestions = exam.questions.map((q: any) => {
-    const plainAns = extractQuestionCorrectAnswer(q, examId) || 'A';
+  const seenIds = new Set<string>();
+
+  const unsealedQuestions = exam.questions.map((q: any, idx: number) => {
+    let qId = String(q?.id || `q-${idx + 1}`).trim();
+    if (!qId || seenIds.has(qId)) {
+      qId = `${qId || 'q'}-${idx + 1}`;
+    }
+    seenIds.add(qId);
+
+    const normalizedOpts = normalizeQuestionOptions(q?.options);
+    const plainAns = extractQuestionCorrectAnswer({ ...q, options: normalizedOpts }, examId) || 'A';
     const plainExp = extractQuestionExplanation(q, examId);
-    const clone = { ...q, correctAnswer: plainAns, explanation: plainExp };
+    const clone = {
+      ...q,
+      id: qId,
+      number: q?.number || idx + 1,
+      options: normalizedOpts,
+      correctAnswer: plainAns,
+      explanation: plainExp,
+    };
     delete clone._ak;
     delete clone._ek;
     return clone;
@@ -290,12 +507,17 @@ export function sanitizeExamForStudent<T extends Record<string, any>>(exam: T): 
   if (!Array.isArray(sealed.questions)) return sealed;
   return {
     ...sealed,
-    questions: sealed.questions.map((q: any) => ({
+    questions: sealed.questions.map((q: any, idx: number) => ({
       id: q.id,
-      text: q.text,
+      number: q.number || idx + 1,
+      content: q.content || q.text || '',
+      text: q.text || q.content || '',
+      codeSnippet: q.codeSnippet,
+      codeLanguage: q.codeLanguage,
       imageUrl: q.imageUrl,
       options: q.options,
       _ak: q._ak || q.correctAnswer,
+      _eid: q._eid || sealed.id,
       // Tuyệt đối không trả về correctAnswer dạng A/B/C/D hay explanation dạng rõ
     })),
   };
@@ -304,36 +526,58 @@ export function sanitizeExamForStudent<T extends Record<string, any>>(exam: T): 
 /**
  * Mã hoá và giải mã thứ tự đảo đáp án (optionOrder) của từng phiên thi
  */
-export function sealOptionOrder(optionOrder: Record<string, string[]>, sessionId: string): string {
+export function sealOptionOrder(
+  optionOrder: Record<string, any>,
+  sessionId: string
+): string {
   if (!optionOrder) return '';
-  return sealValue(JSON.stringify(optionOrder), `OPT_ORDER::${sessionId}`);
+  if (typeof optionOrder === 'string') {
+    if (isSealedValue(optionOrder)) return optionOrder;
+  }
+  const cleanSid = String(sessionId || '').trim();
+  const salt = cleanSid ? `OPT_ORDER::${cleanSid}` : 'OPT_ORDER::GLOBAL';
+  return sealValue(JSON.stringify(optionOrder), salt);
 }
 
 export function unsealOptionOrder(
   sealedOrRaw: unknown,
   sessionId: string
-): Record<string, string[]> {
+): Record<string, any> {
   if (!sealedOrRaw) return {};
   if (typeof sealedOrRaw === 'string') {
     if (isSealedValue(sealedOrRaw)) {
-      const json = unsealValue(sealedOrRaw, `OPT_ORDER::${sessionId}`);
-      if (json) {
-        try {
-          return JSON.parse(json);
-        } catch {
-          return {};
+      const cleanSid = String(sessionId || '').trim();
+      const candidateSalts = Array.from(
+        new Set([
+          `OPT_ORDER::${cleanSid}`,
+          `OPT_ORDER::${sessionId || ''}`,
+          'OPT_ORDER::GLOBAL',
+          'OPT_ORDER::',
+        ])
+      );
+      for (const salt of candidateSalts) {
+        const json = unsealValue(sealedOrRaw, salt);
+        if (json) {
+          try {
+            const parsed = JSON.parse(json);
+            if (parsed && typeof parsed === 'object') return parsed;
+          } catch {
+            // continue
+          }
         }
       }
       return {};
     }
     try {
-      return JSON.parse(sealedOrRaw);
+      const parsed = JSON.parse(sealedOrRaw);
+      if (parsed && typeof parsed === 'object') return parsed;
+      return {};
     } catch {
       return {};
     }
   }
   if (typeof sealedOrRaw === 'object') {
-    return sealedOrRaw as Record<string, string[]>;
+    return sealedOrRaw as Record<string, any>;
   }
   return {};
 }
@@ -421,25 +665,23 @@ export function getStudentRawAnswer(answers: Record<string, string> | undefined 
 }
 
 /**
- * Ánh xạ đáp án học sinh chọn trên giao diện (đã đảo thứ tự A/B/C/D) về lại đáp án gốc của câu hỏi
+ * Ánh xạ đáp án học sinh chọn trên giao diện (đã đảo thứ tự A/B/C/D) về lại đáp án gốc của câu hỏi.
+ * Hỗ trợ cả optionOrder dạng object { A: 'C', B: 'A', ... } và dạng mảng ['C', 'A', 'D', 'B'].
  */
 export function resolveStudentOriginalChoice(
   rawChoice: unknown,
   qId: string,
-  optionOrderMap: Record<string, string[]> | undefined | null,
-  options?: { A?: string; B?: string; C?: string; D?: string }
+  optionOrderMap: Record<string, any> | undefined | null,
+  options?: Array<{ id?: string; text?: string }> | { A?: string; B?: string; C?: string; D?: string }
 ): 'A' | 'B' | 'C' | 'D' | '' {
   const normalizedChoice = normalizeOptionKey(rawChoice, options);
   if (!normalizedChoice) return '';
 
   const safeKey = String(qId).replace(/[\/\.]/g, '_');
-  const order = optionOrderMap?.[qId] || optionOrderMap?.[safeKey];
-  if (Array.isArray(order) && order.length === 4) {
-    const idx = ['A', 'B', 'C', 'D'].indexOf(normalizedChoice);
-    if (idx !== -1 && order[idx]) {
-      const mapped = normalizeOptionKey(order[idx], options);
-      if (mapped) return mapped;
-    }
+  const rawOrder = optionOrderMap?.[qId] || optionOrderMap?.[safeKey];
+  const normMap = normalizeSingleQuestionOptionMap(rawOrder);
+  if (normMap && normMap[normalizedChoice]) {
+    return normMap[normalizedChoice];
   }
   return normalizedChoice;
 }
@@ -468,24 +710,31 @@ export interface GradeResult {
 export function gradeStudentSubmission(params: {
   exam: { id?: string; questions?: any[] };
   questionOrder?: string[];
-  optionOrder?: Record<string, string[]> | string;
+  optionOrder?: Record<string, any> | string;
   sealedOptionOrder?: string;
+  displayedQuestions?: any[];
   answers?: Record<string, string>;
   sessionId?: string;
 }): GradeResult {
-  const { exam, questionOrder, optionOrder, sealedOptionOrder, answers, sessionId = '' } = params;
+  const {
+    exam,
+    questionOrder,
+    optionOrder,
+    sealedOptionOrder,
+    displayedQuestions,
+    answers,
+    sessionId = '',
+  } = params;
   const allQuestions: any[] = Array.isArray(exam?.questions) ? exam.questions : [];
   const examId = String(exam?.id || '');
 
-  // Giải mã optionOrder nếu ở dạng sealed
-  let resolvedOptionOrder: Record<string, string[]> = {};
-  if (optionOrder && typeof optionOrder === 'object') {
-    resolvedOptionOrder = optionOrder;
-  } else if (typeof optionOrder === 'string' && optionOrder) {
-    resolvedOptionOrder = unsealOptionOrder(optionOrder, sessionId);
-  } else if (sealedOptionOrder) {
-    resolvedOptionOrder = unsealOptionOrder(sealedOptionOrder, sessionId);
-  }
+  // Giải mã optionOrder nếu ở dạng sealed, đồng thời bổ sung dự phòng từ displayedQuestions nếu có
+  const fromDisplayed = reconstructOptionOrderFromDisplayedQuestions(displayedQuestions, allQuestions);
+  const fromSealed = unsealOptionOrder(sealedOptionOrder || optionOrder, sessionId);
+  const resolvedOptionOrder: Record<string, any> = {
+    ...fromDisplayed,
+    ...(fromSealed && typeof fromSealed === 'object' ? fromSealed : {}),
+  };
 
   // Xác định danh sách câu hỏi được giao cho học sinh trong đề thi
   let targetQuestions: any[] = [];
