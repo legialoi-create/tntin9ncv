@@ -135,7 +135,6 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
   // Class student roster state
   const [classStudents, setClassStudents] = useState<StudentInfo[]>([]);
   const [selectedStudentId, setSelectedStudentId] = useState<string>('');
-  const [studentSearchQuery, setStudentSearchQuery] = useState<string>('');
   const [isManualInput, setIsManualInput] = useState(false);
   const [isLoadingStudents, setIsLoadingStudents] = useState(false);
 
@@ -288,17 +287,13 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       .then((students) => {
         setClassStudents(students);
         setSelectedStudentId('');
-        // If students exist, default to selecting from roster
-        if (students.length > 0) {
-          setIsManualInput(false);
-        } else {
-          setIsManualInput(true);
-        }
+        setStudentName('');
+        setSbd('');
+        setIsManualInput(false);
       })
       .catch((err) => {
         console.error('Failed to load class students:', err);
         setClassStudents([]);
-        setIsManualInput(true);
       })
       .finally(() => setIsLoadingStudents(false));
   }, [studentClass]);
@@ -350,17 +345,13 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     const val = e.target.value;
     setSelectedStudentId(val);
 
-    if (val === '__custom__') {
-      setIsManualInput(true);
-      setStudentName('');
-      return;
-    }
-
     const found = classStudents.find((s) => s.id === val);
     if (found) {
       setStudentName(found.name);
       if (found.sbd) {
         setSbd(found.sbd);
+      } else {
+        setSbd('');
       }
       const defaultPass = `${studentClass.toUpperCase().replace(/[^A-Z0-9]/g, '')}123`;
       if (!password.trim()) {
@@ -368,6 +359,7 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       }
     } else {
       setStudentName('');
+      setSbd('');
     }
   };
 
@@ -375,8 +367,8 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     e.preventDefault();
     setErrorMsg(null);
 
-    if (!studentName.trim()) {
-      setErrorMsg('Vui lòng chọn hoặc nhập họ và tên của bạn');
+    if (!selectedStudentId || !studentName.trim()) {
+      setErrorMsg(`Vui lòng chọn đúng họ và tên của em trong danh sách học sinh lớp ${studentClass || ''}`);
       return;
     }
     if (!studentClass) {
@@ -1017,72 +1009,37 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
               </div>
             </div>
 
-            {/* Student Name Selection / Input */}
+            {/* Student Name Selection - Mandatory Roster Selection */}
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
                   Họ và tên học sinh <span className="text-red-500">*</span>
                 </label>
-                {classStudents.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsManualInput(!isManualInput);
-                      if (isManualInput) {
-                        setSelectedStudentId('');
-                      }
-                    }}
-                    className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer underline flex items-center space-x-1"
-                  >
-                    <Users className="w-3 h-3" />
-                    <span>{isManualInput ? 'Chọn từ danh sách lớp' : 'Tự gõ tên khác'}</span>
-                  </button>
-                )}
+                <span className="text-[11px] text-indigo-700 font-semibold flex items-center space-x-1">
+                  <Users className="w-3 h-3" />
+                  <span>Chọn tên trong danh sách lớp</span>
+                </span>
               </div>
 
-              {!isManualInput && classStudents.length > 0 ? (
+              {classStudents.length > 0 ? (
                 <div className="space-y-1.5">
-                  {classStudents.length > 8 && (
-                    <div className="relative mb-1">
-                      <input
-                        type="text"
-                        value={studentSearchQuery}
-                        onChange={(e) => setStudentSearchQuery(e.target.value)}
-                        placeholder={`🔍 Gõ để lọc nhanh tên bạn trong lớp ${studentClass}...`}
-                        className="w-full px-3 py-1 bg-indigo-50/50 border border-indigo-200 rounded-lg text-xs text-indigo-900 placeholder:text-slate-400 outline-none focus:bg-white focus:border-indigo-500"
-                      />
-                    </div>
-                  )}
-
                   <select
                     value={selectedStudentId}
                     onChange={handleSelectStudent}
                     required
-                    className="w-full px-3.5 py-2 sm:py-2.5 bg-slate-50 border border-slate-300 rounded-lg sm:rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-900 text-xs sm:text-sm font-semibold transition outline-none cursor-pointer"
+                    className="w-full px-3.5 py-2.5 sm:py-3 bg-slate-50 border border-slate-300 rounded-lg sm:rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-900 text-xs sm:text-sm font-semibold transition outline-none cursor-pointer shadow-xs"
                   >
                     <option value="">
-                      -- Bấm vào đây để chọn tên bạn trong lớp {studentClass} ({classStudents.length} học sinh) --
+                      -- Bấm vào đây để chọn đúng họ và tên em trong lớp {studentClass} ({classStudents.length} học sinh) --
                     </option>
-                    {classStudents
-                      .filter((st) => {
-                        if (!studentSearchQuery.trim()) return true;
-                        const q = studentSearchQuery.toLowerCase();
-                        return (
-                          st.name.toLowerCase().includes(q) ||
-                          (st.sbd && st.sbd.toLowerCase().includes(q))
-                        );
-                      })
-                      .map((st) => (
-                        <option key={st.id} value={st.id}>
-                          {st.sbd ? `[SBD: ${st.sbd}] ` : ''}{st.name}
-                        </option>
-                      ))}
-                    <option value="__custom__">
-                      ✏️ Tự nhập tên khác (nếu em không có trong danh sách trên)
-                    </option>
+                    {classStudents.map((st, sIdx) => (
+                      <option key={st.id} value={st.id}>
+                        {st.stt ? `${st.stt}. ` : `${sIdx + 1}. `}{st.sbd ? `[SBD: ${st.sbd}] ` : ''}{st.name}
+                      </option>
+                    ))}
                   </select>
 
-                  {selectedStudentId && selectedStudentId !== '__custom__' && (
+                  {selectedStudentId && (
                     <div className="flex items-center space-x-1.5 text-[11px] text-emerald-600 font-semibold px-1">
                       <Check className="w-3.5 h-3.5" />
                       <span>Đã chọn: {studentName} {sbd ? `(SBD: ${sbd})` : ''}</span>
@@ -1090,19 +1047,16 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                   )}
                 </div>
               ) : (
-                <div>
-                  <input
-                    type="text"
-                    required
-                    value={studentName}
-                    onChange={(e) => setStudentName(e.target.value)}
-                    placeholder="Ví dụ: Nguyễn Văn An"
-                    className="w-full px-3.5 py-2 sm:py-2.5 bg-slate-50 border border-slate-300 rounded-lg sm:rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-900 text-xs sm:text-sm font-medium transition outline-none"
-                  />
-                  {classStudents.length === 0 && !isLoadingStudents && (
-                    <p className="text-[11px] text-slate-400 mt-0.5">
-                      (Lớp {studentClass} chưa có danh sách nạp sẵn, học sinh tự nhập họ tên)
-                    </p>
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                  {isLoadingStudents ? (
+                    <span className="flex items-center space-x-1.5">
+                      <RotateCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
+                      <span>Đang tải danh sách học sinh lớp {studentClass}...</span>
+                    </span>
+                  ) : (
+                    <span>
+                      ⚠️ Lớp {studentClass} chưa có danh sách học sinh trên hệ thống. Em hãy chọn lại đúng lớp của mình hoặc báo Thầy Lê Gia Lợi nạp danh sách lớp nhé.
+                    </span>
                   )}
                 </div>
               )}
