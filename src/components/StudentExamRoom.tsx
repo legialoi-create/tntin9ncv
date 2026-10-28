@@ -27,6 +27,8 @@ interface StudentExamRoomProps {
     startedAt: string;
     expiresAt: string;
     questions: StudentQuestion[];
+    questionOrder?: string[];
+    optionOrder?: Record<string, Record<string, string>>;
     savedAnswers: Record<string, 'A' | 'B' | 'C' | 'D'>;
     flaggedQuestions?: string[];
     violationCount?: number;
@@ -610,8 +612,10 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         studentClass: studentInfo.class,
         sbd: studentInfo.sbd,
         answers: answers,
-        questionOrder: currentSession.questions ? currentSession.questions.map(q => q.id) : undefined,
+        questionOrder: currentSession.questionOrder || (currentSession.questions ? currentSession.questions.map(q => q.id) : undefined),
+        optionOrder: currentSession.optionOrder,
         attemptNumber: currentSession.attemptNumber || 1,
+        bestScoreSoFar: currentSession.bestScoreSoFar,
         violationCount: violationCount,
         startedAt: currentSession.startedAt
       });

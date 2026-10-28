@@ -708,12 +708,7 @@ const handleValidateEntry = (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin: Mã đề, Tên đăng nhập (hoặc Họ tên, Lớp)' });
     }
 
-    if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
-      const existingExam = db.getExamByCode(examCode) || db.getExam(req.body.examSnapshot.id);
-      if (!existingExam) {
-        db.saveExam(req.body.examSnapshot);
-      }
-    }
+    syncExamSnapshotIfValid(req.body.examSnapshot, examCode);
 
     const exam = db.getExamByCode(examCode);
     if (!exam) {
@@ -918,6 +913,80 @@ const handleValidateEntry = (req: Request, res: Response) => {
 app.post('/api/student/validate-entry', handleValidateEntry);
 app.post('/api/student/validate', handleValidateEntry);
 
+// Normalize option ID ('A' | 'B' | 'C' | 'D') safely across case/whitespace/formatting differences
+function normalizeOptionKey(val: any, options?: QuestionOption[]): 'A' | 'B' | 'C' | 'D' | '' {
+  if (val === undefined || val === null) return '';
+  const raw = String(val).trim();
+  if (!raw) return '';
+  const upper = raw.toUpperCase();
+  if (upper === 'A' || upper === 'B' || upper === 'C' || upper === 'D') {
+    return upper as 'A' | 'B' | 'C' | 'D';
+  }
+  const prefixMatch = upper.match(/^(?:ĐÁP\s*ÁN|PHƯƠNG\s*ÁN|CHỌN|KEY|CÂU)?[\s\:\-\.\(\[]*([A-D])(?:[\.\)\]\:\-\s]|$)/i);
+  if (prefixMatch && prefixMatch[1]) {
+    const letter = prefixMatch[1].toUpperCase();
+    if (letter === 'A' || letter === 'B' || letter === 'C' || letter === 'D') {
+      return letter as 'A' | 'B' | 'C' | 'D';
+    }
+  }
+  if (Array.isArray(options) && options.length > 0) {
+    const rawLower = raw.toLowerCase();
+    const matchedOpt = options.find(o => o && String(o.text || '').trim().toLowerCase() === rawLower);
+    if (matchedOpt && matchedOpt.id) {
+      const optId = String(matchedOpt.id).trim().toUpperCase();
+      if (optId === 'A' || optId === 'B' || optId === 'C' || optId === 'D') {
+        return optId as 'A' | 'B' | 'C' | 'D';
+      }
+    }
+  }
+  return '';
+}
+
+// Safely sync examSnapshot from client if it contains authoritative questions with correctAnswer
+function syncExamSnapshotIfValid(snapshot: any, examCode?: string) {
+  if (!snapshot || !snapshot.id || !Array.isArray(snapshot.questions) || snapshot.questions.length === 0) {
+    return;
+  }
+  const hasAnswerKeys = snapshot.questions.some((q: any) => q && normalizeOptionKey(q.correctAnswer, q.options) !== '');
+  if (!hasAnswerKeys) {
+    return; // Never overwrite server exam with a student-sanitized snapshot lacking correctAnswers
+  }
+  const cleanCode = examCode ? String(examCode).trim() : (snapshot.code ? String(snapshot.code).trim() : '');
+  const existingExam = db.getExam(snapshot.id) || (cleanCode ? db.getExamByCode(cleanCode) : undefined);
+  if (!existingExam) {
+    db.saveExam(snapshot);
+    return;
+  }
+  const existingHasAnswers = Array.isArray(existingExam.questions) &&
+    existingExam.questions.length > 0 &&
+    existingExam.questions.some((q: any) => q && normalizeOptionKey(q.correctAnswer, q.options) !== '');
+  if (!existingHasAnswers) {
+    db.saveExam(snapshot);
+    return;
+  }
+  const existingTime = existingExam.updatedAt ? new Date(existingExam.updatedAt).getTime() : 0;
+  const incomingTime = snapshot.updatedAt ? new Date(snapshot.updatedAt).getTime() : 0;
+  if (!existingExam.updatedAt || (incomingTime > 0 && incomingTime >= existingTime)) {
+    db.saveExam(snapshot);
+  }
+}
+
+// Resolve original option chosen by student given session optionOrder mapping
+function resolveStudentOriginalChoice(
+  studentChoiceRaw: any,
+  mapping?: Record<string, string>,
+  options?: QuestionOption[]
+): 'A' | 'B' | 'C' | 'D' | '' {
+  const displayChoice = normalizeOptionKey(studentChoiceRaw, options);
+  if (!displayChoice) return '';
+  if (mapping && typeof mapping === 'object') {
+    const mapped = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
+    const normMapped = normalizeOptionKey(mapped, options);
+    if (normMapped) return normMapped;
+  }
+  return displayChoice;
+}
+
 // Helper function to finalize a locked or timed-out session
 function finalizeLockedSession(session: ExamSession, exam: Exam) {
   session.status = 'submitted';
@@ -926,28 +995,33 @@ function finalizeLockedSession(session: ExamSession, exam: Exam) {
   let iCount = 0;
   let uCount = 0;
 
-  if (exam && exam.questions) {
+  if (exam && Array.isArray(exam.questions)) {
     const sessionQuestions = session.questionOrder && session.questionOrder.length > 0
-      ? (session.questionOrder.map(qId => exam.questions.find(q => q.id === qId)).filter(Boolean) as Question[])
+      ? (session.questionOrder.map(qId => exam.questions.find(q => q && q.id === qId)).filter(Boolean) as Question[])
       : exam.questions;
+    const questionsToGrade = sessionQuestions.length > 0 ? sessionQuestions : exam.questions;
 
-    for (const q of sessionQuestions) {
+    for (const q of questionsToGrade) {
       if (!q || !q.id) continue;
       const studentChoice = session.answers ? session.answers[q.id] : undefined;
-      if (!studentChoice) {
+      const origChoice = resolveStudentOriginalChoice(
+        studentChoice,
+        session.optionOrder ? session.optionOrder[q.id] : undefined,
+        q.options
+      );
+      if (!origChoice) {
         uCount++;
         continue;
       }
-      const mapping = session.optionOrder ? session.optionOrder[q.id] : undefined;
-      const origChoice = mapping ? mapping[studentChoice] : studentChoice;
-
-      if (origChoice === q.correctAnswer) {
+      const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+      if (origChoice === expectedAnswer) {
         cCount++;
       } else {
         iCount++;
       }
     }
-    const totalQ = sessionQuestions.length;
+    const totalQ = questionsToGrade.length;
+    uCount = Math.max(0, totalQ - (cCount + iCount));
     session.score = totalQ > 0 ? Math.round((cCount * 10 / totalQ) * 100) / 100 : 0;
     session.correctCount = cCount;
     session.incorrectCount = iCount;
@@ -997,12 +1071,7 @@ app.post('/api/student/start', (req: Request, res: Response) => {
     const isTestClass = isTeacherReq || sClassNorm.includes('thu') || sClassNorm.includes('thử') || sClassNorm.includes('test') || sClassNorm.includes('demo') || sClassNorm.includes('gv');
 
     const cleanExamCode = String(examCode || '').trim();
-    if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
-      const existingExam = db.getExamByCode(cleanExamCode) || db.getExam(req.body.examSnapshot.id);
-      if (!existingExam || (req.body.examSnapshot.updatedAt && existingExam.updatedAt && req.body.examSnapshot.updatedAt > existingExam.updatedAt)) {
-        db.saveExam(req.body.examSnapshot);
-      }
-    }
+    syncExamSnapshotIfValid(req.body.examSnapshot, cleanExamCode);
 
     const exam = db.getExamByCode(cleanExamCode) || db.getExam(cleanExamCode);
 
@@ -1098,9 +1167,9 @@ app.post('/api/student/start', (req: Request, res: Response) => {
         if (!origQ) return null;
         // Re-map options according to saved option order
         const optMap = (prevSession.optionOrder && prevSession.optionOrder[qId]) || { A: 'A', B: 'B', C: 'C', D: 'D' };
-        const options: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map(displayId => {
-          const origOptId = optMap[displayId];
-          const origOpt = (origQ.options || []).find(o => o && o.id === origOptId);
+        const options: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((displayId, optIdx) => {
+          const origOptId = normalizeOptionKey(optMap[displayId]) || displayId;
+          const origOpt = (origQ.options || []).find(o => o && normalizeOptionKey(o.id) === origOptId) || (origQ.options || [])[['A', 'B', 'C', 'D'].indexOf(origOptId)] || (origQ.options || [])[optIdx];
           return {
             id: displayId,
             text: origOpt ? origOpt.text : ''
@@ -1194,9 +1263,11 @@ app.post('/api/student/start', (req: Request, res: Response) => {
       optionOrder[origQ.id] = mapping;
     }
 
-    const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map(displayId => {
+    const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((displayId, optIdx) => {
       const origOptId = mapping[displayId];
-      const origOpt = (origQ && Array.isArray(origQ.options)) ? origQ.options.find(o => o && o.id === origOptId) : undefined;
+      const origOpt = (origQ && Array.isArray(origQ.options))
+        ? (origQ.options.find(o => o && normalizeOptionKey(o.id) === origOptId) || origQ.options[['A', 'B', 'C', 'D'].indexOf(origOptId)] || origQ.options[optIdx])
+        : undefined;
       return {
         id: displayId,
         text: origOpt ? (origOpt.text || '') : ''
@@ -1272,22 +1343,26 @@ function gradeAndSubmit(session: ExamSession, exam: Exam, res: Response) {
 
   // Only grade questions that belong to this student's attempt session
   const examQuestions = Array.isArray(exam.questions) ? exam.questions : [];
-  const sessionQuestions = session.questionOrder && session.questionOrder.length > 0
+  const mappedSessionQuestions = session.questionOrder && session.questionOrder.length > 0
     ? (session.questionOrder.map(qId => examQuestions.find(q => q && q.id === qId)).filter(Boolean) as Question[])
-    : examQuestions;
+    : [];
+  const sessionQuestions = mappedSessionQuestions.length > 0 ? mappedSessionQuestions : examQuestions;
 
   for (const q of sessionQuestions) {
     if (!q || !q.id) continue;
     const studentChoice = session.answers ? session.answers[q.id] : undefined;
-    if (!studentChoice) {
+    const originalOptionChosen = resolveStudentOriginalChoice(
+      studentChoice,
+      session.optionOrder ? session.optionOrder[q.id] : undefined,
+      q.options
+    );
+    if (!originalOptionChosen) {
       unansweredCount++;
       continue;
     }
 
-    const mapping = session.optionOrder ? session.optionOrder[q.id] : undefined;
-    const originalOptionChosen = mapping ? mapping[studentChoice] : studentChoice;
-
-    if (originalOptionChosen === q.correctAnswer) {
+    const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+    if (originalOptionChosen === expectedAnswer) {
       correctCount++;
     } else {
       incorrectCount++;
@@ -1345,11 +1420,11 @@ function gradeAndSubmit(session: ExamSession, exam: Exam, res: Response) {
 
 // Step C: Answer autosave
 app.post('/api/student/answer', (req: Request, res: Response) => {
-  const { sessionId, questionId, optionId, flagged, examId, studentName, studentClass, sbd } = req.body;
+  const { sessionId, questionId, optionId, flagged, examId, studentName, studentClass, sbd, questionOrder, optionOrder } = req.body;
   let session = sessionId ? db.getSession(sessionId) : undefined;
 
   if (!session && sessionId && (examId || studentName)) {
-    const exam = (examId ? db.getExam(examId) : undefined) || db.getExams()[0];
+    const exam = (examId ? (db.getExam(examId) || db.getExamByCode(examId)) : undefined) || db.getExams()[0];
     if (exam) {
       session = {
         id: sessionId,
@@ -1363,8 +1438,10 @@ app.post('/api/student/answer', (req: Request, res: Response) => {
         status: 'in_progress',
         violationCount: 0,
         violations: [],
-        questionOrder: exam.questions ? exam.questions.map(q => q.id) : [],
-        optionOrder: {},
+        questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0
+          ? questionOrder
+          : (exam.questions ? exam.questions.map(q => q.id) : []),
+        optionOrder: (optionOrder && typeof optionOrder === 'object') ? optionOrder : {},
         attemptNumber: 1,
         flaggedQuestions: [],
         lastHeartbeat: new Date().toISOString()
@@ -1375,6 +1452,19 @@ app.post('/api/student/answer', (req: Request, res: Response) => {
 
   if (!session) {
     return res.json({ success: true, savedAnswers: {} });
+  }
+
+  if (optionOrder && typeof optionOrder === 'object' && Object.keys(optionOrder).length > 0) {
+    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
+      session.optionOrder = optionOrder;
+    } else {
+      session.optionOrder = { ...optionOrder, ...session.optionOrder };
+    }
+  }
+  if (Array.isArray(questionOrder) && questionOrder.length > 0) {
+    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
+      session.questionOrder = questionOrder;
+    }
   }
 
   if (session.status === 'submitted') {
@@ -1409,11 +1499,11 @@ app.post('/api/student/answer', (req: Request, res: Response) => {
 
 // Step D: Anti-cheat Violation Reporting
 app.post('/api/student/violation', (req: Request, res: Response) => {
-  const { sessionId, type, description, examId, studentName, studentClass, sbd } = req.body;
+  const { sessionId, type, description, examId, studentName, studentClass, sbd, questionOrder, optionOrder } = req.body;
   let session = sessionId ? db.getSession(sessionId) : undefined;
 
   if (!session && sessionId && (examId || studentName)) {
-    const exam = (examId ? db.getExam(examId) : undefined) || db.getExams()[0];
+    const exam = (examId ? (db.getExam(examId) || db.getExamByCode(examId)) : undefined) || db.getExams()[0];
     if (exam) {
       session = {
         id: sessionId,
@@ -1427,8 +1517,10 @@ app.post('/api/student/violation', (req: Request, res: Response) => {
         status: 'in_progress',
         violationCount: 0,
         violations: [],
-        questionOrder: exam.questions ? exam.questions.map(q => q.id) : [],
-        optionOrder: {},
+        questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0
+          ? questionOrder
+          : (exam.questions ? exam.questions.map(q => q.id) : []),
+        optionOrder: (optionOrder && typeof optionOrder === 'object') ? optionOrder : {},
         attemptNumber: 1,
         flaggedQuestions: [],
         lastHeartbeat: new Date().toISOString()
@@ -1439,6 +1531,19 @@ app.post('/api/student/violation', (req: Request, res: Response) => {
 
   if (!session) {
     return res.json({ recorded: true, violationCount: 1, isLocked: false, maxViolations: 3 });
+  }
+
+  if (optionOrder && typeof optionOrder === 'object' && Object.keys(optionOrder).length > 0) {
+    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
+      session.optionOrder = optionOrder;
+    } else {
+      session.optionOrder = { ...optionOrder, ...session.optionOrder };
+    }
+  }
+  if (Array.isArray(questionOrder) && questionOrder.length > 0) {
+    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
+      session.questionOrder = questionOrder;
+    }
   }
 
   if (session.status === 'submitted') {
@@ -1467,28 +1572,36 @@ app.post('/api/student/violation', (req: Request, res: Response) => {
     isLocked = true;
 
     // Compute current score upon lock if not graded yet
-    if (session.score === undefined && exam && exam.questions) {
+    if (session.score === undefined && exam && Array.isArray(exam.questions)) {
       let cCount = 0;
       let iCount = 0;
       let uCount = 0;
-      for (const q of exam.questions) {
+      const mappedQs = session.questionOrder && session.questionOrder.length > 0
+        ? (session.questionOrder.map(qId => exam.questions.find(q => q && q.id === qId)).filter(Boolean) as Question[])
+        : [];
+      const questionsToGrade = mappedQs.length > 0 ? mappedQs : exam.questions;
+      for (const q of questionsToGrade) {
         const studentChoice = session.answers ? session.answers[q.id] : undefined;
-        if (!studentChoice) {
+        const origChoice = resolveStudentOriginalChoice(
+          studentChoice,
+          session.optionOrder ? session.optionOrder[q.id] : undefined,
+          q.options
+        );
+        if (!origChoice) {
           uCount++;
           continue;
         }
-        const mapping = session.optionOrder ? session.optionOrder[q.id] : undefined;
-        const origChoice = mapping ? mapping[studentChoice] : studentChoice;
-        if (origChoice === q.correctAnswer) {
+        const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+        if (origChoice === expectedAnswer) {
           cCount++;
         } else {
           iCount++;
         }
       }
-      const totalQ = exam.questions.length;
+      const totalQ = questionsToGrade.length;
       session.correctCount = cCount;
       session.incorrectCount = iCount;
-      session.unansweredCount = uCount;
+      session.unansweredCount = Math.max(0, totalQ - (cCount + iCount));
       session.score = totalQ > 0 ? Math.round((cCount * 10 / totalQ) * 100) / 100 : 0;
     }
   }
@@ -1505,12 +1618,12 @@ app.post('/api/student/violation', (req: Request, res: Response) => {
 
 // Heartbeat - Auto register session so Proctor always shows the active student
 app.post('/api/student/heartbeat', (req: Request, res: Response) => {
-  const { sessionId, examId, studentName, studentClass, sbd, violationCount, answers, status, attemptNumber } = req.body;
+  const { sessionId, examId, studentName, studentClass, sbd, violationCount, answers, status, attemptNumber, questionOrder, optionOrder } = req.body;
   if (!sessionId) return res.json({ success: true, isLocked: false, status: 'in_progress' });
   let session = db.getSession(sessionId);
 
   if (!session && (examId || studentName)) {
-    const exam = (examId ? db.getExam(examId) : undefined) || db.getExams()[0];
+    const exam = (examId ? (db.getExam(examId) || db.getExamByCode(examId)) : undefined) || db.getExams()[0];
     if (exam) {
       session = {
         id: sessionId,
@@ -1524,8 +1637,10 @@ app.post('/api/student/heartbeat', (req: Request, res: Response) => {
         status: status || 'in_progress',
         violationCount: violationCount || 0,
         violations: [],
-        questionOrder: exam.questions ? exam.questions.map(q => q.id) : [],
-        optionOrder: {},
+        questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0
+          ? questionOrder
+          : (exam.questions ? exam.questions.map(q => q.id) : []),
+        optionOrder: (optionOrder && typeof optionOrder === 'object') ? optionOrder : {},
         attemptNumber: attemptNumber || 1,
         flaggedQuestions: [],
         lastHeartbeat: new Date().toISOString()
@@ -1540,6 +1655,19 @@ app.post('/api/student/heartbeat', (req: Request, res: Response) => {
       isLocked: false,
       status: 'in_progress'
     });
+  }
+
+  if (optionOrder && typeof optionOrder === 'object' && Object.keys(optionOrder).length > 0) {
+    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
+      session.optionOrder = optionOrder;
+    } else {
+      session.optionOrder = { ...optionOrder, ...session.optionOrder };
+    }
+  }
+  if (Array.isArray(questionOrder) && questionOrder.length > 0) {
+    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
+      session.questionOrder = questionOrder;
+    }
   }
 
   // If already submitted, preserve submission and score
@@ -1608,18 +1736,17 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     attemptNumber
   } = req.body;
 
-  if (req.body.examSnapshot && req.body.examSnapshot.id && Array.isArray(req.body.examSnapshot.questions)) {
-    const existingExam = db.getExam(req.body.examSnapshot.id) || (examCode ? db.getExamByCode(examCode) : undefined);
-    if (!existingExam || (req.body.examSnapshot.updatedAt && existingExam.updatedAt && req.body.examSnapshot.updatedAt > existingExam.updatedAt)) {
-      db.saveExam(req.body.examSnapshot);
-    }
-  }
+  syncExamSnapshotIfValid(req.body.examSnapshot, examCode || examId);
 
   let session = sessionId ? db.getSession(sessionId) : undefined;
 
   let exam = session
-    ? db.getExam(session.examId)
+    ? (db.getExam(session.examId) || db.getExamByCode(session.examId))
     : (examId ? (db.getExam(examId) || db.getExamByCode(examId)) : (examCode ? db.getExamByCode(examCode) : undefined));
+
+  if (!exam && (examCode || examId)) {
+    exam = db.getExamByCode(examCode || examId) || db.getExam(examId || examCode);
+  }
 
   if (!exam) {
     return res.status(404).json({ error: 'Không tìm thấy bài thi' });
@@ -1652,8 +1779,24 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     if (answers && typeof answers === 'object') {
       session.answers = { ...session.answers, ...answers };
     }
+    // Critical: Restore optionOrder and questionOrder if session was previously auto-created by heartbeat/answer with empty optionOrder
+    if (optionOrder && typeof optionOrder === 'object' && Object.keys(optionOrder).length > 0) {
+      if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
+        session.optionOrder = optionOrder;
+      } else {
+        session.optionOrder = { ...optionOrder, ...session.optionOrder };
+      }
+    }
+    if (Array.isArray(questionOrder) && questionOrder.length > 0) {
+      if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
+        session.questionOrder = questionOrder;
+      }
+    }
     if (violationCount !== undefined) {
       session.violationCount = violationCount;
+    }
+    if (attemptNumber && !session.attemptNumber) {
+      session.attemptNumber = Number(attemptNumber);
     }
     if (sbd && !session.sbd) {
       session.sbd = sbd;
@@ -1798,25 +1941,33 @@ app.get('/api/reports/:examId', requireTeacherAuth, (req: Request, res: Response
       let right = 0;
       let wrong = 0;
       let unans = 0;
-      for (const q of exam.questions) {
+      const mappedQs = s.questionOrder && s.questionOrder.length > 0
+        ? (s.questionOrder.map(qId => exam.questions.find(q => q && q.id === qId)).filter(Boolean) as Question[])
+        : [];
+      const questionsToGrade = mappedQs.length > 0 ? mappedQs : exam.questions;
+      for (const q of questionsToGrade) {
         const studentChoice = s.answers ? s.answers[q.id] : undefined;
-        if (!studentChoice) {
+        const origChoice = resolveStudentOriginalChoice(
+          studentChoice,
+          s.optionOrder ? s.optionOrder[q.id] : undefined,
+          q.options
+        );
+        if (!origChoice) {
           unans++;
           continue;
         }
-        const mapping = s.optionOrder ? s.optionOrder[q.id] : undefined;
-        const origChoice = mapping ? mapping[studentChoice] : studentChoice;
-        if (origChoice === q.correctAnswer) {
+        const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+        if (origChoice === expectedAnswer) {
           right++;
         } else {
           wrong++;
         }
       }
-      const totalQ = exam.questions.length;
+      const totalQ = questionsToGrade.length;
       s.score = totalQ > 0 ? Math.round((right * 10 / totalQ) * 100) / 100 : 0;
       s.correctCount = right;
       s.incorrectCount = wrong;
-      s.unansweredCount = unans;
+      s.unansweredCount = Math.max(0, totalQ - (right + wrong));
       db.saveSession(s);
     }
   }
@@ -2001,7 +2152,8 @@ app.get('/api/reports/:examId/export', requireTeacherAuth, (req: Request, res: R
     return res.status(404).json({ error: 'Không tìm thấy bài kiểm tra' });
   }
 
-  const sessions = db.getSessions(exam.id);
+  const allExamSessions = db.getSessions(exam.id);
+  const sessions = allExamSessions.filter(s => s.status === 'submitted' || s.status === 'locked');
   const allClasses = db.getClasses();
   const allStudents = db.getStudents();
 

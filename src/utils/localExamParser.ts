@@ -70,29 +70,43 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
     throw new Error('Tài liệu trống, không tìm thấy nội dung để phân tích.');
   }
 
-  // 1. Parse external answers map if provided (e.g., "1.A 2.B" or "1-A, 2-C")
+  // Helper to extract answer key map from any answer section or table text
+  const parseAnswerKeyBlock = (textBlock: string, targetMap: Record<number, 'A' | 'B' | 'C' | 'D'>) => {
+    if (!textBlock) return;
+    // Pattern A: Direct pairs like "1.A", "1A", "Câu 1: A", "1 - B", "1) C"
+    const pairRegex = /(?:câu\s*)?(\d+)[\s\.\-\:\)\/]*([A-D])\b/gi;
+    let m;
+    let pairCount = 0;
+    while ((m = pairRegex.exec(textBlock)) !== null) {
+      const qIdx = parseInt(m[1], 10);
+      if (qIdx > 0 && qIdx <= 200 && !targetMap[qIdx]) {
+        targetMap[qIdx] = m[2].toUpperCase() as 'A' | 'B' | 'C' | 'D';
+        pairCount++;
+      }
+    }
+    // Pattern B: 2-row Word table extracted as sequential numbers followed by sequential letters [A-D]
+    const nums = Array.from(textBlock.matchAll(/\b(\d{1,3})\b/g)).map((x) => parseInt(x[1], 10)).filter((n) => n >= 1 && n <= 200);
+    const letters = Array.from(textBlock.matchAll(/\b([A-D])\b/gi)).map((x) => x[1].toUpperCase() as 'A' | 'B' | 'C' | 'D');
+    if (nums.length >= 2 && letters.length >= nums.length && pairCount <= 2) {
+      for (let i = 0; i < nums.length; i++) {
+        if (!targetMap[nums[i]] && letters[i]) {
+          targetMap[nums[i]] = letters[i];
+        }
+      }
+    }
+  };
+
+  // 1. Parse external answers map if provided (e.g., "1.A 2.B" or "1-A, 2-C" or 2-row table)
   const externalAnswers: Record<number, 'A' | 'B' | 'C' | 'D'> = {};
   if (answersText) {
-    const regex = /(?:câu\s*)?(\d+)[\s\.\-\:\)]*([A-D])\b/gi;
-    let m;
-    while ((m = regex.exec(answersText)) !== null) {
-      externalAnswers[parseInt(m[1])] = m[2].toUpperCase() as any;
-    }
+    parseAnswerKeyBlock(answersText, externalAnswers);
   }
 
   // 2. Also extract answer keys from rawText if present (e.g. at the bottom of the exam)
-  const answerSectionRegex = /(?:bảng\s*đáp\s*án|đáp\s*án|hướng\s*dẫn\s*chấm|key\s*đáp\s*án|phần\s*đáp\s*án)[\s\:\-\n]+([\s\S]*)$/i;
+  const answerSectionRegex = /(?:bảng\s*đáp\s*án|đáp\s*án\s*đề|hướng\s*dẫn\s*chấm|key\s*đáp\s*án|phần\s*đáp\s*án|\n\s*đáp\s*án)[\s\:\-\n]+([\s\S]*)$/i;
   const answerSectionMatch = cleanInput.match(answerSectionRegex);
   if (answerSectionMatch && answerSectionMatch[1]) {
-    const ansKeySection = answerSectionMatch[1];
-    const regex = /(?:câu\s*)?(\d+)[\s\.\-\:\)]+([A-D])\b/gi;
-    let m;
-    while ((m = regex.exec(ansKeySection)) !== null) {
-      const qIndex = parseInt(m[1]);
-      if (!externalAnswers[qIndex]) {
-        externalAnswers[qIndex] = m[2].toUpperCase() as any;
-      }
-    }
+    parseAnswerKeyBlock(answerSectionMatch[1], externalAnswers);
   }
 
   // If answer section found at bottom of rawText, truncate questions body so it doesn't get parsed as a corrupt question
@@ -162,7 +176,7 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
     const chunkText = chunk.text;
 
     // Check for inline answers like "Đáp án: A", "Đ/A: B", "Key: C", "Chọn: D"
-    let detectedAnswer: 'A' | 'B' | 'C' | 'D' | undefined = externalAnswers[qNum];
+    let detectedAnswer: 'A' | 'B' | 'C' | 'D' | undefined = externalAnswers[chunk.num] || externalAnswers[qNum];
     const ansMatch = chunkText.match(/(?:đáp\s*án|đ\/a|key|chọn|đáp\s*án\s*đúng)[\s\:\-\.\=]*([A-D])\b/i);
     if (!detectedAnswer && ansMatch) {
       detectedAnswer = ansMatch[1].toUpperCase() as 'A' | 'B' | 'C' | 'D';
@@ -193,7 +207,7 @@ export function parseExamLocally(rawText: string, answersText?: string): ParseEx
     const optionMatches: { id: 'A' | 'B' | 'C' | 'D'; text: string; isCorrectHint?: boolean }[] = [];
 
     // Regex to find option markers: [A-D][.:)/-]
-    const optMarkerRegex = /(?:^|[\n\r]|\s{2,}|\t)(?:(?:\(|\[)?([A-D]|[a-d])(?:\)|\])?[\.\:\)\/\-]\s*)/g;
+    const optMarkerRegex = /(?:^|[\n\r]|\s+)(?:(?:\(|\[)?([A-D]|[a-d])(?:\)|\])?[\.\:\)\/]\s+)/g;
     const optMarkerPositions: { optId: 'A' | 'B' | 'C' | 'D'; start: number; end: number }[] = [];
 
     let oMatch;

@@ -1619,9 +1619,30 @@ export const api = {
       if (raw) cachedExams = JSON.parse(raw);
     } catch (e) {}
     const cleanCode = String(params.examCode || '').trim().toUpperCase();
-    const matchedCachedExam = (cachedExams || []).find(
-      (e) => (e.code && e.code.toUpperCase() === cleanCode) || (e.id && e.id.toUpperCase() === cleanCode)
+    let matchedCachedExam = (cachedExams || []).find(
+      (e) => (e.code && e.code.trim().toUpperCase() === cleanCode) || (e.id && e.id.trim().toUpperCase() === cleanCode)
     );
+
+    // Ensure matchedCachedExam has authoritative questions with correctAnswer from Firestore
+    const hasValidQuestions = Boolean(
+      matchedCachedExam &&
+      Array.isArray(matchedCachedExam.questions) &&
+      matchedCachedExam.questions.length > 0 &&
+      matchedCachedExam.questions.some((q: any) => q && q.correctAnswer)
+    );
+    if (!hasValidQuestions) {
+      try {
+        const fbExams = await getExamsFromFirestore();
+        const fbMatch = (fbExams || []).find(
+          (e: any) =>
+            (e.code && String(e.code).trim().toUpperCase() === cleanCode) ||
+            (e.id && String(e.id).trim().toUpperCase() === cleanCode)
+        );
+        if (fbMatch && Array.isArray(fbMatch.questions) && fbMatch.questions.length > 0) {
+          matchedCachedExam = fbMatch;
+        }
+      } catch (e) {}
+    }
 
     try {
       const res = await fetch('/api/student/start', {
@@ -1791,26 +1812,18 @@ export const api = {
       };
       fallbackOptionOrder[q.id] = mapping;
 
-      let newCorrectDisplayId: 'A' | 'B' | 'C' | 'D' = q.correctAnswer;
-      (['A', 'B', 'C', 'D'] as const).forEach((displayId) => {
-        if (mapping[displayId] === q.correctAnswer) {
-          newCorrectDisplayId = displayId;
-        }
-      });
-
-      const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map(displayId => {
+      const mappedOptions: QuestionOption[] = (['A', 'B', 'C', 'D'] as const).map((displayId, optIdx) => {
         const origOptId = mapping[displayId];
-        const origOpt = (q.options || []).find((o: any) => o && o.id === origOptId);
+        const origOpt = (q.options || []).find((o: any) => o && String(o.id || '').trim().toUpperCase() === origOptId) || (q.options || [])[['A', 'B', 'C', 'D'].indexOf(origOptId)] || (q.options || [])[optIdx];
         return {
           id: displayId,
           text: origOpt ? origOpt.text : ''
         };
       });
 
+      // Keep original q.correctAnswer and original q.options so optionOrder mapping grades consistently
       gradedFallbackQuestions.push({
-        ...q,
-        options: mappedOptions,
-        correctAnswer: newCorrectDisplayId
+        ...q
       });
 
       return {
@@ -1848,6 +1861,8 @@ export const api = {
       startedAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       questions: studentQuestions,
+      questionOrder: fallbackQuestionOrder,
+      optionOrder: fallbackOptionOrder,
       savedAnswers: {},
       flaggedQuestions: [],
       violationCount: 0,
@@ -1918,11 +1933,26 @@ export const api = {
       localStorage.setItem(key, JSON.stringify(current));
     } catch (e) {}
 
+    let metaPayload: Record<string, any> = {};
+    try {
+      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${params.sessionId}`);
+      if (metaRaw) {
+        const meta = JSON.parse(metaRaw);
+        if (meta && typeof meta === 'object') {
+          metaPayload = {
+            questionOrder: meta.questionOrder,
+            optionOrder: meta.optionOrder,
+            examId: meta.examId
+          };
+        }
+      }
+    } catch (e) {}
+
     try {
       const res = await fetch('/api/student/answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...metaPayload, ...params }),
       });
       if (res.ok) {
         return await safeJson(res, 'Lỗi lưu đáp án');
@@ -1936,11 +1966,26 @@ export const api = {
     type: string;
     description: string;
   }) => {
+    let metaPayload: Record<string, any> = {};
+    try {
+      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${params.sessionId}`);
+      if (metaRaw) {
+        const meta = JSON.parse(metaRaw);
+        if (meta && typeof meta === 'object') {
+          metaPayload = {
+            questionOrder: meta.questionOrder,
+            optionOrder: meta.optionOrder,
+            examId: meta.examId
+          };
+        }
+      }
+    } catch (e) {}
+
     try {
       const res = await fetch('/api/student/violation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...metaPayload, ...params }),
       });
       if (res.ok) {
         return await safeJson<{
@@ -1978,11 +2023,26 @@ export const api = {
     status?: string;
     attemptNumber?: number;
   }) => {
+    let metaPayload: Record<string, any> = {};
+    try {
+      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${params.sessionId}`);
+      if (metaRaw) {
+        const meta = JSON.parse(metaRaw);
+        if (meta && typeof meta === 'object') {
+          metaPayload = {
+            questionOrder: meta.questionOrder,
+            optionOrder: meta.optionOrder,
+            examId: meta.examId
+          };
+        }
+      }
+    } catch (e) {}
+
     try {
       const res = await fetch('/api/student/heartbeat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...metaPayload, ...params }),
       });
       if (res.ok) {
         return await safeJson<{ success: boolean; isLocked?: boolean; status?: string }>(
@@ -2006,15 +2066,43 @@ export const api = {
     optionOrder?: Record<string, Record<string, string>>;
     violationCount?: number;
     attemptNumber?: number;
+    bestScoreSoFar?: number;
     startedAt?: string;
   }) => {
     const sessionId = typeof params === 'string' ? params : params.sessionId;
     const payload: any = typeof params === 'string' ? { sessionId } : { ...params };
 
+    const normalizeOptKey = (val: any, options?: QuestionOption[]): 'A' | 'B' | 'C' | 'D' | '' => {
+      if (val === undefined || val === null) return '';
+      const raw = String(val).trim();
+      if (!raw) return '';
+      const upper = raw.toUpperCase();
+      if (upper === 'A' || upper === 'B' || upper === 'C' || upper === 'D') {
+        return upper as 'A' | 'B' | 'C' | 'D';
+      }
+      const prefixMatch = upper.match(/^(?:ĐÁP\s*ÁN|PHƯƠNG\s*ÁN|CHỌN|KEY|CÂU)?[\s\:\-\.\(\[]*([A-D])(?:[\.\)\]\:\-\s]|$)/i);
+      if (prefixMatch && prefixMatch[1]) {
+        return prefixMatch[1].toUpperCase() as 'A' | 'B' | 'C' | 'D';
+      }
+      if (Array.isArray(options) && options.length > 0) {
+        const rawLower = raw.toLowerCase();
+        const matchedOpt = options.find(o => o && String(o.text || '').trim().toLowerCase() === rawLower);
+        if (matchedOpt && matchedOpt.id) {
+          const optId = String(matchedOpt.id).trim().toUpperCase();
+          if (optId === 'A' || optId === 'B' || optId === 'C' || optId === 'D') {
+            return optId as 'A' | 'B' | 'C' | 'D';
+          }
+        }
+      }
+      return '';
+    };
+
     // Fill in locally stored answers if missing in payload
     if (!payload.answers || Object.keys(payload.answers).length === 0) {
       try {
-        const savedAnswersRaw = localStorage.getItem(`ncv_session_${sessionId}_answers`);
+        const savedAnswersRaw =
+          localStorage.getItem(`ncv_session_${sessionId}_answers`) ||
+          localStorage.getItem(`offline_ans_${sessionId}`);
         if (savedAnswersRaw) {
           payload.answers = JSON.parse(savedAnswersRaw);
         }
@@ -2029,17 +2117,34 @@ export const api = {
         if (!payload.questionOrder && meta.questionOrder) payload.questionOrder = meta.questionOrder;
         if (!payload.optionOrder && meta.optionOrder) payload.optionOrder = meta.optionOrder;
       }
+      const targetId = String(payload.examId || payload.examCode || '').trim().toUpperCase();
+      const targetCode = String(payload.examCode || payload.examId || '').trim().toUpperCase();
+
+      const findMatchingExam = (list: any[]): Exam | undefined => {
+        if (!Array.isArray(list)) return undefined;
+        return list.find((e: any) => {
+          if (!e) return false;
+          const eId = String(e.id || '').trim().toUpperCase();
+          const eCode = String(e.code || '').trim().toUpperCase();
+          return (targetId && (eId === targetId || eCode === targetId)) ||
+                 (targetCode && (eId === targetCode || eCode === targetCode));
+        });
+      };
+
       const cachedExamsRaw = localStorage.getItem('ncv_exams_data');
       if (cachedExamsRaw) {
         const arr = JSON.parse(cachedExamsRaw);
-        if (Array.isArray(arr)) {
-          const targetId = String(payload.examId || payload.examCode || '').trim().toUpperCase();
-          const matched = arr.find(
-            (e: any) =>
-              String(e.id || '').trim().toUpperCase() === targetId ||
-              String(e.code || '').trim().toUpperCase() === targetId
-          );
-          if (matched) payload.examSnapshot = matched;
+        const matched = findMatchingExam(arr);
+        if (matched && Array.isArray(matched.questions) && matched.questions.some((q: any) => q && q.correctAnswer)) {
+          payload.examSnapshot = matched;
+        }
+      }
+
+      if (!payload.examSnapshot) {
+        const fbExams = await getExamsFromFirestore().catch(() => []);
+        const fbMatched = findMatchingExam(fbExams);
+        if (fbMatched && Array.isArray(fbMatched.questions) && fbMatched.questions.some((q: any) => q && q.correctAnswer)) {
+          payload.examSnapshot = fbMatched;
         }
       }
     } catch (e) {}
@@ -2063,35 +2168,74 @@ export const api = {
         const answers: Record<string, string> = payload.answers || {};
 
         let exam: Exam | null = null;
-        if (savedExamRaw) {
+        if (payload.examSnapshot && Array.isArray(payload.examSnapshot.questions) && payload.examSnapshot.questions.some((q: any) => q && q.correctAnswer)) {
+          exam = payload.examSnapshot;
+        } else if (savedExamRaw) {
           exam = JSON.parse(savedExamRaw);
         } else {
+          const targetId = String(payload.examId || payload.examCode || '').trim().toUpperCase();
+          const targetCode = String(payload.examCode || payload.examId || '').trim().toUpperCase();
           const cachedExams = localStorage.getItem('ncv_exams_data');
           if (cachedExams) {
             const arr = JSON.parse(cachedExams);
             if (Array.isArray(arr) && arr.length > 0) {
-              exam = (payload.examId ? arr.find((e: any) => e.id === payload.examId) : arr[0]) || arr[0];
+              exam = arr.find(
+                (e: any) =>
+                  (e.id && String(e.id).trim().toUpperCase() === targetId) ||
+                  (e.code && String(e.code).trim().toUpperCase() === targetId) ||
+                  (e.id && String(e.id).trim().toUpperCase() === targetCode) ||
+                  (e.code && String(e.code).trim().toUpperCase() === targetCode)
+              ) || null;
             }
+          }
+          if (!exam) {
+            exam = (SEED_APP_DATA.exams as any[]).find(
+              (e: any) =>
+                (e.id && String(e.id).trim().toUpperCase() === targetId) ||
+                (e.code && String(e.code).trim().toUpperCase() === targetId) ||
+                (e.id && String(e.id).trim().toUpperCase() === targetCode) ||
+                (e.code && String(e.code).trim().toUpperCase() === targetCode)
+            ) || null;
           }
         }
         if (!exam) exam = SEED_APP_DATA.exams[0] as any;
 
-        const questions = exam?.questions || [];
-        const total = questions.length || 1;
+        const allQuestions: Question[] = Array.isArray(exam?.questions) ? exam!.questions : [];
+        const mappedQuestions = Array.isArray(payload.questionOrder) && payload.questionOrder.length > 0
+          ? (payload.questionOrder
+              .map((qId: string) => allQuestions.find((q) => q && q.id === qId))
+              .filter(Boolean) as Question[])
+          : [];
+        const questionsToGrade = mappedQuestions.length > 0 ? mappedQuestions : allQuestions;
+        const total = questionsToGrade.length || 1;
         let correct = 0;
         let incorrect = 0;
 
-        for (const q of questions) {
-          const ans = answers[q.id];
-          if (ans) {
-            if (ans === q.correctAnswer) correct++;
-            else incorrect++;
+        for (const q of questionsToGrade) {
+          if (!q || !q.id) continue;
+          const rawAns = answers[q.id];
+          const displayChoice = normalizeOptKey(rawAns, q.options);
+          if (!displayChoice) continue;
+
+          const mapping = payload.optionOrder ? payload.optionOrder[q.id] : undefined;
+          let origChoice = displayChoice;
+          if (mapping && typeof mapping === 'object') {
+            const mappedVal = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
+            const normMapped = normalizeOptKey(mappedVal, q.options);
+            if (normMapped) origChoice = normMapped;
+          }
+
+          const expectedAnswer = normalizeOptKey(q.correctAnswer, q.options);
+          if (origChoice === expectedAnswer) {
+            correct++;
+          } else {
+            incorrect++;
           }
         }
 
         const answered = correct + incorrect;
         const unanswered = Math.max(0, total - answered);
-        const score = Math.round((correct / total) * 10 * 10) / 10;
+        const score = total > 0 ? Math.round((correct * 10 / total) * 100) / 100 : 0;
 
         result = {
           score,
@@ -2105,15 +2249,16 @@ export const api = {
           submittedAt: new Date().toISOString()
         };
       } catch (err) {
+        const fallbackTotal = Array.isArray(payload.questionOrder) && payload.questionOrder.length > 0 ? payload.questionOrder.length : 10;
         result = {
-          score: 10,
-          bestScore: 10,
-          correctCount: 1,
+          score: 0,
+          bestScore: 0,
+          correctCount: 0,
           incorrectCount: 0,
-          answeredCount: 1,
-          unansweredCount: 0,
-          totalQuestions: 1,
-          passed: true,
+          answeredCount: 0,
+          unansweredCount: fallbackTotal,
+          totalQuestions: fallbackTotal,
+          passed: false,
           submittedAt: new Date().toISOString()
         };
       }
@@ -2123,8 +2268,47 @@ export const api = {
     try {
       const examId = String(payload.examId || (result as any).examId || '').trim();
       const examCode = String(payload.examCode || (result as any).examCode || '').trim();
-      const actualScore = result?.score !== undefined ? result.score : (result?.bestScore ?? 0);
-      const actualBestScore = result?.bestScore !== undefined ? result.bestScore : actualScore;
+      const actualScore = result?.score !== undefined ? Number(result.score) : (result?.bestScore !== undefined ? Number(result.bestScore) : 0);
+
+      // Compute true highest score across all previous submitted attempts of this student
+      const prevStudentScores: number[] = [actualScore];
+      if (result?.bestScore !== undefined && !isNaN(Number(result.bestScore))) {
+        prevStudentScores.push(Number(result.bestScore));
+      }
+      if (payload.bestScoreSoFar !== undefined && !isNaN(Number(payload.bestScoreSoFar))) {
+        prevStudentScores.push(Number(payload.bestScoreSoFar));
+      }
+      try {
+        const sNameNorm = String(payload.studentName || '').trim().toLowerCase();
+        const sClassNorm = String(payload.studentClass || '').trim().toLowerCase();
+        const checkKeys = [
+          examId ? `ncv_submissions_${examId}` : '',
+          examCode && examCode !== examId ? `ncv_submissions_${examCode}` : '',
+        ].filter(Boolean);
+        for (const ck of checkKeys) {
+          const arr = JSON.parse(localStorage.getItem(ck) || '[]');
+          if (Array.isArray(arr)) {
+            arr.forEach((s: any) => {
+              if (
+                s &&
+                s.status === 'submitted' &&
+                String(s.studentName || s.name || '').trim().toLowerCase() === sNameNorm &&
+                String(s.studentClass || s.class || '').trim().toLowerCase() === sClassNorm &&
+                typeof s.score === 'number' &&
+                !isNaN(s.score)
+              ) {
+                prevStudentScores.push(s.score);
+              }
+            });
+          }
+        }
+      } catch (e) {}
+
+      const actualBestScore = Math.max(...prevStudentScores);
+      if (result) {
+        result.score = actualScore;
+        result.bestScore = actualBestScore;
+      }
 
       const submissionItem = {
         sessionId,
@@ -2502,6 +2686,10 @@ export const api = {
     try {
       const fbSubs = await getSubmissionsFromFirestore(resolvedId, resolvedCode, aliases);
       for (const fb of fbSubs) {
+        // Ignore active in-progress or cancelled sessions when computing completed exam score reports
+        if (fb.status === 'in_progress' || fb.status === 'cancelled_disconnection') {
+          continue;
+        }
         const existingIdx = localSubmissions.findIndex((s) => s.sessionId === fb.sessionId);
         if (existingIdx >= 0) {
           if (fb.status === 'submitted' || localSubmissions[existingIdx].status !== 'submitted') {
@@ -2513,33 +2701,40 @@ export const api = {
       }
     } catch (e) {}
 
+    // Filter out any local in_progress sessions so they never overwrite completed scores with 0
+    const completedLocalSubmissions = localSubmissions.filter(
+      (s) => s && s.status !== 'in_progress' && s.status !== 'cancelled_disconnection'
+    );
+
     // Auto-sync persistent submissions to serverless instance on Vercel so Excel exports and API routes are primed
-    if (localSubmissions.length > 0) {
+    if (completedLocalSubmissions.length > 0) {
       fetch('/api/sessions/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessions: localSubmissions }),
+        body: JSON.stringify({ sessions: completedLocalSubmissions }),
       }).catch(() => {});
     }
 
-    // 5. Combine server submissions and local/Firestore submissions
+    // 5. Combine server submissions and local/Firestore submissions without overwriting distinct attempts of the same student
     const rawSubmissions: any[] = Array.isArray(serverData?.submissions) ? [...serverData.submissions] : [];
-    for (const localSub of localSubmissions) {
+    for (const localSub of completedLocalSubmissions) {
       const foundIdx = rawSubmissions.findIndex(
-        s => (s.sessionId && s.sessionId === localSub.sessionId) ||
-             (String(s.studentName || s.name).trim().toLowerCase() === String(localSub.studentName || localSub.name).trim().toLowerCase() &&
-              String(s.studentClass || s.class).trim().toLowerCase() === String(localSub.studentClass || localSub.class).trim().toLowerCase())
+        (s) => s.sessionId && localSub.sessionId && s.sessionId === localSub.sessionId
       );
 
       const itemScore = localSub.score !== undefined ? Number(localSub.score) : 0;
       const itemBest = localSub.bestScore !== undefined ? Number(localSub.bestScore) : itemScore;
 
       if (foundIdx >= 0) {
+        const prevScore = rawSubmissions[foundIdx].score !== undefined ? Number(rawSubmissions[foundIdx].score) : 0;
+        const prevBest = rawSubmissions[foundIdx].bestScore !== undefined ? Number(rawSubmissions[foundIdx].bestScore) : prevScore;
+        const mergedScore = Math.max(prevScore, itemScore);
+        const mergedBest = Math.max(prevBest, itemBest, mergedScore);
         rawSubmissions[foundIdx] = {
           ...rawSubmissions[foundIdx],
           ...localSub,
-          score: itemScore,
-          bestScore: itemBest,
+          score: mergedScore,
+          bestScore: mergedBest,
           status: localSub.status || 'submitted',
           submittedAt: localSub.submittedAt || rawSubmissions[foundIdx].submittedAt
         };
