@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -38,7 +38,7 @@ if (typeof globalThis.Path2D === 'undefined') {
 
 import { db, generateStudentUsername, getDefaultStudentPassword, hashPassword, verifyPassword } from './server/db.ts';
 import { parseExamWithAI, solveQuestionsWithAI, chatExamAssistant } from './server/ai.ts';
-import { Exam, ExamSession, Question, QuestionOption, StudentQuestion } from './src/types';
+import type { Exam, ExamSession, Question, QuestionOption, StudentQuestion } from './src/types.ts';
 
 dotenv.config();
 
@@ -119,26 +119,12 @@ function requireTeacherAuth(req: Request, res: Response, next: NextFunction) {
     const parts = decoded.split(':::');
     const user = parts[0] || '';
     const secret = parts[1] || '';
-    const userLower = user.toLowerCase();
-    const teacherUserLower = (TEACHER_USERNAME || 'legialoi').toLowerCase();
-    const teacherEmailLower = (TEACHER_EMAIL || 'legialoi@gmail.com').toLowerCase();
 
-    const isValidUser = (
-      userLower === teacherUserLower ||
-      userLower === teacherEmailLower ||
-      userLower === 'legialoi' ||
-      userLower === 'legialoi@gmail.com' ||
-      userLower === 'admin' ||
-      userLower === 'teacher' ||
-      userLower === 'gv' ||
-      userLower.includes('legialoi')
-    );
-    const isValidSecret = (
+    // Strictly require verified v3 teacher token so legacy auto-forged student tokens are rejected
+    const isValidUser = user === 'legialoi_verified_v3';
+    const isValidSecret =
       secret === AUTH_SECRET ||
-      secret.startsWith('ncv-tin-hoc-legialoi-token') ||
-      secret.includes('legialoi') ||
-      secret.length >= 6
-    );
+      secret === 'ncv-tin-hoc-legialoi-token-2026';
     if (isValidUser && isValidSecret) {
       return next();
     }
@@ -174,7 +160,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   const isValidPass = db.verifyAdminPassword(trimmedPass);
 
   if (isValidUser && isValidPass) {
-    const token = Buffer.from(`${TEACHER_USERNAME}:::${AUTH_SECRET}:::${Date.now()}`).toString('base64');
+    const token = Buffer.from(`legialoi_verified_v3:::${AUTH_SECRET}:::${Date.now()}`).toString('base64');
     return res.json({
       success: true,
       token,
@@ -313,7 +299,9 @@ app.get('/api/exams', (req: Request, res: Response) => {
           maxViolationsBeforeLock: e.maxViolationsBeforeLock || 3,
           shuffleQuestions: e.shuffleQuestions ?? true,
           shuffleOptions: e.shuffleOptions ?? true,
-          showScoreAfterSubmit: e.showScoreAfterSubmit ?? true
+          showScoreAfterSubmit: e.showScoreAfterSubmit ?? true,
+          createdAt: e.createdAt,
+          updatedAt: e.updatedAt
         }))
       );
     }
@@ -360,6 +348,8 @@ app.get('/api/exams/:id', (req: Request, res: Response) => {
       shuffleQuestions: exam.shuffleQuestions ?? true,
       shuffleOptions: exam.shuffleOptions ?? true,
       showScoreAfterSubmit: exam.showScoreAfterSubmit ?? true,
+      createdAt: exam.createdAt,
+      updatedAt: exam.updatedAt,
       questions: sanitizedQuestions
     });
   }
@@ -803,6 +793,9 @@ const handleValidateEntry = (req: Request, res: Response) => {
       });
     }
 
+    // Sync any previous submitted sessions from Firestore/client cache before checking attempts
+    syncPreviousStudentSessions(req.body.previousSessions, exam.id);
+
     // Check student sessions and attempts
     const existingSessions = db.getSessions(exam.id) || [];
     const studentSessions = existingSessions.filter(
@@ -844,8 +837,12 @@ const handleValidateEntry = (req: Request, res: Response) => {
       (s.status === 'in_progress' && now < new Date(s.expiresAt).getTime()) ||
       s.status === 'locked'
     );
-    const attemptsMade = submittedSessions.length;
+    const clientAttemptsMade = Number(req.body.clientAttemptsMade) > 0 ? Number(req.body.clientAttemptsMade) : 0;
+    const attemptsMade = Math.max(submittedSessions.length, clientAttemptsMade);
     const scores = submittedSessions.map(s => s.score ?? 0);
+    if (req.body.clientBestScore !== undefined && !isNaN(Number(req.body.clientBestScore))) {
+      scores.push(Number(req.body.clientBestScore));
+    }
     const bestScore = scores.length > 0 ? Math.max(...scores) : undefined;
 
     // If student has reached or exceeded max attempts and teacher hasn't granted retake
@@ -942,32 +939,117 @@ function normalizeOptionKey(val: any, options?: QuestionOption[]): 'A' | 'B' | '
   return '';
 }
 
-// Safely sync examSnapshot from client if it contains authoritative questions with correctAnswer
-function syncExamSnapshotIfValid(snapshot: any, examCode?: string) {
-  if (!snapshot || !snapshot.id || !Array.isArray(snapshot.questions) || snapshot.questions.length === 0) {
-    return;
+// Sync previously completed student sessions from Firestore/client into server memory on cold starts
+function syncPreviousStudentSessions(previousSessions: any, examId: string) {
+  if (!Array.isArray(previousSessions) || !examId) return;
+  for (const s of previousSessions) {
+    if (!s) continue;
+    const sId = String(s.sessionId || s.id || '').trim();
+    if (!sId) continue;
+    const existing = db.getSession(sId);
+    if (!existing) {
+      db.saveSession({
+        id: sId,
+        examId,
+        studentName: String(s.studentName || s.name || 'Học sinh').trim(),
+        studentClass: String(s.studentClass || s.class || '').trim(),
+        sbd: s.sbd ? String(s.sbd).trim() : undefined,
+        attemptNumber: Number(s.attemptNumber) || 1,
+        startedAt: s.startedAt || s.submittedAt || new Date().toISOString(),
+        expiresAt: s.expiresAt || s.submittedAt || new Date().toISOString(),
+        submittedAt: s.submittedAt || new Date().toISOString(),
+        status: s.status === 'locked' ? 'locked' : 'submitted',
+        score: s.score !== undefined ? Number(s.score) : 0,
+        correctCount: s.correctCount !== undefined ? Number(s.correctCount) : 0,
+        incorrectCount: s.incorrectCount !== undefined ? Number(s.incorrectCount) : 0,
+        unansweredCount: s.unansweredCount !== undefined ? Number(s.unansweredCount) : 0,
+        questionOrder: Array.isArray(s.questionOrder) ? s.questionOrder : [],
+        optionOrder: (s.optionOrder && typeof s.optionOrder === 'object') ? s.optionOrder : {},
+        answers: (s.answers && typeof s.answers === 'object') ? s.answers : {},
+        flaggedQuestions: [],
+        violations: [],
+        violationCount: Number(s.violationCount) || 0,
+        lastHeartbeat: s.submittedAt || new Date().toISOString()
+      }, false);
+    } else if (s.status === 'submitted' && existing.status !== 'submitted') {
+      existing.status = 'submitted';
+      if (s.score !== undefined) existing.score = Number(s.score);
+      if (s.submittedAt) existing.submittedAt = s.submittedAt;
+      db.saveSession(existing, false);
+    }
   }
-  const hasAnswerKeys = snapshot.questions.some((q: any) => q && normalizeOptionKey(q.correctAnswer, q.options) !== '');
-  if (!hasAnswerKeys) {
-    return; // Never overwrite server exam with a student-sanitized snapshot lacking correctAnswers
+}
+
+// Safely sync examSnapshot from client if it contains authoritative questions or updated exam settings
+function syncExamSnapshotIfValid(snapshot: any, examCode?: string) {
+  if (!snapshot || (!snapshot.id && !snapshot.code)) {
+    return;
   }
   const cleanCode = examCode ? String(examCode).trim() : (snapshot.code ? String(snapshot.code).trim() : '');
-  const existingExam = db.getExam(snapshot.id) || (cleanCode ? db.getExamByCode(cleanCode) : undefined);
+  const existingExam = (snapshot.id ? db.getExam(snapshot.id) : undefined) || (cleanCode ? db.getExamByCode(cleanCode) : undefined);
+
+  const hasAnswerKeys = Array.isArray(snapshot.questions) &&
+    snapshot.questions.length > 0 &&
+    snapshot.questions.some((q: any) => q && normalizeOptionKey(q.correctAnswer, q.options) !== '');
+
   if (!existingExam) {
-    db.saveExam(snapshot);
+    if (hasAnswerKeys) {
+      db.saveExam(snapshot);
+    }
     return;
   }
+
+  // Always sync updated exam configuration settings (e.g. maxAttempts, durationMinutes, schedule) if incoming is newer or existing lacks updatedAt
+  const existingTime = existingExam.updatedAt ? new Date(existingExam.updatedAt).getTime() : 0;
+  const incomingTime = snapshot.updatedAt ? new Date(snapshot.updatedAt).getTime() : 0;
+  const shouldSyncMeta = !existingExam.updatedAt || (incomingTime > 0 && incomingTime >= existingTime);
+
+  if (shouldSyncMeta) {
+    if (snapshot.maxAttempts !== undefined && Number(snapshot.maxAttempts) > 0) {
+      existingExam.maxAttempts = Number(snapshot.maxAttempts);
+    }
+    if (snapshot.durationMinutes !== undefined && Number(snapshot.durationMinutes) > 0) {
+      existingExam.durationMinutes = Number(snapshot.durationMinutes);
+    }
+    if (snapshot.isOpen !== undefined) {
+      existingExam.isOpen = Boolean(snapshot.isOpen);
+    }
+    if (snapshot.startTime !== undefined) {
+      existingExam.startTime = snapshot.startTime;
+    }
+    if (snapshot.endTime !== undefined) {
+      existingExam.endTime = snapshot.endTime;
+    }
+    if (snapshot.randomQuestionCount !== undefined) {
+      existingExam.randomQuestionCount = snapshot.randomQuestionCount;
+    }
+    if (snapshot.maxViolationsBeforeLock !== undefined) {
+      existingExam.maxViolationsBeforeLock = snapshot.maxViolationsBeforeLock;
+    }
+    if (snapshot.showScoreAfterSubmit !== undefined) {
+      existingExam.showScoreAfterSubmit = snapshot.showScoreAfterSubmit;
+    }
+    if (snapshot.updatedAt) {
+      existingExam.updatedAt = snapshot.updatedAt;
+    }
+  }
+
+  if (!hasAnswerKeys) {
+    if (shouldSyncMeta) {
+      db.saveExam(existingExam);
+    }
+    return; // Never overwrite server exam questions with a student-sanitized snapshot lacking correctAnswers
+  }
+
   const existingHasAnswers = Array.isArray(existingExam.questions) &&
     existingExam.questions.length > 0 &&
     existingExam.questions.some((q: any) => q && normalizeOptionKey(q.correctAnswer, q.options) !== '');
-  if (!existingHasAnswers) {
-    db.saveExam(snapshot);
-    return;
-  }
-  const existingTime = existingExam.updatedAt ? new Date(existingExam.updatedAt).getTime() : 0;
-  const incomingTime = snapshot.updatedAt ? new Date(snapshot.updatedAt).getTime() : 0;
-  if (!existingExam.updatedAt || (incomingTime > 0 && incomingTime >= existingTime)) {
-    db.saveExam(snapshot);
+  if (!existingHasAnswers || shouldSyncMeta) {
+    db.saveExam({
+      ...existingExam,
+      ...snapshot,
+      maxAttempts: Number(snapshot.maxAttempts ?? existingExam.maxAttempts) > 0 ? Number(snapshot.maxAttempts ?? existingExam.maxAttempts) : 1
+    });
   }
 }
 
@@ -1109,6 +1191,8 @@ app.post('/api/student/start', (req: Request, res: Response) => {
       }
     }
 
+  syncPreviousStudentSessions(req.body?.previousSessions, exam.id);
+
   const existingSessions = db.getSessions(exam.id) || [];
   const studentPrevSessions = existingSessions.filter(
     s => s && s.studentName && s.studentClass &&
@@ -1140,6 +1224,8 @@ app.post('/api/student/start', (req: Request, res: Response) => {
   });
 
   const submittedSessions = studentPrevSessions.filter(s => s.status === 'submitted');
+  const clientAttemptsMade = Number(req.body?.clientAttemptsMade) > 0 ? Number(req.body.clientAttemptsMade) : 0;
+  const effectiveAttemptsMade = Math.max(submittedSessions.length, clientAttemptsMade);
   const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
   const prevSession = studentPrevSessions.find(s => s.status === 'in_progress' || s.status === 'locked');
 
@@ -1189,6 +1275,9 @@ app.post('/api/student/start', (req: Request, res: Response) => {
       .filter(Boolean) as StudentQuestion[];
 
     const prevScores = submittedSessions.map(s => s.score ?? 0);
+    if (req.body?.clientBestScore !== undefined && !isNaN(Number(req.body.clientBestScore))) {
+      prevScores.push(Number(req.body.clientBestScore));
+    }
     const bestSoFar = prevScores.length > 0 ? Math.max(...prevScores) : undefined;
 
     return res.json({
@@ -1201,29 +1290,32 @@ app.post('/api/student/start', (req: Request, res: Response) => {
       savedAnswers: prevSession.answers,
       flaggedQuestions: prevSession.flaggedQuestions || [],
       violationCount: prevSession.violationCount || 0,
-      attemptNumber: prevSession.attemptNumber || 1,
+      attemptNumber: prevSession.attemptNumber || (effectiveAttemptsMade + 1),
       maxAttempts,
-      attemptsMade: submittedSessions.length,
-      attemptsRemaining: Math.max(0, maxAttempts - (prevSession.attemptNumber || 1)),
+      attemptsMade: effectiveAttemptsMade,
+      attemptsRemaining: Math.max(0, maxAttempts - (prevSession.attemptNumber || (effectiveAttemptsMade + 1))),
       bestScoreSoFar: bestSoFar
     });
   }
 
   // If student has completed all allowed attempts and tries to start a new attempt
-  if (submittedSessions.length >= maxAttempts && !studentPrevSessions.some(s => s.retakeAllowed)) {
+  if (effectiveAttemptsMade >= maxAttempts && !studentPrevSessions.some(s => s.retakeAllowed)) {
     const scores = submittedSessions.map(s => s.score ?? 0);
+    if (req.body?.clientBestScore !== undefined && !isNaN(Number(req.body.clientBestScore))) {
+      scores.push(Number(req.body.clientBestScore));
+    }
     const best = scores.length > 0 ? Math.max(...scores) : 0;
     return res.status(403).json({
-      error: `Đã quá số lần làm bài cho phép (${submittedSessions.length}/${maxAttempts} lần). Giáo viên chỉ cho phép làm tối đa ${maxAttempts} lần. Bạn không thể vào làm bài thêm. Hệ thống ghi nhận điểm cao nhất: ${best} điểm.`,
+      error: `Đã quá số lần làm bài cho phép (${effectiveAttemptsMade}/${maxAttempts} lần). Giáo viên chỉ cho phép làm tối đa ${maxAttempts} lần. Bạn không thể vào làm bài thêm. Hệ thống ghi nhận điểm cao nhất: ${best} điểm.`,
       hasCompletedAllAttempts: true,
       maxAttempts,
-      attemptsMade: submittedSessions.length,
+      attemptsMade: effectiveAttemptsMade,
       bestScore: best
     });
   }
 
   // Generate new session (New Attempt)
-  const attemptNumber = submittedSessions.length + 1;
+  const attemptNumber = effectiveAttemptsMade + 1;
   const startDate = new Date();
   const expiresDate = new Date(startDate.getTime() + (exam.durationMinutes || 15) * 60 * 1000);
 
@@ -1307,6 +1399,9 @@ app.post('/api/student/start', (req: Request, res: Response) => {
   db.saveSession(session);
 
   const prevScores = submittedSessions.map(s => s.score ?? 0);
+  if (req.body?.clientBestScore !== undefined && !isNaN(Number(req.body.clientBestScore))) {
+    prevScores.push(Number(req.body.clientBestScore));
+  }
   const bestScoreSoFar = prevScores.length > 0 ? Math.max(...prevScores) : undefined;
 
   res.json({
@@ -1321,7 +1416,7 @@ app.post('/api/student/start', (req: Request, res: Response) => {
     violationCount: 0,
     attemptNumber,
     maxAttempts,
-    attemptsMade: submittedSessions.length,
+    attemptsMade: effectiveAttemptsMade,
     attemptsRemaining: Math.max(0, maxAttempts - attemptNumber),
     bestScoreSoFar
   });
@@ -1392,7 +1487,7 @@ function gradeAndSubmit(session: ExamSession, exam: Exam, res: Response) {
   const allScores = allStudentSubmitted.map(s => s.score ?? 0);
   const bestScore = allScores.length > 0 ? Math.max(...allScores) : score;
   const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
-  const attemptsMade = allStudentSubmitted.length;
+  const attemptsMade = Math.max(allStudentSubmitted.length, Number(session.attemptNumber) || 1);
   const attemptsRemaining = Math.max(0, maxAttempts - attemptsMade);
 
   return res.json({
@@ -1403,7 +1498,7 @@ function gradeAndSubmit(session: ExamSession, exam: Exam, res: Response) {
     studentBestScore: exam.showScoreAfterSubmit !== false ? bestScore : undefined,
     examId: exam.id,
     examCode: exam.code,
-    attemptNumber: session.attemptNumber || attemptsMade,
+    attemptNumber: Math.max(Number(session.attemptNumber) || 1, attemptsMade),
     attemptsMade,
     maxAttempts,
     attemptsRemaining,
@@ -1752,13 +1847,33 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     return res.status(404).json({ error: 'Không tìm thấy bài thi' });
   }
 
+  // Sync previous sessions from client/Firestore so cold-started serverless instances know all prior attempts
+  syncPreviousStudentSessions(req.body.previousSessions, exam.id);
+
+  const effectiveStudentName = String(studentName || session?.studentName || 'Học sinh').trim();
+  const effectiveStudentClass = String(studentClass || session?.studentClass || '').trim();
+  const priorSubmittedCount = db.getSessions(exam.id).filter(
+    s =>
+      s.id !== sessionId &&
+      s.studentName.trim().toLowerCase() === effectiveStudentName.toLowerCase() &&
+      s.studentClass.trim().toLowerCase() === effectiveStudentClass.toLowerCase() &&
+      s.status === 'submitted'
+  ).length;
+  const clientAttemptsMade = Math.max(0, Number(req.body.clientAttemptsMade) || 0);
+  const resolvedAttemptNumber = Math.max(
+    Number(attemptNumber) || 1,
+    Number(session?.attemptNumber) || 1,
+    priorSubmittedCount + 1,
+    clientAttemptsMade
+  );
+
   if (!session) {
     const sId = sessionId || `ses-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     session = {
       id: sId,
       examId: exam.id,
-      studentName: studentName || 'Học sinh',
-      studentClass: studentClass || '',
+      studentName: effectiveStudentName,
+      studentClass: effectiveStudentClass,
       sbd: sbd || '',
       startedAt: startedAt || new Date().toISOString(),
       expiresAt: new Date(Date.now() + (exam.durationMinutes || 45) * 60 * 1000).toISOString(),
@@ -1770,7 +1885,7 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
         ? questionOrder
         : (exam.questions ? exam.questions.map(q => q.id) : []),
       optionOrder: optionOrder || {},
-      attemptNumber: attemptNumber || 1,
+      attemptNumber: resolvedAttemptNumber,
       flaggedQuestions: [],
       lastHeartbeat: new Date().toISOString()
     };
@@ -1795,9 +1910,7 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
     if (violationCount !== undefined) {
       session.violationCount = violationCount;
     }
-    if (attemptNumber && !session.attemptNumber) {
-      session.attemptNumber = Number(attemptNumber);
-    }
+    session.attemptNumber = resolvedAttemptNumber;
     if (sbd && !session.sbd) {
       session.sbd = sbd;
     }
@@ -2528,6 +2641,8 @@ if (!process.env.VERCEL) {
 // Setup Vite middleware for development or serve dist in production
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+  let viteLoaded = false;
+
   if (!isProd) {
     try {
       const viteModule = await (Function('pkg', 'return import(pkg)')('vite'));
@@ -2537,13 +2652,17 @@ async function startServer() {
         appType: 'spa'
       });
       app.use(vite.middlewares);
+      viteLoaded = true;
     } catch (e) {
-      console.warn('Vite dev middleware not loaded:', e);
+      console.warn('Vite dev middleware not loaded, falling back to static dist:', e);
     }
-  } else {
-    app.use(express.static(path.resolve(safeDirname, 'dist')));
+  }
+
+  if (isProd || !viteLoaded) {
+    const distPath = path.resolve(safeDirname, 'dist');
+    app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response) => {
-      res.sendFile(path.resolve(safeDirname, 'dist', 'index.html'));
+      res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
 
@@ -2554,11 +2673,6 @@ async function startServer() {
 
 export default app;
 
-const isMainScript = Boolean(
-  process.argv[1] &&
-  (process.argv[1].endsWith('server.ts') || process.argv[1].endsWith('server.js'))
-);
-
-if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.NOW_BUILD && isMainScript) {
+if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.NOW_BUILD) {
   startServer();
 }

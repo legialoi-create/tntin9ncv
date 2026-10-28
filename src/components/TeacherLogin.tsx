@@ -8,7 +8,7 @@ interface TeacherLoginProps {
 }
 
 export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCancel }) => {
-  const [username, setUsername] = useState('legialoi');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -17,8 +17,8 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
-    if (!password.trim()) {
-      setErrorMsg('Vui lòng nhập mật khẩu giáo viên');
+    if (!username.trim() || !password.trim()) {
+      setErrorMsg('Vui lòng nhập đầy đủ tài khoản và mật khẩu giáo viên');
       return;
     }
     setIsLoading(true);

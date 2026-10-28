@@ -35,6 +35,7 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
   const [classes, setClasses] = useState<ClassInfo[]>([]);
   const [newClassName, setNewClassName] = useState('');
   const [newClassGrade, setNewClassGrade] = useState<GradeLevel>(8);
+  const [filterGrade, setFilterGrade] = useState<'ALL' | GradeLevel>('ALL');
   const [isLoading, setIsLoading] = useState(false);
   const [classToDelete, setClassToDelete] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -654,22 +655,41 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
         </div>
 
         {/* Classes List by Grade */}
-        <div className="md:col-span-2 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
-          <div className="flex items-center justify-between mb-4">
+        <div className="md:col-span-2 bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
               Danh sách lớp hiện có ({classes.length} lớp)
             </h3>
-            <span className="text-xs text-slate-400">
-              Quy tắc: Name = 2 chữ cuối họ tên + lớp • MK mặc định = [TênLớp]123
-            </span>
+            <div className="flex items-center flex-wrap gap-1">
+              {(['ALL', 6, 7, 8, 9] as const).map((g) => {
+                const count = g === 'ALL' ? classes.length : classes.filter((c) => c.grade === g).length;
+                return (
+                  <button
+                    key={g}
+                    type="button"
+                    onClick={() => setFilterGrade(g)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                      filterGrade === g
+                        ? 'bg-indigo-600 text-white shadow-2xs'
+                        : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    {g === 'ALL' ? `Tất cả (${count})` : `K${g} (${count})`}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            {([6, 7, 8, 9] as const).map((grade) => {
+          <div className={`grid grid-cols-1 ${filterGrade === 'ALL' ? 'sm:grid-cols-2' : ''} gap-3 sm:gap-4`}>
+            {(([6, 7, 8, 9] as const).filter((g) => filterGrade === 'ALL' || g === filterGrade)).map((grade) => {
               const gradeClasses = classes.filter((c) => c.grade === grade);
+              if (filterGrade === 'ALL' && gradeClasses.length === 0 && classes.length > 0) {
+                return null;
+              }
               return (
-                <div key={grade} className="p-4 rounded-xl border border-slate-200 bg-slate-50/50">
-                  <div className="flex items-center justify-between pb-2 mb-3 border-b border-slate-200">
+                <div key={grade} className="p-3.5 sm:p-4 rounded-xl border border-slate-200 bg-slate-50/50">
+                  <div className="flex items-center justify-between pb-2 mb-2.5 border-b border-slate-200">
                     <span className="font-bold text-xs uppercase text-indigo-700">
                       Khối {grade}
                     </span>

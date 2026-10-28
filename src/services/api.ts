@@ -27,35 +27,75 @@ import {
 } from './firebase';
 import { parseExamLocally } from '../utils/localExamParser';
 
-let teacherToken: string | null = localStorage.getItem('ncv_teacher_token');
+const TEACHER_SESSION_KEY = 'ncv_teacher_auth_v3';
 
-export const setAuthToken = (token: string | null) => {
-  teacherToken = token;
-  if (token) {
-    localStorage.setItem('ncv_teacher_token', token);
-  } else {
+// Immediately purge any legacy auto-forged teacher token from localStorage on all student phones/browsers
+try {
+  if (typeof window !== 'undefined') {
     localStorage.removeItem('ncv_teacher_token');
+  }
+} catch (e) {}
+
+export const isValidTeacherToken = (token: string | null | undefined): boolean => {
+  if (!token || typeof token !== 'string') return false;
+  try {
+    const decoded = typeof atob === 'function' ? atob(token) : '';
+    return decoded.startsWith('legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::');
+  } catch {
+    return false;
   }
 };
 
-export const getAuthToken = () => {
-  return teacherToken || localStorage.getItem('ncv_teacher_token');
+let teacherToken: string | null = (() => {
+  try {
+    if (typeof window === 'undefined') return null;
+    const saved = sessionStorage.getItem(TEACHER_SESSION_KEY);
+    if (isValidTeacherToken(saved)) return saved;
+    sessionStorage.removeItem(TEACHER_SESSION_KEY);
+    return null;
+  } catch {
+    return null;
+  }
+})();
+
+export const setAuthToken = (token: string | null) => {
+  try {
+    localStorage.removeItem('ncv_teacher_token');
+  } catch (e) {}
+  if (token && isValidTeacherToken(token)) {
+    teacherToken = token;
+    try {
+      sessionStorage.setItem(TEACHER_SESSION_KEY, token);
+    } catch (e) {}
+  } else {
+    teacherToken = null;
+    try {
+      sessionStorage.removeItem(TEACHER_SESSION_KEY);
+    } catch (e) {}
+  }
+};
+
+export const getAuthToken = (): string | null => {
+  try {
+    const candidate = teacherToken || (typeof window !== 'undefined' ? sessionStorage.getItem(TEACHER_SESSION_KEY) : null);
+    if (isValidTeacherToken(candidate)) {
+      return candidate;
+    }
+    if (candidate) {
+      sessionStorage.removeItem(TEACHER_SESSION_KEY);
+    }
+  } catch (e) {}
+  teacherToken = null;
+  return null;
 };
 
 const getHeaders = (isTeacher = false) => {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  let token = getAuthToken();
   if (isTeacher) {
-    if (!token && typeof window !== 'undefined') {
-      try {
-        token = btoa(`legialoi:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
-        setAuthToken(token);
-      } catch (e) {
-        // fallback
-      }
-    }
+    const token = getAuthToken();
+    // NEVER auto-generate a teacher token here! Only attach if teacher explicitly logged in.
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -104,6 +144,229 @@ async function safeJson<T = any>(res: Response, fallbackError = 'Có lỗi xảy
   return (data !== null ? data : {}) as T;
 }
 
+// Helper: Gather authoritative exam config + all completed attempts of a student across Firestore and localStorage
+async function gatherStudentExamHistory(params: {
+  examCode?: string;
+  examId?: string;
+  studentName?: string;
+  studentClass?: string;
+  excludeSessionId?: string;
+}): Promise<{
+  exam: Exam | undefined;
+  previousSessions: any[];
+  attemptsMade: number;
+  maxAttempts: number;
+  bestScore: number | undefined;
+  pastAttempts: Array<{
+    sessionId: string;
+    attemptNumber: number;
+    score: number;
+    submittedAt?: string;
+  }>;
+}> {
+  const targetId = String(params.examId || params.examCode || '').trim().toUpperCase();
+  const targetCode = String(params.examCode || params.examId || '').trim().toUpperCase();
+
+  const matchesExam = (e: any): boolean => {
+    if (!e) return false;
+    const eId = String(e.id || '').trim().toUpperCase();
+    const eCode = String(e.code || '').trim().toUpperCase();
+    return Boolean(
+      (targetId && (eId === targetId || eCode === targetId)) ||
+      (targetCode && (eId === targetCode || eCode === targetCode))
+    );
+  };
+
+  let localExam: Exam | undefined;
+  try {
+    const raw = localStorage.getItem('ncv_exams_data');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        localExam = parsed.find(matchesExam);
+      }
+    }
+  } catch (e) {}
+
+  let fbExam: Exam | undefined;
+  try {
+    const fbExams = await getExamsFromFirestore();
+    if (Array.isArray(fbExams)) {
+      fbExam = fbExams.find(matchesExam);
+    }
+  } catch (e) {}
+
+  let resolvedExam: Exam | undefined = localExam || fbExam;
+  if (localExam && fbExam) {
+    const localTime = new Date(localExam.updatedAt || localExam.createdAt || 0).getTime();
+    const fbTime = new Date(fbExam.updatedAt || fbExam.createdAt || 0).getTime();
+    const keyedQuestions =
+      Array.isArray(fbExam.questions) && fbExam.questions.some((q: any) => q && q.correctAnswer)
+        ? fbExam.questions
+        : Array.isArray(localExam.questions) && localExam.questions.some((q: any) => q && q.correctAnswer)
+        ? localExam.questions
+        : fbExam.questions || localExam.questions;
+
+    if (fbTime >= localTime) {
+      resolvedExam = { ...localExam, ...fbExam, questions: keyedQuestions };
+    } else {
+      resolvedExam = { ...fbExam, ...localExam, questions: keyedQuestions };
+    }
+  }
+
+  if (!resolvedExam) {
+    resolvedExam = (SEED_APP_DATA.exams as any[]).find(matchesExam);
+  }
+
+  const aliases = Array.from(
+    new Set(
+      [
+        params.examId,
+        params.examCode,
+        resolvedExam?.id,
+        resolvedExam?.code,
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+    )
+  );
+  const upperAliases = new Set(aliases.map((a) => a.toUpperCase()));
+  const normAliases = new Set(aliases.map((a) => a.toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean));
+
+  const sNameNorm = String(params.studentName || '').trim().toLowerCase();
+  const sClassNorm = String(params.studentClass || '').trim().toLowerCase();
+  const excludeId = String(params.excludeSessionId || '').trim();
+
+  const sessionMap = new Map<string, any>();
+
+  const registerSubmittedRecord = (s: any) => {
+    if (!s || s.status !== 'submitted') return;
+    const sid = String(s.sessionId || s.id || '').trim();
+    if (!sid || (excludeId && sid === excludeId)) return;
+
+    const recName = String(s.studentName || s.name || '').trim().toLowerCase();
+    const recClass = String(s.studentClass || s.class || '').trim().toLowerCase();
+    if (!sNameNorm || !sClassNorm || recName !== sNameNorm || recClass !== sClassNorm) return;
+
+    // Verify exam match if record has examId/examCode
+    const sExamId = String(s.examId || '').trim().toUpperCase();
+    const sExamCode = String(s.examCode || '').trim().toUpperCase();
+    const sNormId = sExamId.replace(/[^A-Z0-9]/g, '');
+    const sNormCode = sExamCode.replace(/[^A-Z0-9]/g, '');
+    if (upperAliases.size > 0 && (sExamId || sExamCode)) {
+      const matched =
+        (sExamId && upperAliases.has(sExamId)) ||
+        (sExamCode && upperAliases.has(sExamCode)) ||
+        (sNormId && normAliases.has(sNormId)) ||
+        (sNormCode && normAliases.has(sNormCode));
+      if (!matched) return;
+    }
+
+    const existing = sessionMap.get(sid);
+    if (!existing) {
+      sessionMap.set(sid, {
+        ...s,
+        sessionId: sid,
+        id: sid,
+        examId: resolvedExam?.id || s.examId || params.examId || params.examCode,
+        examCode: resolvedExam?.code || s.examCode || params.examCode || params.examId,
+        studentName: String(s.studentName || s.name || params.studentName || '').trim(),
+        studentClass: String(s.studentClass || s.class || params.studentClass || '').trim(),
+        score: typeof s.score === 'number' && !isNaN(s.score) ? s.score : Number(s.bestScore) || 0,
+        attemptNumber: Number(s.attemptNumber) || 1,
+        status: 'submitted',
+        submittedAt: s.submittedAt || s.startedAt || new Date().toISOString()
+      });
+    } else {
+      const prevScore = typeof existing.score === 'number' ? existing.score : 0;
+      const curScore = typeof s.score === 'number' && !isNaN(s.score) ? s.score : prevScore;
+      sessionMap.set(sid, {
+        ...existing,
+        ...s,
+        sessionId: sid,
+        id: sid,
+        score: Math.max(prevScore, curScore),
+        attemptNumber: Math.max(Number(existing.attemptNumber) || 1, Number(s.attemptNumber) || 1),
+        status: 'submitted'
+      });
+    }
+  };
+
+  // 1. Check localStorage submission caches
+  try {
+    for (const a of aliases) {
+      const raw = localStorage.getItem(`ncv_submissions_${a}`);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) arr.forEach(registerSubmittedRecord);
+      }
+    }
+    const globalRaw = localStorage.getItem('ncv_submissions_global_all');
+    if (globalRaw) {
+      const globalArr = JSON.parse(globalRaw);
+      if (Array.isArray(globalArr)) globalArr.forEach(registerSubmittedRecord);
+    }
+    const attemptLogRaw = localStorage.getItem('ncv_student_attempt_records');
+    if (attemptLogRaw) {
+      const attemptLogArr = JSON.parse(attemptLogRaw);
+      if (Array.isArray(attemptLogArr)) attemptLogArr.forEach(registerSubmittedRecord);
+    }
+  } catch (e) {}
+
+  // 2. Check Firestore submissions
+  if (sNameNorm && sClassNorm) {
+    try {
+      const fbSubs = await getSubmissionsFromFirestore(
+        resolvedExam?.id || params.examId,
+        resolvedExam?.code || params.examCode,
+        aliases
+      );
+      if (Array.isArray(fbSubs)) {
+        fbSubs.forEach(registerSubmittedRecord);
+      }
+    } catch (e) {}
+  }
+
+  const previousSessions = Array.from(sessionMap.values()).sort(
+    (a, b) => new Date(a.submittedAt || a.startedAt || 0).getTime() - new Date(b.submittedAt || b.startedAt || 0).getTime()
+  );
+
+  let maxRecordedAttemptNumber = 0;
+  let bestScore: number | undefined = undefined;
+  previousSessions.forEach((s, idx) => {
+    const attNum = Number(s.attemptNumber) || idx + 1;
+    if (attNum > maxRecordedAttemptNumber) maxRecordedAttemptNumber = attNum;
+    const sc = typeof s.score === 'number' && !isNaN(s.score) ? s.score : undefined;
+    if (sc !== undefined) {
+      bestScore = bestScore === undefined ? sc : Math.max(bestScore, sc);
+    }
+    const bs = typeof s.bestScore === 'number' && !isNaN(s.bestScore) ? s.bestScore : undefined;
+    if (bs !== undefined) {
+      bestScore = bestScore === undefined ? bs : Math.max(bestScore, bs);
+    }
+  });
+
+  // Use distinct submitted session count as primary truth, or maxRecordedAttemptNumber if higher
+  const attemptsMade = Math.max(previousSessions.length, maxRecordedAttemptNumber);
+  const maxAttempts = Math.max(1, Number(resolvedExam?.maxAttempts) || 1);
+
+  const pastAttempts = previousSessions.map((s, idx) => ({
+    sessionId: s.sessionId || s.id,
+    attemptNumber: idx + 1,
+    score: typeof s.score === 'number' ? s.score : 0,
+    submittedAt: s.submittedAt || s.startedAt
+  }));
+
+  return {
+    exam: resolvedExam,
+    previousSessions,
+    attemptsMade,
+    maxAttempts,
+    bestScore,
+    pastAttempts
+  };
+}
+
 export const api = {
   // Auth
   login: async (username: string, password: string) => {
@@ -129,7 +392,7 @@ export const api = {
       }
     }
 
-    // Client-side fallback / override for teacher 'legialoi' & admin logins
+    // Client-side fallback / override strictly for Teacher Lợi's official passwords
     const allowedUsers = ['legialoi', 'legialoi@gmail.com', 'admin', 'teacher', 'gv'];
     const isValidUser = allowedUsers.includes(trimmedUser);
 
@@ -140,9 +403,6 @@ export const api = {
       '101   101',
       '101 101',
       '101101',
-      'legialoi',
-      'admin',
-      '123456',
       'GiaLoi@2026'
     ];
 
@@ -157,7 +417,7 @@ export const api = {
       allowedPasswords.includes(noSpaceInputPass);
 
     if (isValidUser && isValidPass) {
-      const token = btoa(`legialoi:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
+      const token = btoa(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
       setAuthToken(token);
       return {
         success: true,
@@ -173,7 +433,7 @@ export const api = {
 
     if (res) {
       const data = await safeJson(res, 'Tên đăng nhập hoặc mật khẩu Giáo viên không chính xác');
-      if (data && data.token) {
+      if (data && data.token && isValidTeacherToken(data.token)) {
         setAuthToken(data.token);
         return data;
       }
@@ -183,6 +443,12 @@ export const api = {
   },
 
   checkAuth: async () => {
+    const token = getAuthToken();
+    if (!token || !isValidTeacherToken(token)) {
+      setAuthToken(null);
+      return null;
+    }
+
     try {
       const res = await fetch('/api/auth/me', {
         headers: getHeaders(true),
@@ -191,23 +457,6 @@ export const api = {
         return await safeJson(res, 'Phiên đăng nhập hết hạn');
       }
       if (res.status === 404) {
-        const token = getAuthToken();
-        if (token) {
-          return {
-            user: {
-              username: 'legialoi',
-              fullName: 'Thầy Lê Gia Lợi',
-              role: 'teacher',
-              school: 'THCS Nam Cửa Việt'
-            }
-          };
-        }
-      }
-      setAuthToken(null);
-      return null;
-    } catch {
-      const token = getAuthToken();
-      if (token) {
         return {
           user: {
             username: 'legialoi',
@@ -219,6 +468,15 @@ export const api = {
       }
       setAuthToken(null);
       return null;
+    } catch {
+      return {
+        user: {
+          username: 'legialoi',
+          fullName: 'Thầy Lê Gia Lợi',
+          role: 'teacher',
+          school: 'THCS Nam Cửa Việt'
+        }
+      };
     }
   },
 
@@ -757,32 +1015,58 @@ export const api = {
     }
 
     const deletedClassesSet = new Set<string>();
+    const localDeletedArr: string[] = [];
     try {
       const delArr = JSON.parse(localStorage.getItem('ncv_deleted_classes') || '[]');
       if (Array.isArray(delArr)) {
-        delArr.forEach((c: string) => deletedClassesSet.add(String(c).trim().toUpperCase()));
+        delArr.forEach((c: string) => {
+          const u = String(c).trim().toUpperCase();
+          if (u) {
+            deletedClassesSet.add(u);
+            localDeletedArr.push(u);
+          }
+        });
       }
     } catch (e) {}
 
-    // Parallel fetch from server and cached Firestore
+    // Always treat legacy test classes (THU, 9A8, 9A9) as excluded unless they actually have real students
+    const LEGACY_TEST_CLASSES = new Set(['THU', '9A8', '9A9']);
+    const SEED_FAKE_COUNTS: Record<string, number> = {
+      THU: 10,
+      '9A8': 38,
+      '9A9': 40,
+      '9A': 36,
+      '9B': 35,
+      '9C': 35,
+      '8A': 38,
+      '8B': 37,
+      '8C': 36,
+      '7A': 36,
+      '7B': 35,
+      '7C': 34,
+      '6A': 35,
+      '6B': 34,
+      '6C': 33,
+    };
+
     let serverClasses: ClassInfo[] = [];
     let fbClasses: ClassInfo[] = [];
+    let fbStudents: StudentInfo[] = [];
     const isTeacherSession = Boolean(getAuthToken());
 
     await Promise.all([
       (async () => {
         try {
-          const res = await fetch('/api/classes');
-          if (res.ok) {
-            const serverData = await res.json();
-            if (Array.isArray(serverData)) serverClasses = serverData;
-          }
-        } catch (e) {}
-      })(),
-      (async () => {
-        try {
           const fbDeleted = await getDeletedClassesFromFirestore();
-          fbDeleted.forEach((c) => deletedClassesSet.add(c));
+          const fbDeletedSet = new Set(fbDeleted.map((c) => String(c).trim().toUpperCase()));
+          fbDeletedSet.forEach((c) => deletedClassesSet.add(c));
+
+          // Sync any locally deleted classes to Firestore so mobile phones also respect teacher's deleted classes
+          for (const localDel of localDeletedArr) {
+            if (!fbDeletedSet.has(localDel)) {
+              deleteClassFromFirestore(localDel).catch(() => {});
+            }
+          }
           localStorage.setItem('ncv_deleted_classes', JSON.stringify(Array.from(deletedClassesSet)));
         } catch (e) {}
       })(),
@@ -790,33 +1074,109 @@ export const api = {
         try {
           fbClasses = await getClassesFromFirestore();
         } catch (e) {}
+      })(),
+      (async () => {
+        try {
+          fbStudents = await getStudentsFromFirestore();
+        } catch (e) {}
       })()
     ]);
 
+    // Count real students per class in Firestore (ignoring 2 seed THU students)
+    const realStudentCountByClass = new Map<string, { displayName: string; count: number }>();
+    if (Array.isArray(fbStudents)) {
+      fbStudents.forEach((st) => {
+        if (!st || !st.class) return;
+        const idStr = String(st.id || '');
+        const upperCls = String(st.class).trim().toUpperCase();
+        if (!upperCls || deletedClassesSet.has(upperCls)) return;
+        if (upperCls === 'THU' && (idStr === 'st-thu-1' || idStr === 'st-thu-2')) return;
+        const cur = realStudentCountByClass.get(upperCls);
+        if (cur) {
+          cur.count += 1;
+        } else {
+          realStudentCountByClass.set(upperCls, { displayName: String(st.class).trim(), count: 1 });
+        }
+      });
+    }
+
+    const hasRealStudentRosters = realStudentCountByClass.size > 0;
+
+    // Only fetch serverClasses as a last resort if both Firestore and localStorage are empty
+    if (fbClasses.length === 0 && localClasses.length === 0 && !hasRealStudentRosters) {
+      try {
+        const res = await fetch('/api/classes');
+        if (res.ok) {
+          const serverData = await res.json();
+          if (Array.isArray(serverData)) serverClasses = serverData;
+        }
+      } catch (e) {}
+    }
+
+    // Source priority: If Firestore has classes, use fbClasses (never merge cold-start serverClasses!).
+    const rawCandidateClasses =
+      fbClasses.length > 0
+        ? fbClasses
+        : localClasses.length > 0
+        ? localClasses
+        : serverClasses;
+
     const classMap = new Map<string, ClassInfo>();
-    [...fbClasses, ...localClasses, ...serverClasses].forEach((c) => {
-      if (!c || !c.name) return;
-      const upper = c.name.trim().toUpperCase();
-      if (!deletedClassesSet.has(upper) && !classMap.has(upper)) {
-        classMap.set(upper, {
-          name: c.name.trim(),
-          grade: (Number(c.grade) || 6) as 6 | 7 | 8 | 9,
-          studentCount: Number(c.studentCount) || 0
-        });
-      }
+
+    // First, ensure every class that actually has real students in Firestore is included
+    realStudentCountByClass.forEach((info, upper) => {
+      if (deletedClassesSet.has(upper)) return;
+      const inferredGrade = (parseInt(upper.charAt(0), 10) || 8) as 6 | 7 | 8 | 9;
+      const validGrade = ([6, 7, 8, 9].includes(inferredGrade) ? inferredGrade : 8) as 6 | 7 | 8 | 9;
+      classMap.set(upper, {
+        name: info.displayName,
+        grade: validGrade,
+        studentCount: info.count,
+      });
     });
 
-    const clean = Array.from(classMap.values());
+    rawCandidateClasses.forEach((c) => {
+      if (!c || !c.name) return;
+      const upper = c.name.trim().toUpperCase();
+      if (!upper || deletedClassesSet.has(upper)) return;
+
+      const realCount = realStudentCountByClass.get(upper)?.count || 0;
+
+      // Exclude legacy dummy classes (THU, 9A8, 9A9) unless they actually have real students
+      if (LEGACY_TEST_CLASSES.has(upper) && realCount === 0) {
+        return;
+      }
+
+      // If the school already has real student rosters in Firestore, skip phantom auto-seeded classes
+      // that still carry their fake seed studentCount (33..40) but have 0 real students in Firestore
+      if (hasRealStudentRosters && realCount === 0) {
+        const seedFakeCount = SEED_FAKE_COUNTS[upper];
+        if (seedFakeCount !== undefined && Number(c.studentCount) === seedFakeCount) {
+          return;
+        }
+      }
+
+      const inferredGrade = (Number(c.grade) || parseInt(upper.charAt(0), 10) || 6) as 6 | 7 | 8 | 9;
+      const validGrade = ([6, 7, 8, 9].includes(inferredGrade) ? inferredGrade : 6) as 6 | 7 | 8 | 9;
+
+      classMap.set(upper, {
+        name: c.name.trim(),
+        grade: validGrade,
+        studentCount: realCount > 0 ? realCount : Number(c.studentCount) || 0,
+      });
+    });
+
+    const clean = Array.from(classMap.values()).sort((a, b) => {
+      if (a.grade !== b.grade) return a.grade - b.grade;
+      return a.name.localeCompare(b.name, 'vi', { numeric: true });
+    });
+
     if (clean.length > 0) {
       localStorage.setItem('ncv_classes_data', JSON.stringify(clean));
       if (isTeacherSession && fbClasses.length === 0) {
         saveClassesToFirestore(clean).catch(() => {});
       }
       return clean;
-    }
-
-    if (localClasses.length > 0) {
-      return localClasses.filter((c: ClassInfo) => !deletedClassesSet.has(c.name.trim().toUpperCase()));
     }
 
     return [];
@@ -926,22 +1286,17 @@ export const api = {
       localStorage.removeItem('ncv_deleted_classes');
     } catch (e) {}
     const defaultClasses: ClassInfo[] = [
-      { name: '9A8', grade: 9, studentCount: 38 },
-      { name: '9A9', grade: 9, studentCount: 40 },
-      { name: '9A', grade: 9, studentCount: 36 },
-      { name: '9B', grade: 9, studentCount: 35 },
-      { name: '9C', grade: 9, studentCount: 35 },
-      { name: '8A', grade: 8, studentCount: 38 },
-      { name: '8B', grade: 8, studentCount: 37 },
-      { name: '8C', grade: 8, studentCount: 36 },
-      { name: '7A', grade: 7, studentCount: 36 },
-      { name: '7B', grade: 7, studentCount: 35 },
-      { name: '7C', grade: 7, studentCount: 34 },
-      { name: '6A', grade: 6, studentCount: 35 },
-      { name: '6B', grade: 6, studentCount: 34 },
-      { name: '6C', grade: 6, studentCount: 35 },
+      { name: '6A', grade: 6, studentCount: 0 },
+      { name: '6B', grade: 6, studentCount: 0 },
+      { name: '7A', grade: 7, studentCount: 0 },
+      { name: '7B', grade: 7, studentCount: 0 },
+      { name: '8A', grade: 8, studentCount: 0 },
+      { name: '8B', grade: 8, studentCount: 0 },
+      { name: '9A', grade: 9, studentCount: 0 },
+      { name: '9B', grade: 9, studentCount: 0 },
     ];
     localStorage.setItem('ncv_classes_data', JSON.stringify(defaultClasses));
+    saveClassesToFirestore(defaultClasses).catch(() => {});
     try {
       const res = await fetch('/api/classes/restore-defaults', {
         method: 'POST',
@@ -954,7 +1309,7 @@ export const api = {
     return { success: true, message: 'Đã khôi phục danh sách các lớp chuẩn khối 6, 7, 8, 9 của THCS Nam Cửa Việt', classes: defaultClasses };
   },
 
-  getStudents: async (className?: string, asTeacher = true): Promise<StudentInfo[]> => {
+  getStudents: async (className?: string, asTeacher = false): Promise<StudentInfo[]> => {
     const url = className ? `/api/students?class=${encodeURIComponent(className)}` : '/api/students';
 
     // 0. Load deleted students blacklist
@@ -1453,39 +1808,86 @@ export const api = {
     username?: string;
     password?: string;
   }) => {
-    let realExamSnapshot: any = null;
-    try {
-      const cached = localStorage.getItem('ncv_exams_data');
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed)) {
-          const targetCode = String(params.examCode || '').trim().toUpperCase();
-          realExamSnapshot = parsed.find(
-            (e: any) =>
-              String(e.code || '').trim().toUpperCase() === targetCode ||
-              String(e.id || '').trim().toUpperCase() === targetCode
-          );
-        }
-      }
-    } catch (e) {}
+    const history = await gatherStudentExamHistory({
+      examCode: params.examCode,
+      studentName: params.studentName,
+      studentClass: params.studentClass,
+    });
+    const realExamSnapshot = history.exam || null;
 
     let res: Response | null = null;
     try {
       res = await fetch('/api/student/validate-entry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...params, examSnapshot: realExamSnapshot }),
+        body: JSON.stringify({
+          ...params,
+          examSnapshot: realExamSnapshot,
+          previousSessions: history.previousSessions,
+          clientAttemptsMade: history.attemptsMade,
+          clientBestScore: history.bestScore,
+        }),
       });
 
       if (res.ok) {
-        return await safeJson(res, 'Không thể xác thực thông tin vào thi');
+        const serverData: any = await safeJson(res, 'Không thể xác thực thông tin vào thi');
+        const effectiveMaxAttempts = Math.max(
+          1,
+          Number(realExamSnapshot?.maxAttempts ?? serverData?.maxAttempts ?? serverData?.exam?.maxAttempts ?? 1)
+        );
+        const effectiveAttemptsMade = Math.max(
+          history.attemptsMade,
+          Number(serverData?.attemptsMade || 0)
+        );
+        const effectiveBestScore =
+          history.bestScore !== undefined && serverData?.bestScore !== undefined
+            ? Math.max(history.bestScore, Number(serverData.bestScore))
+            : (history.bestScore ?? serverData?.bestScore);
+
+        if (!serverData?.hasActiveSession && effectiveAttemptsMade >= effectiveMaxAttempts) {
+          const blockErr: any = new Error(
+            `Bạn đã hoàn thành đủ ${effectiveAttemptsMade}/${effectiveMaxAttempts} lần làm bài cho phép. Điểm cao nhất của bạn là: ${effectiveBestScore ?? 0} điểm.`
+          );
+          blockErr.status = 403;
+          blockErr.data = {
+            hasCompletedAllAttempts: true,
+            attemptsMade: effectiveAttemptsMade,
+            maxAttempts: effectiveMaxAttempts,
+            bestScore: effectiveBestScore ?? 0,
+            pastAttempts: history.pastAttempts?.length ? history.pastAttempts : serverData?.pastAttempts,
+          };
+          throw blockErr;
+        }
+
+        return {
+          ...serverData,
+          exam: {
+            ...serverData?.exam,
+            maxAttempts: effectiveMaxAttempts,
+          },
+          attemptsMade: effectiveAttemptsMade,
+          maxAttempts: effectiveMaxAttempts,
+          attemptsRemaining: Math.max(0, effectiveMaxAttempts - effectiveAttemptsMade),
+          bestScore: effectiveBestScore,
+          nextAttemptNumber: serverData?.hasActiveSession
+            ? (serverData?.nextAttemptNumber || effectiveAttemptsMade + 1)
+            : effectiveAttemptsMade + 1,
+          pastAttempts: history.pastAttempts?.length ? history.pastAttempts : serverData?.pastAttempts,
+        };
       }
 
       // If server returned 403 or specific student block (like max attempts exceeded), throw server error
       if (res.status === 403) {
         return await safeJson(res, 'Không thể xác thực thông tin vào thi');
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (
+        e?.status === 403 ||
+        e?.data?.hasCompletedAllAttempts ||
+        (e?.message && (e.message.includes('quá số lần') || e.message.includes('hoàn thành đủ')))
+      ) {
+        throw e;
+      }
       // Network/Vercel serverless offline
     }
 
@@ -1517,31 +1919,7 @@ export const api = {
       );
     }
 
-    // Pass valid - return fallback or parsed response if available
-    if (res && res.status !== 404) {
-      try {
-        const data = await res.json();
-        if (data && data.exam && data.student) {
-          return data;
-        }
-      } catch (e) {}
-    }
-
-    // Check cached real exam if available for schedule and state
-    let realExam: any = null;
-    try {
-      const cached = localStorage.getItem('ncv_exams_data');
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed)) {
-          realExam = parsed.find(
-            (e: any) =>
-              String(e.code || '').trim().toUpperCase() === String(params.examCode || '').trim().toUpperCase() ||
-              String(e.id || '').trim().toUpperCase() === String(params.examCode || '').trim().toUpperCase()
-          );
-        }
-      }
-    } catch (e) {}
+    const realExam: any = realExamSnapshot;
 
     const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((params.studentClass || '').trim());
     const now = new Date();
@@ -1569,6 +1947,25 @@ export const api = {
       }
     }
 
+    const effectiveMaxAttempts = Math.max(1, Number(realExam?.maxAttempts) || 1);
+    const effectiveAttemptsMade = history.attemptsMade;
+    const effectiveBestScore = history.bestScore;
+
+    if (effectiveAttemptsMade >= effectiveMaxAttempts) {
+      const blockErr: any = new Error(
+        `Bạn đã hoàn thành đủ ${effectiveAttemptsMade}/${effectiveMaxAttempts} lần làm bài cho phép. Điểm cao nhất của bạn là: ${effectiveBestScore ?? 0} điểm.`
+      );
+      blockErr.status = 403;
+      blockErr.data = {
+        hasCompletedAllAttempts: true,
+        attemptsMade: effectiveAttemptsMade,
+        maxAttempts: effectiveMaxAttempts,
+        bestScore: effectiveBestScore ?? 0,
+        pastAttempts: history.pastAttempts,
+      };
+      throw blockErr;
+    }
+
     const mockExam = {
       id: realExam?.id || `exam-${params.examCode}`,
       code: realExam?.code || params.examCode,
@@ -1578,7 +1975,7 @@ export const api = {
       endTime: realExam?.endTime,
       totalPoints: realExam?.totalPoints || 10,
       isOpen: realExam ? realExam.isOpen !== false : true,
-      maxAttempts: realExam?.maxAttempts || 1,
+      maxAttempts: effectiveMaxAttempts,
       maxViolationsBeforeLock: realExam?.maxViolationsBeforeLock || 3,
       shuffleQuestions: realExam ? realExam.shuffleQuestions !== false : true,
       shuffleOptions: realExam ? realExam.shuffleOptions !== false : true,
@@ -1600,9 +1997,12 @@ export const api = {
       student: mockStudent,
       hasActiveSession: false,
       isLocked: false,
-      attemptsMade: 0,
-      maxAttempts: 1,
-      attemptsRemaining: 1
+      attemptsMade: effectiveAttemptsMade,
+      maxAttempts: effectiveMaxAttempts,
+      attemptsRemaining: Math.max(0, effectiveMaxAttempts - effectiveAttemptsMade),
+      bestScore: effectiveBestScore,
+      nextAttemptNumber: effectiveAttemptsMade + 1,
+      pastAttempts: history.pastAttempts,
     };
   },
 
@@ -1613,42 +2013,55 @@ export const api = {
     sbd?: string;
     forceNew?: boolean;
   }) => {
+    const cleanCode = String(params.examCode || '').trim().toUpperCase();
+    const history = await gatherStudentExamHistory({
+      examCode: params.examCode,
+      studentName: params.studentName,
+      studentClass: params.studentClass,
+    });
+
+    let matchedCachedExam: Exam | undefined = history.exam;
     let cachedExams: Exam[] = [];
     try {
       const raw = localStorage.getItem('ncv_exams_data');
       if (raw) cachedExams = JSON.parse(raw);
     } catch (e) {}
-    const cleanCode = String(params.examCode || '').trim().toUpperCase();
-    let matchedCachedExam = (cachedExams || []).find(
-      (e) => (e.code && e.code.trim().toUpperCase() === cleanCode) || (e.id && e.id.trim().toUpperCase() === cleanCode)
-    );
 
-    // Ensure matchedCachedExam has authoritative questions with correctAnswer from Firestore
-    const hasValidQuestions = Boolean(
-      matchedCachedExam &&
-      Array.isArray(matchedCachedExam.questions) &&
-      matchedCachedExam.questions.length > 0 &&
-      matchedCachedExam.questions.some((q: any) => q && q.correctAnswer)
-    );
-    if (!hasValidQuestions) {
-      try {
-        const fbExams = await getExamsFromFirestore();
-        const fbMatch = (fbExams || []).find(
-          (e: any) =>
-            (e.code && String(e.code).trim().toUpperCase() === cleanCode) ||
-            (e.id && String(e.id).trim().toUpperCase() === cleanCode)
-        );
-        if (fbMatch && Array.isArray(fbMatch.questions) && fbMatch.questions.length > 0) {
-          matchedCachedExam = fbMatch;
-        }
-      } catch (e) {}
+    if (!matchedCachedExam) {
+      matchedCachedExam = (cachedExams || []).find(
+        (e) => (e.code && e.code.trim().toUpperCase() === cleanCode) || (e.id && e.id.trim().toUpperCase() === cleanCode)
+      );
+    }
+
+    const effectiveMaxAttempts = Math.max(1, Number(matchedCachedExam?.maxAttempts ?? history.maxAttempts ?? 1));
+
+    // Strictly enforce maxAttempts on the client before starting a new attempt
+    if (history.attemptsMade >= effectiveMaxAttempts) {
+      const blockErr: any = new Error(
+        `Bạn đã quá số lần làm bài cho phép (${history.attemptsMade}/${effectiveMaxAttempts} lần). Điểm số cao nhất đã ghi nhận: ${history.bestScore ?? 0} điểm.`
+      );
+      blockErr.status = 403;
+      blockErr.data = {
+        hasCompletedAllAttempts: true,
+        attemptsMade: history.attemptsMade,
+        maxAttempts: effectiveMaxAttempts,
+        bestScore: history.bestScore ?? 0,
+        pastAttempts: history.pastAttempts,
+      };
+      throw blockErr;
     }
 
     try {
       const res = await fetch('/api/student/start', {
         method: 'POST',
-        headers: getHeaders(true),
-        body: JSON.stringify({ ...params, examSnapshot: matchedCachedExam }),
+        headers: getHeaders(false),
+        body: JSON.stringify({
+          ...params,
+          examSnapshot: matchedCachedExam,
+          previousSessions: history.previousSessions,
+          clientAttemptsMade: history.attemptsMade,
+          clientBestScore: history.bestScore,
+        }),
       });
 
       let serverSession: any = null;
@@ -1670,13 +2083,29 @@ export const api = {
       }
 
       if (serverSession) {
+        const resolvedAttemptNum = Math.max(
+          Number(serverSession.attemptNumber) || 1,
+          history.attemptsMade + 1
+        );
+        serverSession.attemptNumber = resolvedAttemptNum;
+        serverSession.maxAttempts = effectiveMaxAttempts;
+        if (history.bestScore !== undefined) {
+          serverSession.bestScoreSoFar =
+            serverSession.bestScoreSoFar !== undefined
+              ? Math.max(Number(serverSession.bestScoreSoFar), history.bestScore)
+              : history.bestScore;
+        }
+
+        const resolvedExamId = matchedCachedExam?.id || String(params.examCode || '').trim();
+        const resolvedExamCode = matchedCachedExam?.code || String(params.examCode || '').trim();
+
         try {
           sessionStorage.setItem(
             `ncv_session_meta_${serverSession.sessionId}`,
             JSON.stringify({
               questionOrder: serverSession.questionOrder,
               optionOrder: serverSession.optionOrder,
-              examId: matchedCachedExam?.id || params.examCode
+              examId: resolvedExamId
             })
           );
         } catch (e) {}
@@ -1684,14 +2113,14 @@ export const api = {
         try {
           saveStudentSessionToFirestore({
             sessionId: serverSession.sessionId,
-            examId: String(params.examCode || '').trim(),
-            examCode: String(params.examCode || '').trim(),
+            examId: resolvedExamId,
+            examCode: resolvedExamCode,
             studentName: params.studentName,
             studentClass: params.studentClass,
             sbd: params.sbd,
             status: 'in_progress',
             startedAt: serverSession.startedAt,
-            attemptNumber: serverSession.attemptNumber || 1,
+            attemptNumber: resolvedAttemptNum,
             totalQuestions: serverSession.questions?.length || 10,
             violationCount: 0,
             answeredCount: 0,
@@ -1701,14 +2130,14 @@ export const api = {
 
           const activeItem = {
             sessionId: serverSession.sessionId,
-            examId: String(params.examCode || '').trim(),
-            examCode: String(params.examCode || '').trim(),
+            examId: resolvedExamId,
+            examCode: resolvedExamCode,
             studentName: params.studentName,
             studentClass: params.studentClass,
             sbd: params.sbd,
             status: 'in_progress',
             startedAt: serverSession.startedAt,
-            attemptNumber: serverSession.attemptNumber || 1,
+            attemptNumber: resolvedAttemptNum,
             totalQuestions: serverSession.questions?.length || 10,
             answeredCount: 0
           };
@@ -1740,8 +2169,10 @@ export const api = {
       if (
         err?.status === 401 ||
         err?.status === 403 ||
+        err?.data?.hasCompletedAllAttempts ||
         err?.message?.includes('khóa') ||
         err?.message?.includes('quá số lần') ||
+        err?.message?.includes('hoàn thành đủ') ||
         err?.message?.includes('mật khẩu') ||
         err?.message?.includes('chưa bắt đầu') ||
         err?.message?.includes('kết thúc') ||
@@ -1759,6 +2190,22 @@ export const api = {
     }
     if (!exam) {
       exam = (cachedExams && cachedExams.length > 0) ? (cachedExams.find(e => e.isOpen) || cachedExams[0]) : (SEED_APP_DATA.exams[0] as any);
+    }
+
+    const fallbackMaxAttempts = Math.max(1, Number(exam?.maxAttempts ?? effectiveMaxAttempts));
+    if (history.attemptsMade >= fallbackMaxAttempts) {
+      const blockErr: any = new Error(
+        `Bạn đã quá số lần làm bài cho phép (${history.attemptsMade}/${fallbackMaxAttempts} lần). Điểm số cao nhất đã ghi nhận: ${history.bestScore ?? 0} điểm.`
+      );
+      blockErr.status = 403;
+      blockErr.data = {
+        hasCompletedAllAttempts: true,
+        attemptsMade: history.attemptsMade,
+        maxAttempts: fallbackMaxAttempts,
+        bestScore: history.bestScore ?? 0,
+        pastAttempts: history.pastAttempts,
+      };
+      throw blockErr;
     }
 
     const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((params.studentClass || '').trim());
@@ -1842,6 +2289,7 @@ export const api = {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + (exam?.durationMinutes || 45) * 60 * 1000);
     const sessionId = `ses-fallback-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const nextAttemptNum = history.attemptsMade + 1;
 
     try {
       sessionStorage.setItem(`ncv_fallback_exam_${sessionId}`, JSON.stringify({
@@ -1868,9 +2316,9 @@ export const api = {
       savedAnswers: {},
       flaggedQuestions: [],
       violationCount: 0,
-      attemptNumber: 1,
-      maxAttempts: exam?.maxAttempts || 1,
-      bestScoreSoFar: undefined
+      attemptNumber: nextAttemptNum,
+      maxAttempts: fallbackMaxAttempts,
+      bestScoreSoFar: history.bestScore
     };
 
     // Register fallback student session in Firebase Firestore so teacher can proctor
@@ -1884,7 +2332,7 @@ export const api = {
         sbd: params.sbd,
         status: 'in_progress',
         startedAt: now.toISOString(),
-        attemptNumber: 1,
+        attemptNumber: nextAttemptNum,
         totalQuestions: studentQuestions.length,
         violationCount: 0,
         answeredCount: 0,
@@ -1901,7 +2349,7 @@ export const api = {
         sbd: params.sbd,
         status: 'in_progress',
         startedAt: now.toISOString(),
-        attemptNumber: 1,
+        attemptNumber: nextAttemptNum,
         totalQuestions: studentQuestions.length,
         answeredCount: 0
       };
@@ -2113,45 +2561,44 @@ export const api = {
       } catch (e) {}
     }
 
-    // Attach session meta (questionOrder, optionOrder) and examSnapshot for Vercel cold-start accuracy
+    // Attach session meta (questionOrder, optionOrder), examSnapshot, and prior student attempts for Vercel cold-start accuracy
+    const history = await gatherStudentExamHistory({
+      examId: payload.examId,
+      examCode: payload.examCode,
+      studentName: payload.studentName,
+      studentClass: payload.studentClass,
+      excludeSessionId: sessionId,
+    });
+
     try {
       const metaRaw = sessionStorage.getItem(`ncv_session_meta_${sessionId}`);
       if (metaRaw) {
         const meta = JSON.parse(metaRaw);
         if (!payload.questionOrder && meta.questionOrder) payload.questionOrder = meta.questionOrder;
         if (!payload.optionOrder && meta.optionOrder) payload.optionOrder = meta.optionOrder;
-      }
-      const targetId = String(payload.examId || payload.examCode || '').trim().toUpperCase();
-      const targetCode = String(payload.examCode || payload.examId || '').trim().toUpperCase();
-
-      const findMatchingExam = (list: any[]): Exam | undefined => {
-        if (!Array.isArray(list)) return undefined;
-        return list.find((e: any) => {
-          if (!e) return false;
-          const eId = String(e.id || '').trim().toUpperCase();
-          const eCode = String(e.code || '').trim().toUpperCase();
-          return (targetId && (eId === targetId || eCode === targetId)) ||
-                 (targetCode && (eId === targetCode || eCode === targetCode));
-        });
-      };
-
-      const cachedExamsRaw = localStorage.getItem('ncv_exams_data');
-      if (cachedExamsRaw) {
-        const arr = JSON.parse(cachedExamsRaw);
-        const matched = findMatchingExam(arr);
-        if (matched && Array.isArray(matched.questions) && matched.questions.some((q: any) => q && q.correctAnswer)) {
-          payload.examSnapshot = matched;
-        }
+        if (!payload.examId && meta.examId) payload.examId = meta.examId;
       }
 
-      if (!payload.examSnapshot) {
-        const fbExams = await getExamsFromFirestore().catch(() => []);
-        const fbMatched = findMatchingExam(fbExams);
-        if (fbMatched && Array.isArray(fbMatched.questions) && fbMatched.questions.some((q: any) => q && q.correctAnswer)) {
-          payload.examSnapshot = fbMatched;
-        }
+      if (history.exam) {
+        payload.examSnapshot = history.exam;
+        if (!payload.examId && history.exam.id) payload.examId = history.exam.id;
+        if (!payload.examCode && history.exam.code) payload.examCode = history.exam.code;
       }
     } catch (e) {}
+
+    const computedCurrentAttempt = Math.max(
+      Number(payload.attemptNumber) || 1,
+      history.attemptsMade + 1
+    );
+    payload.attemptNumber = computedCurrentAttempt;
+    payload.previousSessions = history.previousSessions;
+    payload.clientAttemptsMade = computedCurrentAttempt;
+    if (history.bestScore !== undefined) {
+      payload.clientBestScore =
+        payload.bestScoreSoFar !== undefined
+          ? Math.max(Number(payload.bestScoreSoFar), history.bestScore)
+          : history.bestScore;
+    }
 
     let result: any = null;
     try {
@@ -2268,10 +2715,10 @@ export const api = {
       }
     }
 
-    // Persist this submission into localStorage for reports and proctoring
+    // Persist this submission into localStorage and Firestore for reports, proctoring, and strict attempt enforcement
     try {
-      const examId = String(payload.examId || (result as any).examId || '').trim();
-      const examCode = String(payload.examCode || (result as any).examCode || '').trim();
+      const examId = String(history.exam?.id || payload.examId || (result as any)?.examId || '').trim();
+      const examCode = String(history.exam?.code || payload.examCode || (result as any)?.examCode || '').trim();
       const actualScore = result?.score !== undefined ? Number(result.score) : (result?.bestScore !== undefined ? Number(result.bestScore) : 0);
 
       // Compute true highest score across all previous submitted attempts of this student
@@ -2282,36 +2729,32 @@ export const api = {
       if (payload.bestScoreSoFar !== undefined && !isNaN(Number(payload.bestScoreSoFar))) {
         prevStudentScores.push(Number(payload.bestScoreSoFar));
       }
-      try {
-        const sNameNorm = String(payload.studentName || '').trim().toLowerCase();
-        const sClassNorm = String(payload.studentClass || '').trim().toLowerCase();
-        const checkKeys = [
-          examId ? `ncv_submissions_${examId}` : '',
-          examCode && examCode !== examId ? `ncv_submissions_${examCode}` : '',
-        ].filter(Boolean);
-        for (const ck of checkKeys) {
-          const arr = JSON.parse(localStorage.getItem(ck) || '[]');
-          if (Array.isArray(arr)) {
-            arr.forEach((s: any) => {
-              if (
-                s &&
-                s.status === 'submitted' &&
-                String(s.studentName || s.name || '').trim().toLowerCase() === sNameNorm &&
-                String(s.studentClass || s.class || '').trim().toLowerCase() === sClassNorm &&
-                typeof s.score === 'number' &&
-                !isNaN(s.score)
-              ) {
-                prevStudentScores.push(s.score);
-              }
-            });
-          }
-        }
-      } catch (e) {}
-
+      if (history.bestScore !== undefined && !isNaN(Number(history.bestScore))) {
+        prevStudentScores.push(Number(history.bestScore));
+      }
       const actualBestScore = Math.max(...prevStudentScores);
+
+      const effectiveMaxAttempts = Math.max(
+        1,
+        Number(history.exam?.maxAttempts ?? payload.examSnapshot?.maxAttempts ?? result?.maxAttempts ?? 1)
+      );
+      const effectiveAttemptsMade = Math.max(
+        computedCurrentAttempt,
+        Number(result?.attemptsMade || 0),
+        Number(result?.attemptNumber || 0),
+        history.attemptsMade + 1
+      );
+      const effectiveAttemptsRemaining = Math.max(0, effectiveMaxAttempts - effectiveAttemptsMade);
+      const effectiveCanRetake = effectiveAttemptsMade < effectiveMaxAttempts && effectiveAttemptsRemaining > 0;
+
       if (result) {
         result.score = actualScore;
         result.bestScore = actualBestScore;
+        result.attemptNumber = effectiveAttemptsMade;
+        result.attemptsMade = effectiveAttemptsMade;
+        result.maxAttempts = effectiveMaxAttempts;
+        result.attemptsRemaining = effectiveAttemptsRemaining;
+        result.canRetake = effectiveCanRetake;
       }
 
       const submissionItem = {
@@ -2329,7 +2772,7 @@ export const api = {
         incorrectCount: result.incorrectCount ?? 0,
         unansweredCount: result.unansweredCount ?? 0,
         totalQuestions: result.totalQuestions || 10,
-        attemptNumber: result.attemptNumber || payload.attemptNumber || 1,
+        attemptNumber: effectiveAttemptsMade,
         submittedAt: result.submittedAt || new Date().toISOString(),
         status: 'submitted',
         violationCount: payload.violationCount || 0
@@ -2353,12 +2796,17 @@ export const api = {
         localStorage.setItem(cacheKey, JSON.stringify(filtered));
       }
 
-      // 3. Save to global submissions cache
+      // 3. Save to global submissions cache and student attempt log
       try {
         const globalExisting = JSON.parse(localStorage.getItem('ncv_submissions_global_all') || '[]');
         const globalFiltered = globalExisting.filter((s: any) => s.sessionId !== submissionItem.sessionId);
         globalFiltered.unshift(submissionItem);
         localStorage.setItem('ncv_submissions_global_all', JSON.stringify(globalFiltered.slice(0, 500)));
+
+        const attemptLogExisting = JSON.parse(localStorage.getItem('ncv_student_attempt_records') || '[]');
+        const attemptLogFiltered = attemptLogExisting.filter((s: any) => s.sessionId !== submissionItem.sessionId);
+        attemptLogFiltered.unshift(submissionItem);
+        localStorage.setItem('ncv_student_attempt_records', JSON.stringify(attemptLogFiltered.slice(0, 500)));
       } catch (e) {}
 
       // 4. Dispatch browser custom event for instant cross-tab / UI update
@@ -2389,14 +2837,14 @@ export const api = {
             unansweredCount: result.unansweredCount,
             status: 'submitted',
             submittedAt: result.submittedAt || new Date().toISOString(),
-            attemptNumber: result.attemptNumber || payload.attemptNumber || 1,
+            attemptNumber: effectiveAttemptsMade,
             violationCount: payload.violationCount || 0,
             answers: payload.answers || {}
           }]
         })
       }).catch(() => {});
 
-      // 6. Save PERMANENTLY to Firebase Firestore on final submission (Optimized: 0 writes while taking test, 1 write on submit)
+      // 6. Save PERMANENTLY to Firebase Firestore on final submission
       try {
         await savePermanentSubmission({
           sessionId,
@@ -2411,7 +2859,7 @@ export const api = {
           incorrectCount: result.incorrectCount ?? 0,
           unansweredCount: result.unansweredCount ?? 0,
           totalQuestions: result.totalQuestions || 10,
-          attemptNumber: result.attemptNumber || payload.attemptNumber || 1,
+          attemptNumber: effectiveAttemptsMade,
           violationCount: payload.violationCount || 0,
           submittedAt: result.submittedAt || new Date().toISOString(),
           status: 'submitted',
@@ -2602,12 +3050,49 @@ export const api = {
     action: 'unlock' | 'retake' | 'extend_time' | 'force_submit';
     value?: any;
   }) => {
-    const res = await fetch('/api/proctor/action', {
-      method: 'POST',
-      headers: getHeaders(true),
-      body: JSON.stringify(params),
-    });
-    return await safeJson(res, 'Lỗi thực hiện thao tác giám sát');
+    if (params.action === 'unlock') {
+      updateSessionProgressInFirestore({
+        sessionId: params.sessionId,
+        violationCount: 0,
+        isLocked: false,
+      }).catch(() => {});
+    } else if (params.action === 'retake') {
+      // If teacher explicitly grants retake for a session, remove that submission record so student can retake
+      deleteSingleSubmissionFromFirestore(params.sessionId).catch(() => {});
+      try {
+        const attemptLogRaw = localStorage.getItem('ncv_student_attempt_records');
+        if (attemptLogRaw) {
+          const arr = JSON.parse(attemptLogRaw);
+          if (Array.isArray(arr)) {
+            localStorage.setItem(
+              'ncv_student_attempt_records',
+              JSON.stringify(arr.filter((s: any) => s.sessionId !== params.sessionId))
+            );
+          }
+        }
+      } catch (e) {}
+    }
+
+    try {
+      const res = await fetch('/api/proctor/action', {
+        method: 'POST',
+        headers: getHeaders(true),
+        body: JSON.stringify(params),
+      });
+      if (res.ok) {
+        return await safeJson(res, 'Lỗi thực hiện thao tác giám sát');
+      }
+    } catch (e) {}
+
+    return {
+      success: true,
+      message:
+        params.action === 'unlock'
+          ? 'Đã mở khóa bài thi cho học sinh'
+          : params.action === 'retake'
+          ? 'Đã cho phép học sinh thi lại từ đầu'
+          : 'Đã thực hiện thao tác thành công',
+    };
   },
 
   // Reports (Mục 3: Báo cáo & Điểm)
@@ -3169,6 +3654,15 @@ export const api = {
         if (Array.isArray(globalArr)) {
           const filtered = globalArr.filter((s: any) => s.sessionId !== sessionId);
           localStorage.setItem('ncv_submissions_global_all', JSON.stringify(filtered));
+        }
+      }
+
+      const attemptLogRaw = localStorage.getItem('ncv_student_attempt_records');
+      if (attemptLogRaw) {
+        const attemptLogArr = JSON.parse(attemptLogRaw);
+        if (Array.isArray(attemptLogArr)) {
+          const filtered = attemptLogArr.filter((s: any) => s.sessionId !== sessionId);
+          localStorage.setItem('ncv_student_attempt_records', JSON.stringify(filtered));
         }
       }
 

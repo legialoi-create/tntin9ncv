@@ -5,7 +5,7 @@ export const SEED_APP_DATA = {
       "code": "THU",
       "title": "Bài kiểm tra thử nghiệm Tin học - THCS Nam Cửa Việt",
       "grade": 9,
-      "targetClasses": ["THU", "9A8", "9A9", "9A", "9B", "9C", "8A", "7A", "6A"],
+      "targetClasses": ["9A", "9B"],
       "durationMinutes": 45,
       "totalPoints": 10,
       "isOpen": true,
@@ -87,7 +87,7 @@ export const SEED_APP_DATA = {
       "code": "TIN9-NCV01",
       "title": "Kiểm tra 1 tiết Tin học 9 - Đề chính thức THCS Nam Cửa Việt",
       "grade": 9,
-      "targetClasses": ["9A8", "9A9", "9A", "9B", "9C", "THU"],
+      "targetClasses": ["9A", "9B"],
       "durationMinutes": 45,
       "totalPoints": 10,
       "isOpen": true,
@@ -231,21 +231,14 @@ export const SEED_APP_DATA = {
     }
   ],
   "classes": [
-    { "name": "THU", "grade": 9, "studentCount": 10 },
-    { "name": "9A8", "grade": 9, "studentCount": 38 },
-    { "name": "9A9", "grade": 9, "studentCount": 40 },
     { "name": "9A", "grade": 9, "studentCount": 36 },
     { "name": "9B", "grade": 9, "studentCount": 35 },
-    { "name": "9C", "grade": 9, "studentCount": 35 },
     { "name": "8A", "grade": 8, "studentCount": 38 },
     { "name": "8B", "grade": 8, "studentCount": 37 },
-    { "name": "8C", "grade": 8, "studentCount": 36 },
     { "name": "7A", "grade": 7, "studentCount": 36 },
     { "name": "7B", "grade": 7, "studentCount": 35 },
-    { "name": "7C", "grade": 7, "studentCount": 34 },
     { "name": "6A", "grade": 6, "studentCount": 35 },
-    { "name": "6B", "grade": 6, "studentCount": 34 },
-    { "name": "6C", "grade": 6, "studentCount": 33 }
+    { "name": "6B", "grade": 6, "studentCount": 34 }
   ],
   "students": [
     {

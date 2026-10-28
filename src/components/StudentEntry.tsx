@@ -235,6 +235,8 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     };
   };
 
+  const [showAllClasses, setShowAllClasses] = useState(false);
+
   useEffect(() => {
     // Load class list from backend
     api.getClasses()
@@ -277,23 +279,6 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       })
       .finally(() => setIsLoadingExams(false));
   }, [initialExamCode]);
-
-  // When selected class changes, check if there's an exam matching this grade
-  useEffect(() => {
-    if (!studentClass || isManualExamCode || exams.length === 0) return;
-    const currentClassInfo = classes.find((c) => c.name === studentClass);
-    if (currentClassInfo) {
-      const currentExam = exams.find((e) => e.id === selectedExamId);
-      if (!currentExam || currentExam.grade !== currentClassInfo.grade) {
-        const gradeExams = exams.filter((e) => e.grade === currentClassInfo.grade);
-        if (gradeExams.length > 0) {
-          const openExam = gradeExams.find((e) => e.isOpen) || gradeExams[0];
-          setSelectedExamId(openExam.id);
-          setExamCode(openExam.code);
-        }
-      }
-    }
-  }, [studentClass, classes, exams]);
 
   // When selected class changes, load its student roster
   useEffect(() => {
@@ -516,6 +501,23 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     if (!verifiedInfo) return;
     setErrorMsg(null);
 
+    const maxAllowed = Math.max(1, Number(verifiedInfo.maxAttempts || verifiedInfo.exam?.maxAttempts || 1));
+    const madeSoFar = Number(verifiedInfo.attemptsMade || 0);
+    if (!verifiedInfo.hasActiveSession && madeSoFar >= maxAllowed) {
+      setBlockedAttemptInfo({
+        attemptsMade: madeSoFar,
+        maxAttempts: maxAllowed,
+        bestScore: verifiedInfo.bestScore,
+        studentName: verifiedInfo.student?.name || studentName.trim(),
+        studentClass: verifiedInfo.student?.class || studentClass.trim(),
+        sbd: verifiedInfo.student?.sbd || (sbd ? sbd.trim() : undefined),
+        pastAttempts: verifiedInfo.pastAttempts,
+        message: `Bạn đã hoàn thành đủ ${madeSoFar}/${maxAllowed} lần làm bài cho phép của bài kiểm tra này.`
+      });
+      setVerifiedInfo(null);
+      return;
+    }
+
     const isTestClass = /^(test|thu|demo|gv|giaovien)/i.test((verifiedInfo.student?.class || '').trim());
     if (!isTestClass) {
       const sched = getExamScheduleStatus(verifiedInfo.exam);
@@ -563,6 +565,9 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       onStartExam(res, verifiedInfo.exam, verifiedInfo.student);
     } catch (err: any) {
       setIsLoading(false);
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
       if (err.message && (err.message.includes('chưa đến giờ') || err.message.includes('chưa bắt đầu'))) {
         setBlockedScheduleInfo({
           type: 'not_started',
@@ -579,6 +584,24 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
           timeStr: verifiedInfo.exam.endTime ? formatVietnameseDatetime(verifiedInfo.exam.endTime) : '',
           message: err.message
         });
+        return;
+      }
+      if (
+        err.data?.hasCompletedAllAttempts ||
+        (err.data?.attemptsMade !== undefined && err.data?.attemptsMade >= (err.data?.maxAttempts || 1)) ||
+        (err.message && (err.message.includes('quá số lần') || err.message.includes('hoàn thành đủ')))
+      ) {
+        setBlockedAttemptInfo({
+          attemptsMade: err.data?.attemptsMade ?? maxAllowed,
+          maxAttempts: err.data?.maxAttempts ?? maxAllowed,
+          bestScore: err.data?.bestScore ?? verifiedInfo.bestScore,
+          studentName: verifiedInfo.student?.name || studentName.trim(),
+          studentClass: verifiedInfo.student?.class || studentClass.trim(),
+          sbd: verifiedInfo.student?.sbd || (sbd ? sbd.trim() : undefined),
+          pastAttempts: err.data?.pastAttempts ?? verifiedInfo.pastAttempts,
+          message: err.message || 'Bạn đã quá số lần làm bài cho phép của bài kiểm tra này.'
+        });
+        setVerifiedInfo(null);
         return;
       }
       setErrorMsg(err.message || 'Không thể bắt đầu làm bài thi. Vui lòng kiểm tra lại phòng thi hoặc liên hệ giáo viên.');
@@ -652,6 +675,44 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
   const selectedExam = exams.find(
     (e) => e.id === selectedExamId || (examCode && e.code.toUpperCase() === examCode.trim().toUpperCase())
   );
+
+  // Filter classes to match the currently selected exam's targetClasses / grade so mobile phones don't show too many classes
+  const examMatchedClasses = React.useMemo(() => {
+    if (!selectedExam || classes.length === 0) return classes;
+    const examGradeNum = Number(selectedExam.grade);
+    const gradeClasses = classes.filter(
+      (c) => Number(c.grade) === examGradeNum || c.name.trim().startsWith(String(examGradeNum))
+    );
+
+    const rawTargets = Array.isArray(selectedExam.targetClasses)
+      ? selectedExam.targetClasses
+          .map((t) => String(t || '').trim().toUpperCase())
+          .filter((t) => t && t !== 'ALL' && t !== 'TẤT CẢ' && t !== 'THU' && t !== '9A8' && t !== '9A9')
+      : [];
+
+    if (rawTargets.length > 0) {
+      const targetSet = new Set(rawTargets);
+      const exactGradeTargets = gradeClasses.filter((c) => targetSet.has(c.name.trim().toUpperCase()));
+      if (exactGradeTargets.length > 0) return exactGradeTargets;
+      const anyTargets = classes.filter((c) => targetSet.has(c.name.trim().toUpperCase()));
+      if (anyTargets.length > 0) return anyTargets;
+    }
+
+    return gradeClasses.length > 0 ? gradeClasses : classes;
+  }, [selectedExam, classes]);
+
+  const displayedClasses = showAllClasses ? classes : examMatchedClasses;
+
+  // Automatically keep studentClass synced with the displayed classes for the selected exam
+  useEffect(() => {
+    if (displayedClasses.length === 0) return;
+    const existsInDisplayed = displayedClasses.some(
+      (c) => c.name.trim().toUpperCase() === (studentClass || '').trim().toUpperCase()
+    );
+    if (!studentClass || !existsInDisplayed) {
+      setStudentClass(displayedClasses[0].name);
+    }
+  }, [selectedExam?.id, displayedClasses]);
 
   return (
     <div className="max-w-2xl mx-auto py-1 sm:py-2 px-2 sm:px-4">
@@ -905,9 +966,27 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
-                  Lớp học <span className="text-red-500">*</span>
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                    Lớp học <span className="text-red-500">*</span>
+                    {selectedExam && !showAllClasses && examMatchedClasses.length < classes.length && (
+                      <span className="ml-1 text-[10px] font-semibold text-indigo-600 normal-case">
+                        (Khối {selectedExam.grade})
+                      </span>
+                    )}
+                  </label>
+                  {selectedExam && examMatchedClasses.length < classes.length && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllClasses((prev) => !prev)}
+                      className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold underline cursor-pointer"
+                    >
+                      {showAllClasses
+                        ? `Chỉ hiện Khối ${selectedExam.grade} (${examMatchedClasses.length})`
+                        : `Hiện tất cả (${classes.length})`}
+                    </button>
+                  )}
+                </div>
                 <div className="relative">
                   <select
                     value={studentClass}
@@ -915,7 +994,7 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
                     required
                     className="w-full px-3.5 py-2 sm:py-2.5 bg-slate-50 border border-slate-300 rounded-lg sm:rounded-xl focus:ring-2 focus:ring-indigo-500 focus:bg-white text-slate-900 text-xs sm:text-sm font-semibold transition outline-none cursor-pointer"
                   >
-                    {classes.map((c) => (
+                    {displayedClasses.map((c) => (
                       <option key={c.name} value={c.name}>
                         Lớp {c.name} (Khối {c.grade})
                       </option>

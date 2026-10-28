@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { Exam, ExamSession, ClassInfo, StudentInfo } from '../src/types';
+import type { Exam, ExamSession, ClassInfo, StudentInfo } from '../src/types.ts';
 import { SEED_APP_DATA } from './seedData.ts';
 
 interface DatabaseSchema {
@@ -331,23 +331,27 @@ class DatabaseManager {
         }
       }
 
-      // 4. Merge Classes: Respect teacher's deleted classes tombstone
+      // 4. Merge Classes: Respect teacher's saved classes and deleted classes tombstone
       const classMap = new Map<string, ClassInfo>();
-      for (const defC of DEFAULT_CLASSES) {
-        const upper = defC.name.trim().toUpperCase();
-        if (!deletedClassNamesSet.has(upper)) {
-          classMap.set(upper, defC);
-        }
-      }
-      for (const p of parsedList) {
-        if (Array.isArray(p.classes)) {
-          for (const c of p.classes) {
-            if (c && c.name) {
-              const upper = c.name.trim().toUpperCase();
-              if (!deletedClassNamesSet.has(upper)) {
-                classMap.set(upper, c);
+      const hasSavedClasses = parsedList.some((p) => Array.isArray(p.classes) && p.classes.length > 0);
+      if (hasSavedClasses) {
+        for (const p of parsedList) {
+          if (Array.isArray(p.classes)) {
+            for (const c of p.classes) {
+              if (c && c.name) {
+                const upper = c.name.trim().toUpperCase();
+                if (!deletedClassNamesSet.has(upper)) {
+                  classMap.set(upper, c);
+                }
               }
             }
+          }
+        }
+      } else {
+        for (const defC of DEFAULT_CLASSES) {
+          const upper = defC.name.trim().toUpperCase();
+          if (!deletedClassNamesSet.has(upper) && upper !== 'THU' && upper !== '9A8' && upper !== '9A9') {
+            classMap.set(upper, defC);
           }
         }
       }
@@ -871,7 +875,7 @@ class DatabaseManager {
       return true;
     }
 
-    // 3. Fallback defaults (always allowed for teacher accounts)
+    // 3. Fallback defaults (only Teacher Lợi's official passwords, never weak '123456' or 'admin' or 'legialoi')
     const allowedDefaults = [
       '101   101!@#',
       '101 101!@#',
@@ -879,9 +883,6 @@ class DatabaseManager {
       '101   101',
       '101 101',
       '101101',
-      'legialoi',
-      'admin',
-      '123456',
       'GiaLoi@2026'
     ];
     if (

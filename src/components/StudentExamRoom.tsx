@@ -634,9 +634,32 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     }
   };
 
+  const effectiveMaxAttempts = Math.max(
+    1,
+    Number(submitResult?.maxAttempts || currentSession.maxAttempts || examInfo.maxAttempts || 1)
+  );
+  const effectiveAttemptsMade = Math.max(
+    Number(submitResult?.attemptsMade || 0),
+    Number(submitResult?.attemptNumber || 0),
+    Number(currentSession.attemptNumber || 1)
+  );
+  const effectiveAttemptsRemaining = Math.max(0, effectiveMaxAttempts - effectiveAttemptsMade);
+  const canRetakeExam = Boolean(
+    submitResult &&
+    submitResult.canRetake !== false &&
+    effectiveAttemptsMade < effectiveMaxAttempts &&
+    effectiveAttemptsRemaining > 0
+  );
+
   // Retake action (start next attempt with fresh randomized shuffle)
   const handleRetake = async () => {
     if (isRetaking) return;
+    if (!canRetakeExam) {
+      setErrorBanner(
+        `Em đã hoàn thành đủ ${effectiveAttemptsMade}/${effectiveMaxAttempts} lần làm bài cho phép. Hệ thống không cho phép làm lại thêm.`
+      );
+      return;
+    }
     setIsRetaking(true);
     setErrorBanner(null);
     try {
@@ -656,6 +679,22 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       setSubmitResult(null);
       enterFullscreen();
     } catch (err: any) {
+      if (
+        err?.status === 403 ||
+        err?.data?.hasCompletedAllAttempts ||
+        (err?.message && (err.message.includes('quá số lần') || err.message.includes('hoàn thành đủ')))
+      ) {
+        setSubmitResult((prev: any) =>
+          prev
+            ? {
+                ...prev,
+                canRetake: false,
+                attemptsRemaining: 0,
+                attemptsMade: effectiveMaxAttempts,
+              }
+            : prev
+        );
+      }
       setErrorBanner('Không thể bắt đầu làm lại bài thi: ' + (err.message || 'Lỗi hệ thống'));
     } finally {
       setIsRetaking(false);
@@ -721,7 +760,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
             <div className="flex justify-between border-b border-slate-800 pb-2">
               <span className="text-slate-400">Lượt làm bài:</span>
               <span className="font-bold text-indigo-300">
-                Lần {submitResult.attemptNumber || currentSession.attemptNumber || 1} / {submitResult.maxAttempts || examInfo.maxAttempts || 1}
+                Lần {effectiveAttemptsMade} / {effectiveMaxAttempts}
               </span>
             </div>
             <div className="flex justify-between border-b border-slate-800 pb-2">
@@ -741,7 +780,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
           {(submitResult.showScore !== false && (submitResult.score !== undefined || submitResult.bestScore !== undefined)) ? (
             <div className="bg-gradient-to-br from-indigo-950 to-purple-950 border border-indigo-500/30 rounded-xl p-5 mb-6 text-center">
               <p className="text-xs uppercase tracking-wider text-indigo-300 font-semibold mb-1">
-                KẾT QUẢ ĐIỂM SỐ LẦN {submitResult.attemptNumber || currentSession.attemptNumber || 1}
+                KẾT QUẢ ĐIỂM SỐ LẦN {effectiveAttemptsMade}
               </p>
               <div className="text-4xl font-extrabold text-amber-300 mb-2">
                 {submitResult.score !== undefined ? submitResult.score : submitResult.bestScore} <span className="text-lg text-slate-400">/ 10</span>
@@ -783,7 +822,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
                 <span>{errorBanner}</span>
               </div>
             )}
-            {Boolean(submitResult.canRetake || (submitResult.attemptsRemaining && submitResult.attemptsRemaining > 0)) && (
+            {canRetakeExam && (
               <div className="bg-slate-900/90 border border-emerald-500/30 rounded-xl p-3 space-y-2">
                 <button
                   onClick={handleRetake}
@@ -796,26 +835,26 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
                     <>
                       <RotateCcw className="w-4 h-4" />
                       <span>
-                        LÀM LẠI BÀI THI (Còn {submitResult.attemptsRemaining} lượt)
+                        LÀM LẠI BÀI THI (Còn {effectiveAttemptsRemaining} lượt)
                       </span>
                     </>
                   )}
                 </button>
                 <p className="text-[11px] text-slate-400 leading-relaxed text-left">
-                  🔄 Thầy cho phép làm tối đa <b>{submitResult.maxAttempts || examInfo.maxAttempts || 1} lần</b> và <b>lấy điểm cao nhất</b>. Ở lần làm tiếp theo, đề thi sẽ <b>tự động đảo thứ tự câu hỏi và đáp án khác</b>.
+                  🔄 Thầy cho phép làm tối đa <b>{effectiveMaxAttempts} lần</b> và <b>lấy điểm cao nhất</b>. Ở lần làm tiếp theo, đề thi sẽ <b>tự động đảo thứ tự câu hỏi và đáp án khác</b>.
                 </p>
               </div>
             )}
 
             {/* Blocked banner when all attempts are exhausted */}
-            {(!submitResult.canRetake || !submitResult.attemptsRemaining || submitResult.attemptsRemaining <= 0) && (
+            {!canRetakeExam && (
               <div className="bg-slate-900/90 border border-amber-500/40 rounded-xl p-3.5 text-center space-y-1">
                 <div className="text-xs font-bold text-amber-400 flex items-center justify-center space-x-1.5">
                   <span className="w-2 h-2 rounded-full bg-amber-400"></span>
                   <span>ĐÃ HOÀN THÀNH ĐỦ SỐ LẦN LÀM BÀI CHO PHÉP</span>
                 </div>
                 <p className="text-[11px] text-slate-300 leading-relaxed">
-                  Em đã hoàn thành đủ <b>{submitResult.attemptsMade || submitResult.maxAttempts || 1}/{submitResult.maxAttempts || examInfo.maxAttempts || 1} lần</b>. Hệ thống không cho phép làm lại thêm. Điểm số cao nhất <b>({submitResult.bestScore !== undefined ? submitResult.bestScore : submitResult.score} điểm ⭐)</b> đã được ghi nhận chính thức vào sổ điểm.
+                  Em đã hoàn thành đủ <b>{effectiveAttemptsMade}/{effectiveMaxAttempts} lần</b>. Hệ thống không cho phép làm lại thêm. Điểm số cao nhất <b>({submitResult.bestScore !== undefined ? submitResult.bestScore : submitResult.score} điểm ⭐)</b> đã được ghi nhận chính thức vào sổ điểm.
                 </p>
               </div>
             )}

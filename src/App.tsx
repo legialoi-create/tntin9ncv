@@ -59,18 +59,24 @@ export default function App() {
     initialRestored ? initialRestored.studentInfo : null
   );
 
-  // Check existing teacher token on mount
+  // Check existing teacher token on mount and purge any legacy forged student tokens
   useEffect(() => {
-    if (getAuthToken()) {
+    try {
+      localStorage.removeItem('ncv_teacher_token');
+    } catch (e) {}
+    const token = getAuthToken();
+    if (token) {
       api.checkAuth()
         .then((res) => {
-          if (res) {
+          if (res && getAuthToken()) {
             setIsTeacherLoggedIn(true);
           } else {
             setIsTeacherLoggedIn(false);
           }
         })
         .catch(() => setIsTeacherLoggedIn(false));
+    } else {
+      setIsTeacherLoggedIn(false);
     }
   }, []);
 
