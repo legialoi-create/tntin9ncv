@@ -3447,106 +3447,237 @@ app.get("/api/reports/:examId/export", requireTeacherAuth, (req, res) => {
     return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y b\xE0i ki\u1EC3m tra" });
   }
   const sessions = db.getSessions(exam.id);
-  const data = [];
-  data.push(["TR\u01AF\u1EDCNG THCS NAM C\u1EECA VI\u1EC6T"]);
-  data.push(["K\u1EBET QU\u1EA2 B\xC0I KI\u1EC2M TRA TR\u1EAEC NGHI\u1EC6M TIN H\u1ECCC"]);
-  data.push([`B\xE0i ki\u1EC3m tra: ${exam.title}`]);
-  data.push([`M\xE3 \u0111\u1EC1: ${exam.code} | Kh\u1ED1i: ${exam.grade} | Ng\xE0y xu\u1EA5t: ${(/* @__PURE__ */ new Date()).toLocaleDateString("vi-VN")}`]);
-  data.push([`Gi\xE1o vi\xEAn ph\u1EE5 tr\xE1ch: L\xEA Gia L\u1EE3i`]);
-  data.push([`Quy \u0111\u1ECBnh l\xE0m b\xE0i: T\u1ED1i \u0111a ${exam.maxAttempts || 1} l\u1EA7n - L\u1EA5y \u0111i\u1EC3m cao nh\u1EA5t trong c\xE1c l\u1EA7n thi`]);
-  data.push([]);
-  data.push([
-    "STT",
-    "H\u1ECD v\xE0 t\xEAn",
-    "L\u1EDBp",
-    "S\u1ED1 b\xE1o danh",
-    "\u0110i\u1EC3m cao nh\u1EA5t",
-    "S\u1ED1 l\u1EA7n \u0111\xE3 l\xE0m",
-    "Chi ti\u1EBFt c\xE1c l\u1EA7n thi",
-    "S\u1ED1 c\xE2u \u0111\xFAng",
-    "S\u1ED1 c\xE2u sai",
-    "S\u1ED1 c\xE2u ch\u01B0a l\xE0m",
-    "T\u1ED5ng vi ph\u1EA1m",
-    "Tr\u1EA1ng th\xE1i",
-    "Th\u1EDDi gian n\u1ED9p"
-  ]);
-  const studentMap = /* @__PURE__ */ new Map();
+  const allClasses = db.getClasses();
+  const allStudents = db.getStudents();
+  const studentSessionMap = /* @__PURE__ */ new Map();
   for (const s of sessions) {
     const key = `${s.studentName.trim().toLowerCase()}:::${s.studentClass.trim().toLowerCase()}`;
-    if (!studentMap.has(key)) {
-      studentMap.set(key, []);
+    if (!studentSessionMap.has(key)) {
+      studentSessionMap.set(key, []);
     }
-    studentMap.get(key).push(s);
+    studentSessionMap.get(key).push(s);
   }
-  let sttIdx = 1;
-  studentMap.forEach((userSessions) => {
-    userSessions.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
-    let bestSession = userSessions[0];
-    let maxSc = -1;
-    for (const s of userSessions) {
-      const sc = s.score ?? 0;
-      if (sc > maxSc) {
-        maxSc = sc;
-        bestSession = s;
-      }
+  const normClass = (c) => String(c || "").trim().toUpperCase();
+  const classSet = /* @__PURE__ */ new Map();
+  const addClassCandidate = (cName) => {
+    const raw = String(cName || "").trim();
+    const upper = raw.toUpperCase();
+    if (!upper || upper === "ALL" || upper === "T\u1EA4T C\u1EA2") return;
+    if (!classSet.has(upper)) {
+      classSet.set(upper, raw);
     }
-    const totalStudentViolations = userSessions.reduce((acc, s) => {
-      const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
-      return acc + v;
-    }, 0);
-    const attemptsHistoryStr = userSessions.map((s, idx) => {
-      const attNum = s.attemptNumber || idx + 1;
-      return `L\u1EA7n ${attNum}: ${s.score ?? 0}\u0111`;
-    }).join("; ");
-    const statusText = bestSession.status === "submitted" ? totalStudentViolations > 0 ? `\u0110\xE3 n\u1ED9p (${totalStudentViolations} vi ph\u1EA1m)` : "\u0110\xE3 n\u1ED9p b\xE0i" : bestSession.status === "locked" ? `B\u1ECB kh\xF3a (${totalStudentViolations} vi ph\u1EA1m)` : "\u0110ang l\xE0m";
-    const submittedDate = bestSession.submittedAt ? new Date(bestSession.submittedAt).toLocaleString("vi-VN") : bestSession.status === "locked" ? `B\u1ECB kh\xF3a (${new Date(bestSession.lastHeartbeat || bestSession.startedAt).toLocaleString("vi-VN")})` : "Ch\u01B0a n\u1ED9p";
-    data.push([
-      sttIdx++,
-      bestSession.studentName,
-      bestSession.studentClass,
-      bestSession.sbd || "",
-      maxSc,
-      `${userSessions.length}/${exam.maxAttempts || 1}`,
-      attemptsHistoryStr,
-      bestSession.correctCount ?? 0,
-      bestSession.incorrectCount ?? 0,
-      bestSession.unansweredCount ?? 0,
-      totalStudentViolations,
-      statusText,
-      submittedDate
-    ]);
+  };
+  const explicitTargets = (exam.targetClasses || []).filter((c) => {
+    const u = normClass(c);
+    return u && u !== "ALL" && u !== "T\u1EA4T C\u1EA2";
   });
+  explicitTargets.forEach(addClassCandidate);
+  if (explicitTargets.length === 0 && exam.grade) {
+    const gradeStr = String(exam.grade);
+    allClasses.forEach((c) => {
+      if (Number(c.grade) === Number(exam.grade) || normClass(c.name).startsWith(gradeStr)) {
+        addClassCandidate(c.name);
+      }
+    });
+    allStudents.forEach((st) => {
+      if (normClass(st.class).startsWith(gradeStr)) {
+        addClassCandidate(st.class);
+      }
+    });
+  }
+  sessions.forEach((s) => addClassCandidate(s.studentClass));
+  if (classSet.size === 0) {
+    allClasses.forEach((c) => addClassCandidate(c.name));
+    allStudents.forEach((st) => addClassCandidate(st.class));
+  }
+  const targetClassList = Array.from(classSet.values()).sort(
+    (a, b) => a.localeCompare(b, "vi", { numeric: true })
+  );
+  const sortRoster = (list) => {
+    return [...list].sort((a, b) => {
+      if (typeof a.stt === "number" && typeof b.stt === "number" && a.stt !== b.stt) {
+        return a.stt - b.stt;
+      }
+      const sbdMatchA = String(a.sbd || "").match(/(\d+)\s*$/);
+      const sbdMatchB = String(b.sbd || "").match(/(\d+)\s*$/);
+      if (sbdMatchA && sbdMatchB) {
+        const numA = parseInt(sbdMatchA[1], 10);
+        const numB = parseInt(sbdMatchB[1], 10);
+        if (numA !== numB) return numA - numB;
+      }
+      const idMatchA = String(a.id || "").match(/-(\d+)$/);
+      const idMatchB = String(b.id || "").match(/-(\d+)$/);
+      if (idMatchA && idMatchB) {
+        const idNumA = parseInt(idMatchA[1], 10);
+        const idNumB = parseInt(idMatchB[1], 10);
+        if (idNumA !== idNumB) return idNumA - idNumB;
+      }
+      return 0;
+    });
+  };
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  ws["!cols"] = [
+  const usedSheetNames = /* @__PURE__ */ new Set();
+  const colWidths = [
     { wch: 6 },
     // STT
-    { wch: 25 },
+    { wch: 14 },
+    // SBD
+    { wch: 28 },
     // Họ và tên
     { wch: 10 },
     // Lớp
-    { wch: 14 },
-    // SBD
-    { wch: 14 },
-    // Điểm cao nhất
-    { wch: 14 },
-    // Số lần làm
-    { wch: 28 },
-    // Chi tiết các lần
     { wch: 12 },
-    // Đúng
-    { wch: 12 },
-    // Sai
+    // Điểm
     { wch: 14 },
-    // Chưa làm
+    // Số lần đã làm
+    { wch: 13 },
+    // Số câu đúng
+    { wch: 13 },
+    // Số câu sai
+    { wch: 15 },
+    // Số câu chưa làm
     { wch: 14 },
-    // Vi phạm
-    { wch: 18 },
+    // Tổng vi phạm
+    { wch: 16 },
     // Trạng thái
     { wch: 22 }
-    // Ngày nộp
+    // Thời gian nộp
   ];
-  XLSX.utils.book_append_sheet(wb, ws, "BangDiem");
+  for (const clsName of targetClassList) {
+    const upperCls = normClass(clsName);
+    const classStudents = sortRoster(
+      allStudents.filter((s) => normClass(s.class) === upperCls)
+    );
+    const usedStudentKeys = /* @__PURE__ */ new Set();
+    const rowsData = [];
+    let participatedCount = 0;
+    classStudents.forEach((st, idx) => {
+      const key = `${st.name.trim().toLowerCase()}:::${upperCls.toLowerCase()}`;
+      const userSessions = studentSessionMap.get(key);
+      if (userSessions && userSessions.length > 0) {
+        usedStudentKeys.add(key);
+        participatedCount++;
+        userSessions.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+        let bestSession = userSessions[0];
+        let maxSc = -1;
+        for (const s of userSessions) {
+          const sc = s.score ?? 0;
+          if (sc > maxSc) {
+            maxSc = sc;
+            bestSession = s;
+          }
+        }
+        const totalStudentViolations = userSessions.reduce((acc, s) => {
+          const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
+          return acc + v;
+        }, 0);
+        const statusText = bestSession.status === "locked" ? "B\u1ECB kh\xF3a" : "\u0110\xE3 ho\xE0n th\xE0nh";
+        const submittedDate = bestSession.submittedAt ? new Date(bestSession.submittedAt).toLocaleString("vi-VN") : "";
+        rowsData.push([
+          idx + 1,
+          st.sbd || bestSession.sbd || "",
+          st.name,
+          st.class || clsName,
+          maxSc,
+          userSessions.length,
+          bestSession.correctCount ?? 0,
+          bestSession.incorrectCount ?? 0,
+          bestSession.unansweredCount ?? 0,
+          totalStudentViolations,
+          statusText,
+          submittedDate
+        ]);
+      } else {
+        rowsData.push([
+          idx + 1,
+          st.sbd || "",
+          st.name,
+          st.class || clsName,
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "Ch\u01B0a d\u1EF1 thi",
+          ""
+        ]);
+      }
+    });
+    studentSessionMap.forEach((userSessions, key) => {
+      const [, sClsLower] = key.split(":::");
+      if (sClsLower === upperCls.toLowerCase() && !usedStudentKeys.has(key)) {
+        usedStudentKeys.add(key);
+        participatedCount++;
+        userSessions.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+        let bestSession = userSessions[0];
+        let maxSc = -1;
+        for (const s of userSessions) {
+          const sc = s.score ?? 0;
+          if (sc > maxSc) {
+            maxSc = sc;
+            bestSession = s;
+          }
+        }
+        const totalStudentViolations = userSessions.reduce((acc, s) => {
+          const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
+          return acc + v;
+        }, 0);
+        rowsData.push([
+          rowsData.length + 1,
+          bestSession.sbd || "",
+          bestSession.studentName,
+          bestSession.studentClass || clsName,
+          maxSc,
+          userSessions.length,
+          bestSession.correctCount ?? 0,
+          bestSession.incorrectCount ?? 0,
+          bestSession.unansweredCount ?? 0,
+          totalStudentViolations,
+          bestSession.status === "locked" ? "B\u1ECB kh\xF3a" : "\u0110\xE3 ho\xE0n th\xE0nh",
+          bestSession.submittedAt ? new Date(bestSession.submittedAt).toLocaleString("vi-VN") : ""
+        ]);
+      }
+    });
+    const totalInClass = rowsData.length;
+    const absentCount = Math.max(0, totalInClass - participatedCount);
+    const data = [];
+    data.push(["TR\u01AF\u1EDCNG THCS NAM C\u1EECA VI\u1EC6T"]);
+    data.push([`B\u1EA2NG \u0110I\u1EC2M KI\u1EC2M TRA M\xD4N TIN H\u1ECCC - L\u1EDAP ${clsName}`]);
+    data.push([`B\xE0i ki\u1EC3m tra: ${exam.title}`]);
+    data.push([`M\xE3 \u0111\u1EC1: ${exam.code} | Kh\u1ED1i: ${exam.grade} | Ng\xE0y xu\u1EA5t: ${(/* @__PURE__ */ new Date()).toLocaleDateString("vi-VN")}`]);
+    data.push([`Gi\xE1o vi\xEAn ph\u1EE5 tr\xE1ch: L\xEA Gia L\u1EE3i | S\u0129 s\u1ED1: ${totalInClass} HS | \u0110\xE3 d\u1EF1 thi: ${participatedCount} HS | Ch\u01B0a thi: ${absentCount} HS`]);
+    data.push([`Quy \u0111\u1ECBnh: Danh s\xE1ch x\u1EBFp \u0111\xFAng th\u1EE9 t\u1EF1 h\u1ECDc sinh trong l\u1EDBp. H\u1ECDc sinh kh\xF4ng tham gia thi \u0111\u1EC3 tr\u1ED1ng \xF4 \u0110i\u1EC3m.`]);
+    data.push([]);
+    data.push([
+      "STT",
+      "S\u1ED1 b\xE1o danh",
+      "H\u1ECD v\xE0 t\xEAn",
+      "L\u1EDBp",
+      "\u0110i\u1EC3m",
+      "S\u1ED1 l\u1EA7n \u0111\xE3 l\xE0m",
+      "S\u1ED1 c\xE2u \u0111\xFAng",
+      "S\u1ED1 c\xE2u sai",
+      "S\u1ED1 c\xE2u ch\u01B0a l\xE0m",
+      "T\u1ED5ng vi ph\u1EA1m",
+      "Tr\u1EA1ng th\xE1i",
+      "Th\u1EDDi gian n\u1ED9p"
+    ]);
+    data.push(...rowsData);
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws["!cols"] = colWidths;
+    const cleanCls = String(clsName).replace(/[\\/?*[\]:]/g, "").trim();
+    let tabName = cleanCls.toUpperCase().startsWith("L\u1EDAP") ? cleanCls : `L\u1EDBp ${cleanCls}`;
+    if (tabName.length > 31) tabName = tabName.slice(0, 31);
+    let uniqueTabName = tabName;
+    let suffix = 2;
+    while (usedSheetNames.has(uniqueTabName.toUpperCase())) {
+      const sfx = ` (${suffix++})`;
+      uniqueTabName = tabName.slice(0, 31 - sfx.length) + sfx;
+    }
+    usedSheetNames.add(uniqueTabName.toUpperCase());
+    XLSX.utils.book_append_sheet(wb, ws, uniqueTabName);
+  }
   const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   const filename = `KetQua_${exam.code}_THCS_NamCuaViet.xlsx`;
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");

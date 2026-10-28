@@ -92,6 +92,7 @@ export interface StudentInfo {
   sbd: string;
   name: string;
   class: string;
+  stt?: number; // Thứ tự chuẩn trong danh sách lớp (1, 2, 3...)
   username?: string; // 2 chữ cuối của tên + lớp (ví dụ: vanan9a9)
   password?: string; // Mật khẩu (mặc định: [TênLớp]123, ví dụ: 9A9123)
   isPasswordChanged?: boolean;

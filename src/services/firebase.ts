@@ -533,18 +533,49 @@ export async function getExamsFromFirestore(forceRefresh = false): Promise<any[]
   return exams;
 }
 
+// Helper to sort students in their exact class roster order (1, 2, ..., 10 instead of 1, 10, 2)
+export function sortStudentsByRosterOrder<T extends { id?: string; sbd?: string; stt?: number }>(students: T[]): T[] {
+  return [...students].sort((a, b) => {
+    if (typeof a.stt === 'number' && typeof b.stt === 'number' && a.stt !== b.stt) {
+      return a.stt - b.stt;
+    }
+    const sbdMatchA = String(a.sbd || '').match(/(\d+)\s*$/);
+    const sbdMatchB = String(b.sbd || '').match(/(\d+)\s*$/);
+    if (sbdMatchA && sbdMatchB) {
+      const numA = parseInt(sbdMatchA[1], 10);
+      const numB = parseInt(sbdMatchB[1], 10);
+      if (numA !== numB) return numA - numB;
+    }
+    const idMatchA = String(a.id || '').match(/-(\d+)$/);
+    const idMatchB = String(b.id || '').match(/-(\d+)$/);
+    if (idMatchA && idMatchB) {
+      const idNumA = parseInt(idMatchA[1], 10);
+      const idNumB = parseInt(idMatchB[1], 10);
+      if (idNumA !== idNumB) return idNumA - idNumB;
+    }
+    return 0;
+  });
+}
+
 // 9. Save a single student or batch of students to Firestore
 export async function saveStudentsToFirestore(students: any[]): Promise<boolean> {
   if (!Array.isArray(students) || students.length === 0) return true;
   try {
+    // Track per-class index if stt not explicitly set
+    const classCounter: Record<string, number> = {};
     const promises = students.map((s) => {
       if (!s || !s.id) return Promise.resolve();
+      const clsKey = String(s.class || '').trim().toUpperCase();
+      classCounter[clsKey] = (classCounter[clsKey] || 0) + 1;
+      const sttVal = typeof s.stt === 'number' && s.stt > 0 ? s.stt : classCounter[clsKey];
+
       const docId = `st_${s.id}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
       const payload: Record<string, any> = {
         id: String(s.id),
         name: String(s.name || '').trim(),
         class: String(s.class || '').trim(),
         sbd: s.sbd ? String(s.sbd).trim() : '',
+        stt: sttVal,
         username: s.username ? String(s.username).trim() : '',
         password: s.password ? String(s.password).trim() : '',
         isPasswordChanged: Boolean(s.isPasswordChanged),
@@ -575,7 +606,9 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
   if (!forceRefresh) {
     if (cachedStudents && now - cachedStudents.timestamp < 300000) {
       if (!targetClass) return cachedStudents.list;
-      return cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+      return sortStudentsByRosterOrder(
+        cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass)
+      );
     }
     try {
       const ss = sessionStorage.getItem('ncv_fb_students');
@@ -584,13 +617,15 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
         if (parsed && Array.isArray(parsed.list) && now - parsed.timestamp < 300000) {
           cachedStudents = parsed;
           if (!targetClass) return parsed.list;
-          return parsed.list.filter((s: any) => String(s.class || '').trim().toUpperCase() === targetClass);
+          return sortStudentsByRosterOrder(
+            parsed.list.filter((s: any) => String(s.class || '').trim().toUpperCase() === targetClass)
+          );
         }
       }
     } catch (e) {}
   }
 
-  const list: any[] = [];
+  let list: any[] = [];
   try {
     const colRef = collection(firestore, 'students');
     const snap = await getDocs(colRef);
@@ -602,12 +637,14 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
           name: String(data.name),
           class: String(data.class),
           sbd: data.sbd ? String(data.sbd) : undefined,
+          stt: typeof data.stt === 'number' ? data.stt : undefined,
           username: data.username ? String(data.username) : undefined,
           password: data.password ? String(data.password) : undefined,
           isPasswordChanged: Boolean(data.isPasswordChanged)
         });
       }
     });
+    list = sortStudentsByRosterOrder(list);
     cachedStudents = { list, timestamp: now };
     try {
       sessionStorage.setItem('ncv_fb_students', JSON.stringify(cachedStudents));
@@ -616,12 +653,14 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
     console.warn('[Firebase] getStudentsFromFirestore error:', err);
     if (cachedStudents) {
       if (!targetClass) return cachedStudents.list;
-      return cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+      return sortStudentsByRosterOrder(
+        cachedStudents.list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass)
+      );
     }
   }
 
   if (!targetClass) return list;
-  return list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass);
+  return sortStudentsByRosterOrder(list.filter((s) => String(s.class || '').trim().toUpperCase() === targetClass));
 }
 
 // 11. Delete single student from Firestore

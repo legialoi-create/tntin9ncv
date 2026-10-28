@@ -148,31 +148,49 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
-      showReportNotice('success', 'Đã xuất bảng điểm Excel (.xlsx) thành công');
+      showReportNotice(
+        'success',
+        'Đã xuất tệp Excel (.xlsx) nhiều tab (mỗi lớp 1 tab riêng, đủ danh sách học sinh theo thứ tự lớp, để trống ô điểm HS chưa thi)'
+      );
     } catch (err: any) {
       showReportNotice('error', 'Lỗi xuất tệp Excel: ' + (err.message || 'Vui lòng kiểm tra lại'));
     }
   };
 
   const submissions = reportData?.submissions || [];
-  const filteredSubmissions = submissions
+  const rosterSubmissions =
+    Array.isArray(reportData?.rosterSubmissions) && reportData.rosterSubmissions.length > 0
+      ? reportData.rosterSubmissions
+      : submissions;
+
+  const filteredSubmissions = rosterSubmissions
     .filter((s: any) => {
       if (!s) return false;
       const cls = String(s.class || s.studentClass || '');
-      const matchClass = filterClass === 'ALL' || cls === filterClass;
+      const matchClass = filterClass === 'ALL' || cls.toUpperCase() === filterClass.toUpperCase();
       const nameStr = String(s.name || s.studentName || '').toLowerCase();
       const sbdStr = String(s.sbd || '').toLowerCase();
       const query = searchQuery.trim().toLowerCase();
       const matchSearch = !query || nameStr.includes(query) || sbdStr.includes(query);
 
+      const isParticipated =
+        s.hasParticipated !== false &&
+        s.status !== 'not_participated' &&
+        s.score !== null &&
+        s.score !== undefined &&
+        s.score !== '';
       const vCount = s.violationCount || 0;
       let matchViolation = true;
-      if (filterViolation === 'HAS_VIOLATION') {
-        matchViolation = vCount > 0;
+      if (filterViolation === 'SUBMITTED_ONLY') {
+        matchViolation = isParticipated;
+      } else if (filterViolation === 'NOT_PARTICIPATED') {
+        matchViolation = !isParticipated;
+      } else if (filterViolation === 'HAS_VIOLATION') {
+        matchViolation = isParticipated && vCount > 0;
       } else if (filterViolation === 'LOCKED') {
-        matchViolation = s.status === 'locked';
+        matchViolation = isParticipated && s.status === 'locked';
       } else if (filterViolation === 'NO_VIOLATION') {
-        matchViolation = vCount === 0 && s.status !== 'locked';
+        matchViolation = isParticipated && vCount === 0 && s.status !== 'locked';
       }
       return matchClass && matchSearch && matchViolation;
     })
@@ -188,7 +206,12 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   const totalViolationsInReport = reportData?.totalViolations ?? submissions.reduce((acc: number, s: any) => acc + (s.violationCount || 0), 0);
   const violatingStudentsCount = reportData?.violatingStudentsCount ?? submissions.filter((s: any) => (s.violationCount || 0) > 0).length;
 
-  const classList = Array.from(new Set(submissions.map((s: any) => String(s.class || s.studentClass || '')).filter(Boolean))) as string[];
+  const classList = Array.from(
+    new Set([
+      ...(Array.isArray(reportData?.targetClassList) ? reportData.targetClassList : []),
+      ...rosterSubmissions.map((s: any) => String(s.class || s.studentClass || '')).filter(Boolean)
+    ])
+  ) as string[];
 
   if (exams.length === 0) {
     return (
@@ -247,6 +270,7 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
           {/* Export Excel Button */}
           <button
             onClick={handleExportExcel}
+            title="Xuất tệp Excel (.xlsx) nhiều tab (mỗi lớp 1 tab), đủ học sinh theo thứ tự lớp, để trống ô điểm HS chưa thi"
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-200 flex items-center space-x-1.5 transition cursor-pointer"
           >
             <FileSpreadsheet className="w-4 h-4" />
@@ -489,10 +513,12 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
               onChange={(e) => setFilterViolation(e.target.value)}
               className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer font-medium"
             >
-              <option value="ALL">Tất cả vi phạm</option>
+              <option value="ALL">Đủ danh sách lớp (Cả HS chưa thi)</option>
+              <option value="SUBMITTED_ONLY">Chỉ học sinh đã dự thi</option>
+              <option value="NOT_PARTICIPATED">Học sinh chưa dự thi (Vắng)</option>
               <option value="HAS_VIOLATION">Có vi phạm (&gt; 0)</option>
               <option value="LOCKED">Bị khóa do vi phạm</option>
-              <option value="NO_VIOLATION">Không vi phạm (0)</option>
+              <option value="NO_VIOLATION">Đã thi &amp; Không vi phạm (0)</option>
             </select>
           </div>
         </div>
@@ -536,101 +562,128 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                   </td>
                 </tr>
               ) : (
-                filteredSubmissions.map((s: any, idx: number) => (
-                  <tr key={s.sessionId} className="hover:bg-slate-50/80 transition">
-                    <td className="py-3 px-4 text-center font-mono text-slate-500">
-                      {idx + 1}
-                    </td>
-                    <td className="py-3 px-4 font-bold text-slate-900">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span>{s.name}</span>
-                        {s.sbd && (
-                          <span className="text-[11px] text-slate-400 font-normal">
-                            ({s.sbd})
-                          </span>
-                        )}
-                        {s.status === 'locked' && (
-                          <span className="text-[10px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded border border-red-200">
-                            Bị khóa (vi phạm)
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 font-semibold text-slate-700">{s.class}</td>
-                    <td className="py-3 px-4 text-center">
-                      <button
-                        type="button"
-                        onClick={() => setViewingAttemptsStudent(s)}
-                        className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition cursor-pointer shadow-xs"
-                        title="Bấm để xem lịch sử điểm các lần làm bài"
-                      >
-                        <History className="w-3.5 h-3.5 text-indigo-500" />
-                        <span>{s.attemptCount || 1}/{s.maxAttempts || reportData?.maxAttempts || 1}</span>
-                      </button>
-                    </td>
-                    <td className="py-3 px-4 text-center font-bold text-emerald-600">
-                      {s.correctCount ?? 0}
-                    </td>
-                    <td className="py-3 px-4 text-center font-bold text-red-500">
-                      {s.incorrectCount ?? 0}
-                    </td>
-                    <td className="py-3 px-4 text-center">
-                      <span
-                        className={`inline-block px-3 py-1 rounded-full font-black text-xs shadow-xs ${
-                          (s.score ?? 0) >= 8.0
-                            ? 'bg-purple-100 text-purple-800 border border-purple-200'
-                            : (s.score ?? 0) >= 5.0
-                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                            : 'bg-red-100 text-red-800 border border-red-200'
-                        }`}
-                        title="Điểm cao nhất trong các lần thi"
-                      >
-                        {s.score ?? 0}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-center">
-                      {s.violationCount > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => setViewingViolationsStudent(s)}
-                          className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition cursor-pointer shadow-xs"
-                          title="Bấm để xem lịch sử vi phạm chi tiết"
-                        >
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                          <span>{s.violationCount} lần</span>
-                        </button>
-                      ) : (
-                        <span className="text-slate-400 font-medium">0</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-right text-slate-500 font-mono text-[11px]">
-                      {s.status === 'locked' ? (
-                        <div>
-                          <span className="text-red-600 font-bold">Bị khóa</span>
-                          {s.submittedAt && (
-                            <div className="text-[10px] text-slate-400">
-                              {new Date(s.submittedAt).toLocaleTimeString('vi-VN')} {new Date(s.submittedAt).toLocaleDateString('vi-VN')}
-                            </div>
+                filteredSubmissions.map((s: any, idx: number) => {
+                  const isParticipated =
+                    s.hasParticipated !== false &&
+                    s.status !== 'not_participated' &&
+                    s.score !== null &&
+                    s.score !== undefined &&
+                    s.score !== '';
+
+                  return (
+                    <tr
+                      key={s.sessionId || `${s.class}-${s.name}-${idx}`}
+                      className={`hover:bg-slate-50/80 transition ${!isParticipated ? 'bg-slate-50/30' : ''}`}
+                    >
+                      <td className="py-3 px-4 text-center font-mono text-slate-500">
+                        {filterClass !== 'ALL' && s.sttInClass ? s.sttInClass : idx + 1}
+                      </td>
+                      <td className="py-3 px-4 font-bold text-slate-900">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span>{s.name}</span>
+                          {s.sbd && (
+                            <span className="text-[11px] text-slate-400 font-normal">
+                              ({s.sbd})
+                            </span>
+                          )}
+                          {s.status === 'locked' && (
+                            <span className="text-[10px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded border border-red-200">
+                              Bị khóa (vi phạm)
+                            </span>
                           )}
                         </div>
-                      ) : s.submittedAt ? (
-                        new Date(s.submittedAt).toLocaleTimeString('vi-VN') + ' ' + new Date(s.submittedAt).toLocaleDateString('vi-VN')
-                      ) : (
-                        '-'
-                      )}
-                    </td>
-                    <td className="py-3 px-3 text-center">
-                      <button
-                        type="button"
-                        onClick={() => setSubmissionToDelete(s)}
-                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
-                        title={`Xóa vĩnh viễn bài thi của ${s.name}`}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))
+                      </td>
+                      <td className="py-3 px-4 font-semibold text-slate-700">{s.class}</td>
+                      <td className="py-3 px-4 text-center">
+                        {isParticipated ? (
+                          <button
+                            type="button"
+                            onClick={() => setViewingAttemptsStudent(s)}
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition cursor-pointer shadow-xs"
+                            title="Bấm để xem lịch sử điểm các lần làm bài"
+                          >
+                            <History className="w-3.5 h-3.5 text-indigo-500" />
+                            <span>{s.attemptCount || 1}/{s.maxAttempts || reportData?.maxAttempts || 1}</span>
+                          </button>
+                        ) : (
+                          <span className="text-slate-300"></span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center font-bold text-emerald-600">
+                        {isParticipated ? (s.correctCount ?? 0) : ''}
+                      </td>
+                      <td className="py-3 px-4 text-center font-bold text-red-500">
+                        {isParticipated ? (s.incorrectCount ?? 0) : ''}
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {isParticipated ? (
+                          <span
+                            className={`inline-block px-3 py-1 rounded-full font-black text-xs shadow-xs ${
+                              (s.score ?? 0) >= 8.0
+                                ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                : (s.score ?? 0) >= 5.0
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                : 'bg-red-100 text-red-800 border border-red-200'
+                            }`}
+                            title="Điểm cao nhất trong các lần thi"
+                          >
+                            {s.score ?? 0}
+                          </span>
+                        ) : (
+                          // Học sinh không tham gia thi -> để trống hoàn toàn ô Điểm
+                          <span className="inline-block min-w-[2.5rem] min-h-[1.5rem]" title="Học sinh chưa dự thi (để trống điểm)"></span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {!isParticipated ? (
+                          <span></span>
+                        ) : s.violationCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setViewingViolationsStudent(s)}
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition cursor-pointer shadow-xs"
+                            title="Bấm để xem lịch sử vi phạm chi tiết"
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                            <span>{s.violationCount} lần</span>
+                          </button>
+                        ) : (
+                          <span className="text-slate-400 font-medium">0</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-right text-slate-500 font-mono text-[11px]">
+                        {!isParticipated ? (
+                          <span className="text-slate-400 italic font-sans">Chưa dự thi</span>
+                        ) : s.status === 'locked' ? (
+                          <div>
+                            <span className="text-red-600 font-bold">Bị khóa</span>
+                            {s.submittedAt && (
+                              <div className="text-[10px] text-slate-400">
+                                {new Date(s.submittedAt).toLocaleTimeString('vi-VN')} {new Date(s.submittedAt).toLocaleDateString('vi-VN')}
+                              </div>
+                            )}
+                          </div>
+                        ) : s.submittedAt ? (
+                          new Date(s.submittedAt).toLocaleTimeString('vi-VN') + ' ' + new Date(s.submittedAt).toLocaleDateString('vi-VN')
+                        ) : (
+                          '-'
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        {isParticipated && (
+                          <button
+                            type="button"
+                            onClick={() => setSubmissionToDelete(s)}
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
+                            title={`Xóa vĩnh viễn bài thi của ${s.name}`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

@@ -2002,121 +2002,251 @@ app.get('/api/reports/:examId/export', requireTeacherAuth, (req: Request, res: R
   }
 
   const sessions = db.getSessions(exam.id);
+  const allClasses = db.getClasses();
+  const allStudents = db.getStudents();
 
-  // Prepare Excel worksheet data
-  const data: any[][] = [];
-
-  // Header banner
-  data.push(['TRƯỜNG THCS NAM CỬA VIỆT']);
-  data.push(['KẾT QUẢ BÀI KIỂM TRA TRẮC NGHIỆM TIN HỌC']);
-  data.push([`Bài kiểm tra: ${exam.title}`]);
-  data.push([`Mã đề: ${exam.code} | Khối: ${exam.grade} | Ngày xuất: ${new Date().toLocaleDateString('vi-VN')}`]);
-  data.push([`Giáo viên phụ trách: Lê Gia Lợi`]);
-  data.push([`Quy định làm bài: Tối đa ${exam.maxAttempts || 1} lần - Lấy điểm cao nhất trong các lần thi`]);
-  data.push([]); // Empty row
-
-  // Table header
-  data.push([
-    'STT',
-    'Họ và tên',
-    'Lớp',
-    'Số báo danh',
-    'Điểm cao nhất',
-    'Số lần đã làm',
-    'Chi tiết các lần thi',
-    'Số câu đúng',
-    'Số câu sai',
-    'Số câu chưa làm',
-    'Tổng vi phạm',
-    'Trạng thái',
-    'Thời gian nộp'
-  ]);
-
-  // Group by student
-  const studentMap = new Map<string, typeof sessions>();
+  // Group sessions by student (name:::class)
+  const studentSessionMap = new Map<string, typeof sessions>();
   for (const s of sessions) {
     const key = `${s.studentName.trim().toLowerCase()}:::${s.studentClass.trim().toLowerCase()}`;
-    if (!studentMap.has(key)) {
-      studentMap.set(key, []);
+    if (!studentSessionMap.has(key)) {
+      studentSessionMap.set(key, []);
     }
-    studentMap.get(key)!.push(s);
+    studentSessionMap.get(key)!.push(s);
   }
 
-  let sttIdx = 1;
-  studentMap.forEach((userSessions) => {
-    userSessions.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
-
-    let bestSession = userSessions[0];
-    let maxSc = -1;
-    for (const s of userSessions) {
-      const sc = s.score ?? 0;
-      if (sc > maxSc) {
-        maxSc = sc;
-        bestSession = s;
-      }
+  // Determine target classes for this exam
+  const normClass = (c: any) => String(c || '').trim().toUpperCase();
+  const classSet = new Map<string, string>();
+  const addClassCandidate = (cName: any) => {
+    const raw = String(cName || '').trim();
+    const upper = raw.toUpperCase();
+    if (!upper || upper === 'ALL' || upper === 'TẤT CẢ') return;
+    if (!classSet.has(upper)) {
+      classSet.set(upper, raw);
     }
+  };
 
-    const totalStudentViolations = userSessions.reduce((acc, s) => {
-      const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
-      return acc + v;
-    }, 0);
-
-    const attemptsHistoryStr = userSessions.map((s, idx) => {
-      const attNum = s.attemptNumber || (idx + 1);
-      return `Lần ${attNum}: ${s.score ?? 0}đ`;
-    }).join('; ');
-
-    const statusText =
-      bestSession.status === 'submitted'
-        ? (totalStudentViolations > 0 ? `Đã nộp (${totalStudentViolations} vi phạm)` : 'Đã nộp bài')
-        : bestSession.status === 'locked'
-        ? `Bị khóa (${totalStudentViolations} vi phạm)`
-        : 'Đang làm';
-
-    const submittedDate = bestSession.submittedAt
-      ? new Date(bestSession.submittedAt).toLocaleString('vi-VN')
-      : bestSession.status === 'locked'
-      ? `Bị khóa (${new Date(bestSession.lastHeartbeat || bestSession.startedAt).toLocaleString('vi-VN')})`
-      : 'Chưa nộp';
-
-    data.push([
-      sttIdx++,
-      bestSession.studentName,
-      bestSession.studentClass,
-      bestSession.sbd || '',
-      maxSc,
-      `${userSessions.length}/${exam.maxAttempts || 1}`,
-      attemptsHistoryStr,
-      bestSession.correctCount ?? 0,
-      bestSession.incorrectCount ?? 0,
-      bestSession.unansweredCount ?? 0,
-      totalStudentViolations,
-      statusText,
-      submittedDate
-    ]);
+  const explicitTargets = (exam.targetClasses || []).filter((c) => {
+    const u = normClass(c);
+    return u && u !== 'ALL' && u !== 'TẤT CẢ';
   });
+  explicitTargets.forEach(addClassCandidate);
+
+  if (explicitTargets.length === 0 && exam.grade) {
+    const gradeStr = String(exam.grade);
+    allClasses.forEach((c) => {
+      if (Number(c.grade) === Number(exam.grade) || normClass(c.name).startsWith(gradeStr)) {
+        addClassCandidate(c.name);
+      }
+    });
+    allStudents.forEach((st) => {
+      if (normClass(st.class).startsWith(gradeStr)) {
+        addClassCandidate(st.class);
+      }
+    });
+  }
+
+  sessions.forEach((s) => addClassCandidate(s.studentClass));
+
+  if (classSet.size === 0) {
+    allClasses.forEach((c) => addClassCandidate(c.name));
+    allStudents.forEach((st) => addClassCandidate(st.class));
+  }
+
+  const targetClassList = Array.from(classSet.values()).sort((a, b) =>
+    a.localeCompare(b, 'vi', { numeric: true })
+  );
+
+  const sortRoster = (list: typeof allStudents) => {
+    return [...list].sort((a: any, b: any) => {
+      if (typeof a.stt === 'number' && typeof b.stt === 'number' && a.stt !== b.stt) {
+        return a.stt - b.stt;
+      }
+      const sbdMatchA = String(a.sbd || '').match(/(\d+)\s*$/);
+      const sbdMatchB = String(b.sbd || '').match(/(\d+)\s*$/);
+      if (sbdMatchA && sbdMatchB) {
+        const numA = parseInt(sbdMatchA[1], 10);
+        const numB = parseInt(sbdMatchB[1], 10);
+        if (numA !== numB) return numA - numB;
+      }
+      const idMatchA = String(a.id || '').match(/-(\d+)$/);
+      const idMatchB = String(b.id || '').match(/-(\d+)$/);
+      if (idMatchA && idMatchB) {
+        const idNumA = parseInt(idMatchA[1], 10);
+        const idNumB = parseInt(idMatchB[1], 10);
+        if (idNumA !== idNumB) return idNumA - idNumB;
+      }
+      return 0;
+    });
+  };
 
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(data);
-
-  // Set column widths
-  ws['!cols'] = [
+  const usedSheetNames = new Set<string>();
+  const colWidths = [
     { wch: 6 },  // STT
-    { wch: 25 }, // Họ và tên
-    { wch: 10 }, // Lớp
     { wch: 14 }, // SBD
-    { wch: 14 }, // Điểm cao nhất
-    { wch: 14 }, // Số lần làm
-    { wch: 28 }, // Chi tiết các lần
-    { wch: 12 }, // Đúng
-    { wch: 12 }, // Sai
-    { wch: 14 }, // Chưa làm
-    { wch: 14 }, // Vi phạm
-    { wch: 18 }, // Trạng thái
-    { wch: 22 }  // Ngày nộp
+    { wch: 28 }, // Họ và tên
+    { wch: 10 }, // Lớp
+    { wch: 12 }, // Điểm
+    { wch: 14 }, // Số lần đã làm
+    { wch: 13 }, // Số câu đúng
+    { wch: 13 }, // Số câu sai
+    { wch: 15 }, // Số câu chưa làm
+    { wch: 14 }, // Tổng vi phạm
+    { wch: 16 }, // Trạng thái
+    { wch: 22 }  // Thời gian nộp
   ];
 
-  XLSX.utils.book_append_sheet(wb, ws, 'BangDiem');
+  for (const clsName of targetClassList) {
+    const upperCls = normClass(clsName);
+    const classStudents = sortRoster(
+      allStudents.filter((s) => normClass(s.class) === upperCls)
+    );
+    const usedStudentKeys = new Set<string>();
+    const rowsData: any[][] = [];
+    let participatedCount = 0;
+
+    classStudents.forEach((st, idx) => {
+      const key = `${st.name.trim().toLowerCase()}:::${upperCls.toLowerCase()}`;
+      const userSessions = studentSessionMap.get(key);
+      if (userSessions && userSessions.length > 0) {
+        usedStudentKeys.add(key);
+        participatedCount++;
+        userSessions.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+
+        let bestSession = userSessions[0];
+        let maxSc = -1;
+        for (const s of userSessions) {
+          const sc = s.score ?? 0;
+          if (sc > maxSc) {
+            maxSc = sc;
+            bestSession = s;
+          }
+        }
+
+        const totalStudentViolations = userSessions.reduce((acc, s) => {
+          const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
+          return acc + v;
+        }, 0);
+
+        const statusText = bestSession.status === 'locked' ? 'Bị khóa' : 'Đã hoàn thành';
+        const submittedDate = bestSession.submittedAt
+          ? new Date(bestSession.submittedAt).toLocaleString('vi-VN')
+          : '';
+
+        rowsData.push([
+          idx + 1,
+          st.sbd || bestSession.sbd || '',
+          st.name,
+          st.class || clsName,
+          maxSc,
+          userSessions.length,
+          bestSession.correctCount ?? 0,
+          bestSession.incorrectCount ?? 0,
+          bestSession.unansweredCount ?? 0,
+          totalStudentViolations,
+          statusText,
+          submittedDate
+        ]);
+      } else {
+        // Học sinh trong danh sách lớp không tham gia thi -> để trống ô Điểm ('')
+        rowsData.push([
+          idx + 1,
+          st.sbd || '',
+          st.name,
+          st.class || clsName,
+          '',
+          '',
+          '',
+          '',
+          '',
+          '',
+          'Chưa dự thi',
+          ''
+        ]);
+      }
+    });
+
+    // Append any extra student who submitted under this class but wasn't in the static roster
+    studentSessionMap.forEach((userSessions, key) => {
+      const [, sClsLower] = key.split(':::');
+      if (sClsLower === upperCls.toLowerCase() && !usedStudentKeys.has(key)) {
+        usedStudentKeys.add(key);
+        participatedCount++;
+        userSessions.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+        let bestSession = userSessions[0];
+        let maxSc = -1;
+        for (const s of userSessions) {
+          const sc = s.score ?? 0;
+          if (sc > maxSc) {
+            maxSc = sc;
+            bestSession = s;
+          }
+        }
+        const totalStudentViolations = userSessions.reduce((acc, s) => {
+          const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
+          return acc + v;
+        }, 0);
+        rowsData.push([
+          rowsData.length + 1,
+          bestSession.sbd || '',
+          bestSession.studentName,
+          bestSession.studentClass || clsName,
+          maxSc,
+          userSessions.length,
+          bestSession.correctCount ?? 0,
+          bestSession.incorrectCount ?? 0,
+          bestSession.unansweredCount ?? 0,
+          totalStudentViolations,
+          bestSession.status === 'locked' ? 'Bị khóa' : 'Đã hoàn thành',
+          bestSession.submittedAt ? new Date(bestSession.submittedAt).toLocaleString('vi-VN') : ''
+        ]);
+      }
+    });
+
+    const totalInClass = rowsData.length;
+    const absentCount = Math.max(0, totalInClass - participatedCount);
+
+    const data: any[][] = [];
+    data.push(['TRƯỜNG THCS NAM CỬA VIỆT']);
+    data.push([`BẢNG ĐIỂM KIỂM TRA MÔN TIN HỌC - LỚP ${clsName}`]);
+    data.push([`Bài kiểm tra: ${exam.title}`]);
+    data.push([`Mã đề: ${exam.code} | Khối: ${exam.grade} | Ngày xuất: ${new Date().toLocaleDateString('vi-VN')}`]);
+    data.push([`Giáo viên phụ trách: Lê Gia Lợi | Sĩ số: ${totalInClass} HS | Đã dự thi: ${participatedCount} HS | Chưa thi: ${absentCount} HS`]);
+    data.push([`Quy định: Danh sách xếp đúng thứ tự học sinh trong lớp. Học sinh không tham gia thi để trống ô Điểm.`]);
+    data.push([]);
+    data.push([
+      'STT',
+      'Số báo danh',
+      'Họ và tên',
+      'Lớp',
+      'Điểm',
+      'Số lần đã làm',
+      'Số câu đúng',
+      'Số câu sai',
+      'Số câu chưa làm',
+      'Tổng vi phạm',
+      'Trạng thái',
+      'Thời gian nộp'
+    ]);
+    data.push(...rowsData);
+
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws['!cols'] = colWidths;
+
+    const cleanCls = String(clsName).replace(/[\\/?*[\]:]/g, '').trim();
+    let tabName = cleanCls.toUpperCase().startsWith('LỚP') ? cleanCls : `Lớp ${cleanCls}`;
+    if (tabName.length > 31) tabName = tabName.slice(0, 31);
+    let uniqueTabName = tabName;
+    let suffix = 2;
+    while (usedSheetNames.has(uniqueTabName.toUpperCase())) {
+      const sfx = ` (${suffix++})`;
+      uniqueTabName = tabName.slice(0, 31 - sfx.length) + sfx;
+    }
+    usedSheetNames.add(uniqueTabName.toUpperCase());
+    XLSX.utils.book_append_sheet(wb, ws, uniqueTabName);
+  }
 
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   const filename = `KetQua_${exam.code}_THCS_NamCuaViet.xlsx`;

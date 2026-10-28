@@ -22,7 +22,8 @@ import {
   recordDeletedClassInFirestore,
   getDeletedClassesFromFirestore,
   unmarkDeletedClassInFirestore,
-  deleteSingleSubmissionFromFirestore
+  deleteSingleSubmissionFromFirestore,
+  sortStudentsByRosterOrder
 } from './firebase';
 import { parseExamLocally } from '../utils/localExamParser';
 
@@ -1063,7 +1064,22 @@ export const api = {
     let merged = Array.from(studentMap.values()).filter((s) => !deletedStudentIdsSet.has(String(s.id).trim()));
     if (className) {
       const targetCls = className.trim().toUpperCase();
-      merged = merged.filter((s) => (s.class || '').trim().toUpperCase() === targetCls);
+      merged = sortStudentsByRosterOrder(
+        merged.filter((s) => (s.class || '').trim().toUpperCase() === targetCls)
+      );
+    } else {
+      // Group by class and sort each class in exact roster order
+      const byClass = new Map<string, StudentInfo[]>();
+      merged.forEach((s) => {
+        const clsKey = (s.class || '').trim().toUpperCase();
+        if (!byClass.has(clsKey)) byClass.set(clsKey, []);
+        byClass.get(clsKey)!.push(s);
+      });
+      const orderedAll: StudentInfo[] = [];
+      byClass.forEach((clsList) => {
+        orderedAll.push(...sortStudentsByRosterOrder(clsList));
+      });
+      merged = orderedAll;
     }
 
     // Cache updated list in localStorage
@@ -1166,14 +1182,19 @@ export const api = {
       } catch (e) {}
     }
 
+    const stampedStudents = students.map((s, idx) => ({
+      ...s,
+      stt: idx + 1,
+    }));
+
     const filtered = all.filter((s) => (s.class || '').trim().toUpperCase() !== trimmedClass);
-    const updated = [...filtered, ...students];
+    const updated = [...filtered, ...stampedStudents];
     localStorage.setItem('ncv_students_data', JSON.stringify(updated));
 
     // Save to Firebase Firestore immediately
     try {
       await deleteClassStudentsFromFirestore(className);
-      await saveStudentsToFirestore(students);
+      await saveStudentsToFirestore(stampedStudents);
     } catch (e) {
       console.warn('[Firebase] saveClassStudents warning:', e);
     }
@@ -2602,6 +2623,143 @@ export const api = {
       { range: '8.0 - 10', count: scores.filter(s => s >= 8.0).length }
     ];
 
+    // 7. Build full class rosters in exact class list order (including non-participating students with blank score)
+    const [allClasses, allStudents] = await Promise.all([
+      api.getClasses().catch(() => [] as ClassInfo[]),
+      api.getStudents().catch(() => [] as StudentInfo[])
+    ]);
+
+    const normClass = (c: any) => String(c || '').trim().toUpperCase();
+    const classSet = new Map<string, string>(); // UPPER -> display class name
+    const addClassCandidate = (cName: any) => {
+      const raw = String(cName || '').trim();
+      const upper = raw.toUpperCase();
+      if (!upper || upper === 'ALL' || upper === 'TẤT CẢ') return;
+      if (!classSet.has(upper)) {
+        classSet.set(upper, raw);
+      }
+    };
+
+    // Priority 1: Explicit targetClasses on the exam
+    const explicitTargets = (examObj?.targetClasses || []).filter((c) => {
+      const u = normClass(c);
+      return u && u !== 'ALL' && u !== 'TẤT CẢ';
+    });
+    explicitTargets.forEach(addClassCandidate);
+
+    // Priority 2: If no explicit targetClasses, include all classes matching exam's grade
+    if (explicitTargets.length === 0 && examObj?.grade) {
+      const gradeStr = String(examObj.grade);
+      allClasses.forEach((c) => {
+        if (Number(c.grade) === Number(examObj?.grade) || normClass(c.name).startsWith(gradeStr)) {
+          addClassCandidate(c.name);
+        }
+      });
+      allStudents.forEach((st) => {
+        if (normClass(st.class).startsWith(gradeStr)) {
+          addClassCandidate(st.class);
+        }
+      });
+    }
+
+    // Priority 3: Also include any class that actually has submissions for this exam
+    combinedSubmissions.forEach((sub) => {
+      addClassCandidate(sub.class || sub.studentClass);
+    });
+
+    // Priority 4: Fallback if still empty -> use all classes that have students
+    if (classSet.size === 0) {
+      allClasses.forEach((c) => addClassCandidate(c.name));
+      allStudents.forEach((st) => addClassCandidate(st.class));
+    }
+
+    const targetClassList = Array.from(classSet.values()).sort((a, b) =>
+      a.localeCompare(b, 'vi', { numeric: true })
+    );
+
+    const rosterSubmissions: any[] = [];
+    const rosterByClass: Record<string, any[]> = {};
+
+    for (const clsName of targetClassList) {
+      const upperCls = normClass(clsName);
+      const classStudents = sortStudentsByRosterOrder(
+        allStudents.filter((s) => normClass(s.class) === upperCls)
+      );
+      const classSubs = combinedSubmissions.filter(
+        (sub) => normClass(sub.class || sub.studentClass) === upperCls
+      );
+      const usedSubKeys = new Set<string>();
+      const rowsForThisClass: any[] = [];
+
+      classStudents.forEach((st, idx) => {
+        const stNameNorm = String(st.name || '').trim().toLowerCase();
+        const stSbdNorm = String(st.sbd || '').trim().toLowerCase();
+
+        const matchedSub = classSubs.find((sub) => {
+          const subKey = String(sub.sessionId || `${sub.name}_${sub.class}`);
+          if (usedSubKeys.has(subKey)) return false;
+          const subNameNorm = String(sub.name || sub.studentName || '').trim().toLowerCase();
+          const subSbdNorm = String(sub.sbd || '').trim().toLowerCase();
+          if (stNameNorm && subNameNorm === stNameNorm) return true;
+          if (stSbdNorm && subSbdNorm && subSbdNorm === stSbdNorm) return true;
+          return false;
+        });
+
+        if (matchedSub) {
+          const subKey = String(matchedSub.sessionId || `${matchedSub.name}_${matchedSub.class}`);
+          usedSubKeys.add(subKey);
+          rowsForThisClass.push({
+            ...matchedSub,
+            sttInClass: idx + 1,
+            name: st.name,
+            studentName: st.name,
+            class: st.class || clsName,
+            studentClass: st.class || clsName,
+            sbd: st.sbd || matchedSub.sbd || '',
+            hasParticipated: true
+          });
+        } else {
+          rowsForThisClass.push({
+            sessionId: `no-sub-${st.id || `${upperCls}-${idx + 1}`}`,
+            studentId: st.id,
+            sttInClass: idx + 1,
+            name: st.name,
+            studentName: st.name,
+            class: st.class || clsName,
+            studentClass: st.class || clsName,
+            sbd: st.sbd || '',
+            score: null,
+            bestScore: null,
+            attemptCount: 0,
+            attemptNumber: 0,
+            correctCount: null,
+            incorrectCount: null,
+            unansweredCount: null,
+            violationCount: 0,
+            status: 'not_participated',
+            submittedAt: '',
+            hasParticipated: false
+          });
+        }
+      });
+
+      // Append any student who took the exam in this class but wasn't in the static roster
+      classSubs.forEach((sub) => {
+        const subKey = String(sub.sessionId || `${sub.name}_${sub.class}`);
+        if (!usedSubKeys.has(subKey)) {
+          usedSubKeys.add(subKey);
+          rowsForThisClass.push({
+            ...sub,
+            sttInClass: rowsForThisClass.length + 1,
+            hasParticipated: true
+          });
+        }
+      });
+
+      rosterByClass[clsName] = rowsForThisClass;
+      rosterSubmissions.push(...rowsForThisClass);
+    }
+
     const mergedReport: any = {
       examId: resolvedId,
       examCode: resolvedCode,
@@ -2619,7 +2777,10 @@ export const api = {
       questionAnalysis: serverData?.questionAnalysis || [],
       classBreakdown: serverData?.classBreakdown || {},
       questionStats: serverData?.questionStats || [],
-      submissions: combinedSubmissions
+      submissions: combinedSubmissions,
+      rosterSubmissions,
+      rosterByClass,
+      targetClassList
     };
 
     try {
@@ -2647,62 +2808,133 @@ export const api = {
   },
 
   exportExcelReport: async (examId: string): Promise<Blob> => {
-    try {
-      const res = await fetch(`/api/reports/${encodeURIComponent(examId)}/export`, {
-        headers: getHeaders(true),
-      });
-      if (res.ok) {
-        return await res.blob();
-      }
-    } catch (e) {}
-
-    // Resilient client-side fallback: generate Excel using xlsx library directly from report data
+    // Generate multi-tab Excel (.xlsx) directly from full merged report + class rosters
     const reportData = (await api.getExamReports(examId)) as any;
-    const submissions = reportData?.submissions || [];
+    const rosterByClass: Record<string, any[]> = reportData?.rosterByClass || {};
+    const targetClassList: string[] = Array.isArray(reportData?.targetClassList) && reportData.targetClassList.length > 0
+      ? reportData.targetClassList
+      : Object.keys(rosterByClass);
 
-    const data: any[][] = [];
-    data.push(['TRƯỜNG THCS NAM CỬA VIỆT']);
-    data.push(['KẾT QUẢ BÀI KIỂM TRA TRẮC NGHIỆM TIN HỌC']);
-    data.push([`Bài kiểm tra: ${reportData?.examTitle || 'Tin học'}`]);
-    data.push([`Mã đề: ${reportData?.examCode || examId} | Ngày xuất: ${new Date().toLocaleDateString('vi-VN')}`]);
-    data.push([`Giáo viên phụ trách: Lê Gia Lợi`]);
-    data.push([`Quy định làm bài: Lấy điểm cao nhất trong các lần thi`]);
-    data.push([]);
-    data.push([
-      'STT',
-      'Họ và tên',
-      'Lớp',
-      'Số báo danh',
-      'Điểm cao nhất',
-      'Số lần đã làm',
-      'Số câu đúng',
-      'Số câu sai',
-      'Số câu chưa làm',
-      'Tổng vi phạm',
-      'Trạng thái',
-      'Thời gian nộp'
-    ]);
-
-    submissions.forEach((s: any, idx: number) => {
-      data.push([
-        idx + 1,
-        s.name || s.studentName,
-        s.class || s.studentClass,
-        s.sbd || '',
-        s.score ?? 0,
-        s.attemptCount || s.attemptNumber || 1,
-        s.correctCount ?? 0,
-        s.incorrectCount ?? 0,
-        s.unansweredCount ?? 0,
-        s.violationCount ?? 0,
-        s.status === 'locked' ? 'Bị khóa' : 'Đã hoàn thành',
-        s.submittedAt ? new Date(s.submittedAt).toLocaleString('vi-VN') : ''
-      ]);
-    });
-
-    const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'KetQuaThi');
+    const usedSheetNames = new Set<string>();
+
+    const buildSheetRows = (clsLabel: string, rows: any[]): any[][] => {
+      const totalInClass = rows.length;
+      const participatedCount = rows.filter(
+        (r) => r.hasParticipated !== false && r.status !== 'not_participated' && r.score !== null && r.score !== undefined && r.score !== ''
+      ).length;
+      const absentCount = Math.max(0, totalInClass - participatedCount);
+
+      const sheetData: any[][] = [];
+      sheetData.push(['TRƯỜNG THCS NAM CỬA VIỆT']);
+      sheetData.push([`BẢNG ĐIỂM KIỂM TRA MÔN TIN HỌC - LỚP ${clsLabel}`]);
+      sheetData.push([`Bài kiểm tra: ${reportData?.examTitle || 'Tin học'}`]);
+      sheetData.push([`Mã đề: ${reportData?.examCode || examId} | Ngày xuất: ${new Date().toLocaleDateString('vi-VN')}`]);
+      sheetData.push([`Giáo viên phụ trách: Lê Gia Lợi | Sĩ số: ${totalInClass} HS | Đã dự thi: ${participatedCount} HS | Chưa thi: ${absentCount} HS`]);
+      sheetData.push([`Quy định: Danh sách xếp đúng thứ tự học sinh trong lớp. Học sinh không tham gia thi để trống ô Điểm.`]);
+      sheetData.push([]);
+      sheetData.push([
+        'STT',
+        'Số báo danh',
+        'Họ và tên',
+        'Lớp',
+        'Điểm',
+        'Số lần đã làm',
+        'Số câu đúng',
+        'Số câu sai',
+        'Số câu chưa làm',
+        'Tổng vi phạm',
+        'Trạng thái',
+        'Thời gian nộp'
+      ]);
+
+      rows.forEach((s: any, idx: number) => {
+        const hasParticipated =
+          s.hasParticipated !== false &&
+          s.status !== 'not_participated' &&
+          s.score !== null &&
+          s.score !== undefined &&
+          s.score !== '';
+
+        if (hasParticipated) {
+          sheetData.push([
+            idx + 1,
+            s.sbd || '',
+            s.name || s.studentName || '',
+            s.class || s.studentClass || clsLabel,
+            Number(s.score ?? s.bestScore ?? 0),
+            s.attemptCount || s.attemptNumber || 1,
+            s.correctCount ?? 0,
+            s.incorrectCount ?? 0,
+            s.unansweredCount ?? 0,
+            s.violationCount ?? 0,
+            s.status === 'locked' ? 'Bị khóa' : 'Đã hoàn thành',
+            s.submittedAt ? new Date(s.submittedAt).toLocaleString('vi-VN') : ''
+          ]);
+        } else {
+          // Học sinh không tham gia thi -> Ô Điểm để trống hoàn toàn ('')
+          sheetData.push([
+            idx + 1,
+            s.sbd || '',
+            s.name || s.studentName || '',
+            s.class || s.studentClass || clsLabel,
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            'Chưa dự thi',
+            ''
+          ]);
+        }
+      });
+
+      return sheetData;
+    };
+
+    const colWidths = [
+      { wch: 6 },  // STT
+      { wch: 14 }, // SBD
+      { wch: 28 }, // Họ và tên
+      { wch: 10 }, // Lớp
+      { wch: 12 }, // Điểm
+      { wch: 14 }, // Số lần đã làm
+      { wch: 13 }, // Số câu đúng
+      { wch: 13 }, // Số câu sai
+      { wch: 15 }, // Số câu chưa làm
+      { wch: 14 }, // Tổng vi phạm
+      { wch: 16 }, // Trạng thái
+      { wch: 22 }  // Thời gian nộp
+    ];
+
+    if (targetClassList.length > 0) {
+      for (const clsName of targetClassList) {
+        const rows = rosterByClass[clsName] || [];
+        const sheetData = buildSheetRows(clsName, rows);
+        const ws = XLSX.utils.aoa_to_sheet(sheetData);
+        ws['!cols'] = colWidths;
+
+        const cleanCls = String(clsName).replace(/[\\/?*[\]:]/g, '').trim();
+        let tabName = cleanCls.toUpperCase().startsWith('LỚP') ? cleanCls : `Lớp ${cleanCls}`;
+        if (tabName.length > 31) tabName = tabName.slice(0, 31);
+        let uniqueTabName = tabName;
+        let suffix = 2;
+        while (usedSheetNames.has(uniqueTabName.toUpperCase())) {
+          const sfx = ` (${suffix++})`;
+          uniqueTabName = tabName.slice(0, 31 - sfx.length) + sfx;
+        }
+        usedSheetNames.add(uniqueTabName.toUpperCase());
+        XLSX.utils.book_append_sheet(wb, ws, uniqueTabName);
+      }
+    } else {
+      const fallbackRows = reportData?.submissions || [];
+      const sheetData = buildSheetRows('Tất cả', fallbackRows);
+      const ws = XLSX.utils.aoa_to_sheet(sheetData);
+      ws['!cols'] = colWidths;
+      XLSX.utils.book_append_sheet(wb, ws, 'BangDiem');
+    }
+
     const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     return new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   },
