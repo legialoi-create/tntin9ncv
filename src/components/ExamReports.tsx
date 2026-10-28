@@ -403,6 +403,258 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
         </div>
       )}
 
+      {/* Detailed Student Submissions Table - EXACT USER REQUIREMENTS */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
+              Bảng kết quả học sinh ({filteredSubmissions.length} bài)
+            </h3>
+
+            {/* Ô tìm & menu thả chọn kì thi trực tiếp tại bảng */}
+            <ExamSearchDropdown
+              exams={exams}
+              currentExamId={currentExamId}
+              onSelectExam={(id) => {
+                setCurrentExamId(id);
+                setFilterClass('ALL');
+              }}
+              size="sm"
+              label="Kỳ thi:"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs">
+            <div className="relative w-44 sm:w-48">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Tìm họ tên hoặc SBD..."
+                className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none"
+              />
+            </div>
+
+            <select
+              value={filterClass}
+              onChange={(e) => setFilterClass(e.target.value)}
+              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer"
+            >
+              <option value="ALL">Tất cả lớp</option>
+              {classList.map((c) => (
+                <option key={c} value={c}>
+                  Lớp {c}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={filterViolation}
+              onChange={(e) => setFilterViolation(e.target.value)}
+              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer font-medium"
+            >
+              <option value="ALL">Đủ danh sách lớp (Cả HS chưa thi)</option>
+              <option value="SUBMITTED_ONLY">Chỉ học sinh đã dự thi</option>
+              <option value="NOT_PARTICIPATED">Học sinh chưa dự thi (Vắng)</option>
+              <option value="HAS_VIOLATION">Có vi phạm (&gt; 0)</option>
+              <option value="LOCKED">Bị khóa do vi phạm</option>
+              <option value="NO_VIOLATION">Đã thi &amp; Không vi phạm (0)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="bg-slate-50 text-slate-700 font-bold uppercase tracking-wider border-b border-slate-200">
+              <tr>
+                <th className="py-3 px-4 w-12 text-center">STT</th>
+                <th className="py-3 px-4">Họ và tên</th>
+                <th className="py-3 px-4">Lớp</th>
+                <th className="py-3 px-4 text-center">Lượt làm</th>
+                <th className="py-3 px-4 text-center">Đúng</th>
+                <th className="py-3 px-4 text-center">Sai</th>
+                <th className="py-3 px-4 text-center text-indigo-700">Điểm cao nhất ⭐</th>
+                <th
+                  onClick={() => setSortByViolation(prev => prev === 'desc' ? 'asc' : prev === 'asc' ? 'none' : 'desc')}
+                  className="py-3 px-4 text-center cursor-pointer select-none group hover:bg-slate-100 transition"
+                  title="Bấm để sắp xếp theo số lần vi phạm"
+                >
+                  <div className="flex items-center justify-center space-x-1">
+                    <span>Vi phạm</span>
+                    {sortByViolation === 'desc' ? (
+                      <span className="text-[11px] text-amber-600 font-black">↓</span>
+                    ) : sortByViolation === 'asc' ? (
+                      <span className="text-[11px] text-amber-600 font-black">↑</span>
+                    ) : (
+                      <span className="text-[10px] text-slate-300 group-hover:text-slate-400">↕</span>
+                    )}
+                  </div>
+                </th>
+                <th className="py-3 px-4 text-right">Thời gian nộp</th>
+                <th className="py-3 px-3 text-center w-24">Thao tác</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredSubmissions.length === 0 ? (
+                <tr>
+                  <td colSpan={10} className="py-10 text-center text-slate-400">
+                    Chưa có bài thi nào phù hợp với bộ lọc
+                  </td>
+                </tr>
+              ) : (
+                filteredSubmissions.map((s: any, idx: number) => {
+                  const isParticipated =
+                    s.hasParticipated !== false &&
+                    s.status !== 'not_participated' &&
+                    s.score !== null &&
+                    s.score !== undefined &&
+                    s.score !== '';
+
+                  return (
+                    <tr
+                      key={s.sessionId || `${s.class}-${s.name}-${idx}`}
+                      className={`hover:bg-slate-50/80 transition ${!isParticipated ? 'bg-slate-50/30' : ''}`}
+                    >
+                      <td className="py-3 px-4 text-center font-mono text-slate-500">
+                        {filterClass !== 'ALL' && s.sttInClass ? s.sttInClass : idx + 1}
+                      </td>
+                      <td className="py-3 px-4 font-bold text-slate-900">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span>{s.name}</span>
+                          {s.sbd && (
+                            <span className="text-[11px] text-slate-400 font-normal">
+                              ({s.sbd})
+                            </span>
+                          )}
+                          {s.status === 'locked' && (
+                            <span className="text-[10px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded border border-red-200">
+                              Bị khóa (vi phạm)
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 font-semibold text-slate-700">{s.class}</td>
+                      <td className="py-3 px-4 text-center">
+                        {isParticipated ? (
+                          <button
+                            type="button"
+                            onClick={() => setViewingAttemptsStudent(s)}
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition cursor-pointer shadow-xs"
+                            title="Bấm để xem lịch sử điểm các lần làm bài"
+                          >
+                            <History className="w-3.5 h-3.5 text-indigo-500" />
+                            <span>{s.attemptCount || 1}/{s.maxAttempts || reportData?.maxAttempts || 1}</span>
+                          </button>
+                        ) : (
+                          <span className="text-slate-300"></span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center font-bold text-emerald-600">
+                        {isParticipated ? (s.correctCount ?? 0) : ''}
+                      </td>
+                      <td className="py-3 px-4 text-center font-bold text-red-500">
+                        {isParticipated ? (s.incorrectCount ?? 0) : ''}
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {isParticipated ? (
+                          <div className="inline-flex items-center space-x-1">
+                            <span
+                              className={`inline-block px-3 py-1 rounded-full font-black text-xs shadow-xs ${
+                                (s.score ?? 0) >= 8.0
+                                  ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                  : (s.score ?? 0) >= 5.0
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : 'bg-red-100 text-red-800 border border-red-200'
+                              }`}
+                              title="Điểm cao nhất trong các lần thi"
+                            >
+                              {s.score ?? 0}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openEditScoreModal(s)}
+                              className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                              title={`Chỉnh sửa / Khôi phục điểm cho học sinh ${s.name}`}
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          // Học sinh không tham gia thi -> để trống hoàn toàn ô Điểm
+                          <span className="inline-block min-w-[2.5rem] min-h-[1.5rem]" title="Học sinh chưa dự thi (để trống điểm)"></span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {!isParticipated ? (
+                          <span></span>
+                        ) : s.violationCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setViewingViolationsStudent(s)}
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition cursor-pointer shadow-xs"
+                            title="Bấm để xem lịch sử vi phạm chi tiết"
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                            <span>{s.violationCount} lần</span>
+                          </button>
+                        ) : (
+                          <span className="text-slate-400 font-medium">0</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-right text-slate-500 font-mono text-[11px]">
+                        {!isParticipated ? (
+                          <span className="text-slate-400 italic font-sans">Chưa dự thi</span>
+                        ) : s.status === 'locked' ? (
+                          <div>
+                            <span className="text-red-600 font-bold">Bị khóa</span>
+                            {s.submittedAt && (
+                              <div className="text-[10px] text-slate-400">
+                                {new Date(s.submittedAt).toLocaleTimeString('vi-VN')} {new Date(s.submittedAt).toLocaleDateString('vi-VN')}
+                              </div>
+                            )}
+                          </div>
+                        ) : s.submittedAt ? (
+                          new Date(s.submittedAt).toLocaleTimeString('vi-VN') + ' ' + new Date(s.submittedAt).toLocaleDateString('vi-VN')
+                        ) : (
+                          '-'
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <div className="inline-flex items-center justify-center space-x-1">
+                          <button
+                            type="button"
+                            onClick={() => openEditScoreModal(s)}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                            title={
+                              isParticipated
+                                ? `Sửa điểm / Khôi phục điểm cho ${s.name}`
+                                : `Nhập điểm bổ sung cho ${s.name}`
+                            }
+                          >
+                            <Edit3 className="w-4 h-4" />
+                          </button>
+                          {isParticipated && (
+                            <button
+                              type="button"
+                              onClick={() => setSubmissionToDelete(s)}
+                              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
+                              title={`Xóa vĩnh viễn bài thi của ${s.name} để học sinh thi lại`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* Summary KPI Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
@@ -707,258 +959,6 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
               </div>
             ))}
           </div>
-        </div>
-      </div>
-
-      {/* Detailed Student Submissions Table - EXACT USER REQUIREMENTS */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
-              Bảng kết quả học sinh ({filteredSubmissions.length} bài)
-            </h3>
-
-            {/* Ô tìm & menu thả chọn kì thi trực tiếp tại bảng */}
-            <ExamSearchDropdown
-              exams={exams}
-              currentExamId={currentExamId}
-              onSelectExam={(id) => {
-                setCurrentExamId(id);
-                setFilterClass('ALL');
-              }}
-              size="sm"
-              label="Kỳ thi:"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs">
-            <div className="relative w-44 sm:w-48">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Tìm họ tên hoặc SBD..."
-                className="w-full pl-8 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none"
-              />
-            </div>
-
-            <select
-              value={filterClass}
-              onChange={(e) => setFilterClass(e.target.value)}
-              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer"
-            >
-              <option value="ALL">Tất cả lớp</option>
-              {classList.map((c) => (
-                <option key={c} value={c}>
-                  Lớp {c}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={filterViolation}
-              onChange={(e) => setFilterViolation(e.target.value)}
-              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer font-medium"
-            >
-              <option value="ALL">Đủ danh sách lớp (Cả HS chưa thi)</option>
-              <option value="SUBMITTED_ONLY">Chỉ học sinh đã dự thi</option>
-              <option value="NOT_PARTICIPATED">Học sinh chưa dự thi (Vắng)</option>
-              <option value="HAS_VIOLATION">Có vi phạm (&gt; 0)</option>
-              <option value="LOCKED">Bị khóa do vi phạm</option>
-              <option value="NO_VIOLATION">Đã thi &amp; Không vi phạm (0)</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 text-slate-700 font-bold uppercase tracking-wider border-b border-slate-200">
-              <tr>
-                <th className="py-3 px-4 w-12 text-center">STT</th>
-                <th className="py-3 px-4">Họ và tên</th>
-                <th className="py-3 px-4">Lớp</th>
-                <th className="py-3 px-4 text-center">Lượt làm</th>
-                <th className="py-3 px-4 text-center">Đúng</th>
-                <th className="py-3 px-4 text-center">Sai</th>
-                <th className="py-3 px-4 text-center text-indigo-700">Điểm cao nhất ⭐</th>
-                <th
-                  onClick={() => setSortByViolation(prev => prev === 'desc' ? 'asc' : prev === 'asc' ? 'none' : 'desc')}
-                  className="py-3 px-4 text-center cursor-pointer select-none group hover:bg-slate-100 transition"
-                  title="Bấm để sắp xếp theo số lần vi phạm"
-                >
-                  <div className="flex items-center justify-center space-x-1">
-                    <span>Vi phạm</span>
-                    {sortByViolation === 'desc' ? (
-                      <span className="text-[11px] text-amber-600 font-black">↓</span>
-                    ) : sortByViolation === 'asc' ? (
-                      <span className="text-[11px] text-amber-600 font-black">↑</span>
-                    ) : (
-                      <span className="text-[10px] text-slate-300 group-hover:text-slate-400">↕</span>
-                    )}
-                  </div>
-                </th>
-                <th className="py-3 px-4 text-right">Thời gian nộp</th>
-                <th className="py-3 px-3 text-center w-24">Thao tác</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredSubmissions.length === 0 ? (
-                <tr>
-                  <td colSpan={10} className="py-10 text-center text-slate-400">
-                    Chưa có bài thi nào phù hợp với bộ lọc
-                  </td>
-                </tr>
-              ) : (
-                filteredSubmissions.map((s: any, idx: number) => {
-                  const isParticipated =
-                    s.hasParticipated !== false &&
-                    s.status !== 'not_participated' &&
-                    s.score !== null &&
-                    s.score !== undefined &&
-                    s.score !== '';
-
-                  return (
-                    <tr
-                      key={s.sessionId || `${s.class}-${s.name}-${idx}`}
-                      className={`hover:bg-slate-50/80 transition ${!isParticipated ? 'bg-slate-50/30' : ''}`}
-                    >
-                      <td className="py-3 px-4 text-center font-mono text-slate-500">
-                        {filterClass !== 'ALL' && s.sttInClass ? s.sttInClass : idx + 1}
-                      </td>
-                      <td className="py-3 px-4 font-bold text-slate-900">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span>{s.name}</span>
-                          {s.sbd && (
-                            <span className="text-[11px] text-slate-400 font-normal">
-                              ({s.sbd})
-                            </span>
-                          )}
-                          {s.status === 'locked' && (
-                            <span className="text-[10px] bg-red-100 text-red-700 font-bold px-1.5 py-0.5 rounded border border-red-200">
-                              Bị khóa (vi phạm)
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 font-semibold text-slate-700">{s.class}</td>
-                      <td className="py-3 px-4 text-center">
-                        {isParticipated ? (
-                          <button
-                            type="button"
-                            onClick={() => setViewingAttemptsStudent(s)}
-                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 transition cursor-pointer shadow-xs"
-                            title="Bấm để xem lịch sử điểm các lần làm bài"
-                          >
-                            <History className="w-3.5 h-3.5 text-indigo-500" />
-                            <span>{s.attemptCount || 1}/{s.maxAttempts || reportData?.maxAttempts || 1}</span>
-                          </button>
-                        ) : (
-                          <span className="text-slate-300"></span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-center font-bold text-emerald-600">
-                        {isParticipated ? (s.correctCount ?? 0) : ''}
-                      </td>
-                      <td className="py-3 px-4 text-center font-bold text-red-500">
-                        {isParticipated ? (s.incorrectCount ?? 0) : ''}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        {isParticipated ? (
-                          <div className="inline-flex items-center space-x-1">
-                            <span
-                              className={`inline-block px-3 py-1 rounded-full font-black text-xs shadow-xs ${
-                                (s.score ?? 0) >= 8.0
-                                  ? 'bg-purple-100 text-purple-800 border border-purple-200'
-                                  : (s.score ?? 0) >= 5.0
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                                  : 'bg-red-100 text-red-800 border border-red-200'
-                              }`}
-                              title="Điểm cao nhất trong các lần thi"
-                            >
-                              {s.score ?? 0}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => openEditScoreModal(s)}
-                              className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                              title={`Chỉnh sửa / Khôi phục điểm cho học sinh ${s.name}`}
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ) : (
-                          // Học sinh không tham gia thi -> để trống hoàn toàn ô Điểm
-                          <span className="inline-block min-w-[2.5rem] min-h-[1.5rem]" title="Học sinh chưa dự thi (để trống điểm)"></span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        {!isParticipated ? (
-                          <span></span>
-                        ) : s.violationCount > 0 ? (
-                          <button
-                            type="button"
-                            onClick={() => setViewingViolationsStudent(s)}
-                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition cursor-pointer shadow-xs"
-                            title="Bấm để xem lịch sử vi phạm chi tiết"
-                          >
-                            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                            <span>{s.violationCount} lần</span>
-                          </button>
-                        ) : (
-                          <span className="text-slate-400 font-medium">0</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-right text-slate-500 font-mono text-[11px]">
-                        {!isParticipated ? (
-                          <span className="text-slate-400 italic font-sans">Chưa dự thi</span>
-                        ) : s.status === 'locked' ? (
-                          <div>
-                            <span className="text-red-600 font-bold">Bị khóa</span>
-                            {s.submittedAt && (
-                              <div className="text-[10px] text-slate-400">
-                                {new Date(s.submittedAt).toLocaleTimeString('vi-VN')} {new Date(s.submittedAt).toLocaleDateString('vi-VN')}
-                              </div>
-                            )}
-                          </div>
-                        ) : s.submittedAt ? (
-                          new Date(s.submittedAt).toLocaleTimeString('vi-VN') + ' ' + new Date(s.submittedAt).toLocaleDateString('vi-VN')
-                        ) : (
-                          '-'
-                        )}
-                      </td>
-                      <td className="py-3 px-3 text-center">
-                        <div className="inline-flex items-center justify-center space-x-1">
-                          <button
-                            type="button"
-                            onClick={() => openEditScoreModal(s)}
-                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
-                            title={
-                              isParticipated
-                                ? `Sửa điểm / Khôi phục điểm cho ${s.name}`
-                                : `Nhập điểm bổ sung cho ${s.name}`
-                            }
-                          >
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-                          {isParticipated && (
-                            <button
-                              type="button"
-                              onClick={() => setSubmissionToDelete(s)}
-                              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
-                              title={`Xóa vĩnh viễn bài thi của ${s.name} để học sinh thi lại`}
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
         </div>
       </div>
 
