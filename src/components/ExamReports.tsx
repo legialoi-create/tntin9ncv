@@ -21,7 +21,10 @@ import {
   RotateCw,
   Trash2,
   Edit3,
-  Calculator
+  Calculator,
+  UserX,
+  Copy,
+  Check
 } from 'lucide-react';
 import { Exam } from '../types';
 import { api } from '../services/api';
@@ -57,6 +60,10 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   const [showRegradeModal, setShowRegradeModal] = useState(false);
   const [regradeOnlyIncrease, setRegradeOnlyIncrease] = useState(true);
   const [isRegrading, setIsRegrading] = useState(false);
+  const [showAbsentModal, setShowAbsentModal] = useState(false);
+  const [absentModalClassFilter, setAbsentModalClassFilter] = useState('ALL');
+  const [absentModalSearchQuery, setAbsentModalSearchQuery] = useState('');
+  const [isCopiedAbsentList, setIsCopiedAbsentList] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(() => new Date().toLocaleTimeString('vi-VN'));
 
   // Synchronize currentExamId with selectedExamId and valid exams list
@@ -291,6 +298,60 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
     ])
   ) as string[];
 
+  const absentStudents = rosterSubmissions.filter((s: any) => {
+    if (!s) return false;
+    const isParticipated =
+      s.hasParticipated !== false &&
+      s.status !== 'not_participated' &&
+      s.score !== null &&
+      s.score !== undefined &&
+      s.score !== '';
+    return !isParticipated;
+  });
+
+  const handleCopyAbsentList = () => {
+    const targetList = absentStudents.filter((s: any) => {
+      const cls = String(s.class || s.studentClass || '');
+      const matchCls = absentModalClassFilter === 'ALL' || cls.toUpperCase() === absentModalClassFilter.toUpperCase();
+      const q = absentModalSearchQuery.trim().toLowerCase();
+      const matchQ = !q || String(s.name || s.studentName || '').toLowerCase().includes(q) || String(s.sbd || '').toLowerCase().includes(q);
+      return matchCls && matchQ;
+    });
+
+    if (targetList.length === 0) return;
+
+    const byClass = new Map<string, any[]>();
+    targetList.forEach((s: any) => {
+      const c = String(s.class || s.studentClass || 'Khác');
+      if (!byClass.has(c)) byClass.set(c, []);
+      byClass.get(c)!.push(s);
+    });
+
+    const currentExamObj = exams.find((e) => e.id === currentExamId);
+    let text = `📋 DANH SÁCH HỌC SINH CHƯA LÀM BÀI (VẮNG THI)\n`;
+    text += `Kỳ thi: ${currentExamObj?.title || reportData?.examTitle || 'Bài kiểm tra'} (Mã đề: ${currentExamObj?.code || reportData?.examCode || currentExamId})\n`;
+    text += `Tổng số vắng: ${targetList.length} học sinh\n`;
+    text += `Thời gian xuất: ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}\n`;
+    text += `------------------------------------\n`;
+
+    byClass.forEach((studentsInClass, clsName) => {
+      text += `\n📍 LỚP ${clsName} (${studentsInClass.length} học sinh vắng):\n`;
+      studentsInClass.forEach((st, idx) => {
+        const sbdText = st.sbd ? ` [SBD: ${st.sbd}]` : '';
+        text += `${idx + 1}. ${st.name || st.studentName}${sbdText}\n`;
+      });
+    });
+
+    try {
+      navigator.clipboard.writeText(text);
+      setIsCopiedAbsentList(true);
+      setTimeout(() => setIsCopiedAbsentList(false), 2500);
+      showReportNotice('success', `Đã sao chép danh sách ${targetList.length} học sinh vắng thi vào bộ nhớ tạm!`);
+    } catch (e) {
+      showReportNotice('error', 'Không thể sao chép tự động. Trình duyệt chưa cấp quyền.');
+    }
+  };
+
   if (exams.length === 0) {
     return (
       <div className="bg-white rounded-2xl p-12 border border-slate-200 text-center max-w-md mx-auto my-8">
@@ -333,6 +394,16 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
             size="md"
             label="Kỳ thi:"
           />
+
+          {/* Nút Danh sách học sinh chưa làm (vắng thi) */}
+          <button
+            onClick={() => setShowAbsentModal(true)}
+            title="Bấm để xem danh sách chi tiết các học sinh chưa làm bài kiểm tra (vắng thi)"
+            className="px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-xl text-xs font-bold transition cursor-pointer flex items-center space-x-1.5 shadow-xs"
+          >
+            <UserX className="w-4 h-4 text-rose-600" />
+            <span>DS chưa làm (Vắng: {absentStudents.length})</span>
+          </button>
 
           {/* Manual Refresh Button */}
           <button
@@ -461,6 +532,22 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
               <option value="LOCKED">Bị khóa do vi phạm</option>
               <option value="NO_VIOLATION">Đã thi &amp; Không vi phạm (0)</option>
             </select>
+
+            <button
+              type="button"
+              onClick={() => {
+                setFilterViolation((prev) => (prev === 'NOT_PARTICIPATED' ? 'ALL' : 'NOT_PARTICIPATED'));
+              }}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-bold flex items-center space-x-1.5 transition cursor-pointer shadow-2xs ${
+                filterViolation === 'NOT_PARTICIPATED'
+                  ? 'bg-rose-600 text-white border-rose-600'
+                  : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'
+              }`}
+              title="Lọc nhanh danh sách chỉ hiện học sinh chưa làm bài (vắng thi)"
+            >
+              <UserX className="w-3.5 h-3.5" />
+              <span>Lọc HS vắng ({absentStudents.length})</span>
+            </button>
           </div>
         </div>
 
@@ -1443,6 +1530,244 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                   {isRegrading ? 'Đang chấm lại...' : 'Thực hiện chấm lại'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Danh sách học sinh chưa làm (vắng thi) */}
+      {showAbsentModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[90vh] shadow-2xl border border-slate-200 overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 bg-gradient-to-r from-rose-600 to-rose-700 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+                  <UserX className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base leading-tight">
+                    DANH SÁCH HỌC SINH CHƯA LÀM BÀI (VẮNG THI)
+                  </h3>
+                  <p className="text-[11px] text-rose-100 mt-0.5">
+                    Kỳ thi: <span className="font-bold">{exams.find((e) => e.id === currentExamId)?.title || reportData?.examTitle || 'Bài kiểm tra'}</span> ({exams.find((e) => e.id === currentExamId)?.code || currentExamId}) • Tổng cộng <b className="text-white underline">{absentStudents.length}</b> học sinh chưa thi
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAbsentModal(false)}
+                className="p-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition cursor-pointer"
+                title="Đóng cửa sổ"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Filter toolbar inside Modal */}
+            <div className="p-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs flex-1">
+                {/* Search */}
+                <div className="relative min-w-[180px] flex-1 sm:max-w-xs">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                  <input
+                    type="text"
+                    value={absentModalSearchQuery}
+                    onChange={(e) => setAbsentModalSearchQuery(e.target.value)}
+                    placeholder="Tìm tên hoặc SBD..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg outline-none text-xs"
+                  />
+                </div>
+
+                {/* Class filter */}
+                <select
+                  value={absentModalClassFilter}
+                  onChange={(e) => setAbsentModalClassFilter(e.target.value)}
+                  className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg outline-none cursor-pointer text-xs font-semibold"
+                >
+                  <option value="ALL">Tất cả lớp ({absentStudents.length} vắng)</option>
+                  {classList.map((c) => {
+                    const cAbsent = absentStudents.filter(
+                      (s: any) => String(s.class || s.studentClass || '').toUpperCase() === c.toUpperCase()
+                    ).length;
+                    return (
+                      <option key={c} value={c}>
+                        Lớp {c} ({cAbsent} vắng)
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {/* Action buttons inside Modal */}
+              <div className="flex items-center space-x-2 text-xs">
+                <button
+                  type="button"
+                  onClick={handleCopyAbsentList}
+                  disabled={absentStudents.length === 0}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg font-bold transition flex items-center space-x-1.5 shadow-2xs cursor-pointer disabled:opacity-50"
+                  title="Sao chép danh sách học sinh vắng để gửi Zalo cho GVCN hoặc phụ huynh"
+                >
+                  {isCopiedAbsentList ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      <span className="text-emerald-700 font-bold">Đã sao chép!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>Sao chép danh sách</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterViolation('NOT_PARTICIPATED');
+                    if (absentModalClassFilter !== 'ALL') {
+                      setFilterClass(absentModalClassFilter);
+                    }
+                    setShowAbsentModal(false);
+                  }}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold transition flex items-center space-x-1.5 shadow-2xs cursor-pointer"
+                  title="Chuyển ra bảng điểm chính để xem và nhập điểm bổ sung"
+                >
+                  <span>Xem trên bảng điểm</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick class badges */}
+            {classList.length > 1 && (
+              <div className="px-4 py-2 bg-rose-50/50 border-b border-rose-100 flex flex-wrap items-center gap-1.5 text-[11px] shrink-0">
+                <span className="text-rose-800 font-bold mr-1">Thống kê theo lớp:</span>
+                {classList.map((c) => {
+                  const countInClass = absentStudents.filter(
+                    (s: any) => String(s.class || s.studentClass || '').toUpperCase() === c.toUpperCase()
+                  ).length;
+                  const isActive = absentModalClassFilter.toUpperCase() === c.toUpperCase();
+                  return (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setAbsentModalClassFilter(isActive ? 'ALL' : c)}
+                      className={`px-2 py-0.5 rounded-md font-bold transition cursor-pointer border ${
+                        isActive
+                          ? 'bg-rose-600 text-white border-rose-600'
+                          : countInClass > 0
+                          ? 'bg-white text-rose-700 border-rose-200 hover:bg-rose-100'
+                          : 'bg-white text-slate-400 border-slate-200'
+                      }`}
+                    >
+                      Lớp {c}: <b className={countInClass > 0 ? (isActive ? 'text-white' : 'text-rose-700') : 'text-slate-400'}>{countInClass} vắng</b>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Modal Body: Table of Absent Students */}
+            <div className="overflow-y-auto p-4 flex-1">
+              {(() => {
+                const targetAbsentList = absentStudents.filter((s: any) => {
+                  const cls = String(s.class || s.studentClass || '');
+                  const matchCls = absentModalClassFilter === 'ALL' || cls.toUpperCase() === absentModalClassFilter.toUpperCase();
+                  const q = absentModalSearchQuery.trim().toLowerCase();
+                  const matchQ = !q || String(s.name || s.studentName || '').toLowerCase().includes(q) || String(s.sbd || '').toLowerCase().includes(q);
+                  return matchCls && matchQ;
+                });
+
+                if (absentStudents.length === 0) {
+                  return (
+                    <div className="p-8 text-center bg-emerald-50 rounded-xl border border-emerald-200 text-emerald-800">
+                      <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto mb-2" />
+                      <div className="font-bold text-sm">Tuyệt vời! 100% học sinh đã tham gia làm bài</div>
+                      <div className="text-xs text-emerald-700 mt-1">
+                        Không có học sinh nào vắng thi trong kỳ thi này.
+                      </div>
+                    </div>
+                  );
+                }
+
+                if (targetAbsentList.length === 0) {
+                  return (
+                    <div className="p-8 text-center bg-slate-50 rounded-xl border border-slate-200 text-slate-500 text-xs">
+                      Không tìm thấy học sinh vắng nào phù hợp với bộ lọc hiện tại.
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider border-b border-slate-200">
+                        <tr>
+                          <th className="py-2.5 px-3.5 w-12 text-center">STT</th>
+                          <th className="py-2.5 px-3.5 w-24">SBD</th>
+                          <th className="py-2.5 px-3.5">Họ và tên học sinh</th>
+                          <th className="py-2.5 px-3.5 w-24 text-center">Lớp</th>
+                          <th className="py-2.5 px-3.5 text-center">Trạng thái</th>
+                          <th className="py-2.5 px-3.5 text-center w-28">Thao tác</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {targetAbsentList.map((st: any, idx: number) => (
+                          <tr key={st.sessionId || st.studentId || idx} className="hover:bg-rose-50/30 transition">
+                            <td className="py-2.5 px-3.5 text-center text-slate-400 font-medium">
+                              {st.sttInClass || idx + 1}
+                            </td>
+                            <td className="py-2.5 px-3.5 font-mono text-slate-600">
+                              {st.sbd || '-'}
+                            </td>
+                            <td className="py-2.5 px-3.5 font-bold text-slate-900">
+                              {st.name || st.studentName}
+                            </td>
+                            <td className="py-2.5 px-3.5 text-center">
+                              <span className="inline-block px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold text-[11px]">
+                                {st.class || st.studentClass}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3.5 text-center">
+                              <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                                <span>Chưa thi / Vắng</span>
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setShowAbsentModal(false);
+                                  openEditScoreModal(st);
+                                }}
+                                className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-[11px] font-bold transition cursor-pointer flex items-center justify-center space-x-1 mx-auto"
+                                title={`Nhập điểm thi bổ sung cho ${st.name || st.studentName}`}
+                              >
+                                <Edit3 className="w-3 h-3" />
+                                <span>Nhập điểm</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between shrink-0 text-xs text-slate-500">
+              <div>
+                Gợi ý: Thầy có thể bấm nút <b>"Sao chép danh sách"</b> để dán nhanh vào Zalo báo cho giáo viên chủ nhiệm.
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAbsentModal(false)}
+                className="px-4 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-xl transition cursor-pointer"
+              >
+                Đóng
+              </button>
             </div>
           </div>
         </div>
