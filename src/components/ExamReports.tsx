@@ -19,7 +19,9 @@ import {
   History,
   BookOpen,
   RotateCw,
-  Trash2
+  Trash2,
+  Edit3,
+  Calculator
 } from 'lucide-react';
 import { Exam } from '../types';
 import { api } from '../services/api';
@@ -48,6 +50,13 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   const [viewingAttemptsStudent, setViewingAttemptsStudent] = useState<any | null>(null);
   const [submissionToDelete, setSubmissionToDelete] = useState<any | null>(null);
   const [isDeletingSubmission, setIsDeletingSubmission] = useState(false);
+  const [editingScoreStudent, setEditingScoreStudent] = useState<any | null>(null);
+  const [editScoreValue, setEditScoreValue] = useState<string>('');
+  const [editCorrectValue, setEditCorrectValue] = useState<string>('');
+  const [isSavingScore, setIsSavingScore] = useState(false);
+  const [showRegradeModal, setShowRegradeModal] = useState(false);
+  const [regradeOnlyIncrease, setRegradeOnlyIncrease] = useState(true);
+  const [isRegrading, setIsRegrading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(() => new Date().toLocaleTimeString('vi-VN'));
 
   // Synchronize currentExamId with selectedExamId and valid exams list
@@ -108,6 +117,75 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       showReportNotice('error', 'Lỗi xóa bài thi: ' + (err?.message || 'Vui lòng thử lại'));
     } finally {
       setIsDeletingSubmission(false);
+    }
+  };
+
+  const openEditScoreModal = (studentRow: any) => {
+    const currentExamObj = exams.find((e) => e.id === currentExamId);
+    const totalQ = Number(studentRow.totalQuestions || currentExamObj?.questions?.length || 10);
+    const initScore = studentRow.score !== null && studentRow.score !== undefined && studentRow.score !== '' ? Number(studentRow.score) : 0;
+    const initCorrect =
+      studentRow.correctCount !== null && studentRow.correctCount !== undefined
+        ? Number(studentRow.correctCount)
+        : Math.round((initScore / 10) * totalQ);
+    setEditingScoreStudent({ ...studentRow, totalQuestions: totalQ });
+    setEditScoreValue(String(initScore));
+    setEditCorrectValue(String(initCorrect));
+  };
+
+  const handleSaveEditedScore = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingScoreStudent || !currentExamId) return;
+    const parsedScore = parseFloat(String(editScoreValue).replace(',', '.'));
+    if (isNaN(parsedScore) || parsedScore < 0 || parsedScore > 10) {
+      showReportNotice('error', 'Vui lòng nhập điểm hợp lệ từ 0 đến 10');
+      return;
+    }
+    const parsedCorrect = parseInt(String(editCorrectValue), 10);
+    const currentExamObj = exams.find((e) => e.id === currentExamId);
+    const totalQ = Number(editingScoreStudent.totalQuestions || currentExamObj?.questions?.length || 10);
+
+    setIsSavingScore(true);
+    try {
+      await api.updateStudentScore({
+        sessionId: editingScoreStudent.sessionId,
+        examId: currentExamId,
+        examCode: currentExamObj?.code || reportData?.examCode || currentExamId,
+        studentName: editingScoreStudent.name || editingScoreStudent.studentName,
+        studentClass: editingScoreStudent.class || editingScoreStudent.studentClass,
+        sbd: editingScoreStudent.sbd,
+        newScore: parsedScore,
+        newCorrectCount: !isNaN(parsedCorrect) ? parsedCorrect : undefined,
+        totalQuestions: totalQ
+      });
+      setEditingScoreStudent(null);
+      showReportNotice(
+        'success',
+        `Đã cập nhật điểm mới (${parsedScore} điểm) cho học sinh ${editingScoreStudent.name || editingScoreStudent.studentName} lên Cloud Firestore!`
+      );
+      await fetchReports(false);
+    } catch (err: any) {
+      showReportNotice('error', 'Lỗi cập nhật điểm: ' + (err?.message || 'Vui lòng thử lại'));
+    } finally {
+      setIsSavingScore(false);
+    }
+  };
+
+  const handleConfirmRegrade = async () => {
+    if (!currentExamId) return;
+    setIsRegrading(true);
+    try {
+      const res = await api.regradeExamSubmissions(currentExamId, regradeOnlyIncrease);
+      setShowRegradeModal(false);
+      showReportNotice(
+        'success',
+        `Đã rà soát ${res.checkedCount} bài thi trên Cloud và cập nhật điểm cho ${res.updatedCount} bài làm!`
+      );
+      await fetchReports(true);
+    } catch (err: any) {
+      showReportNotice('error', 'Lỗi chấm lại bài thi: ' + (err?.message || 'Vui lòng thử lại'));
+    } finally {
+      setIsRegrading(false);
     }
   };
 
@@ -265,6 +343,17 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
           >
             <RotateCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
             <span>Làm mới kết quả</span>
+          </button>
+
+          {/* Regrade Past Submissions Button */}
+          <button
+            onClick={() => setShowRegradeModal(true)}
+            disabled={isLoading || isRegrading}
+            title="Chấm lại các bài đã nộp từ dữ liệu đáp án học sinh đã chọn trên Cloud Firestore"
+            className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition cursor-pointer flex items-center space-x-1.5 shadow-sm shadow-amber-200 disabled:opacity-60"
+          >
+            <Calculator className="w-3.5 h-3.5" />
+            <span>Chấm lại bài cũ</span>
           </button>
 
           {/* Export Excel Button */}
@@ -551,7 +640,7 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                   </div>
                 </th>
                 <th className="py-3 px-4 text-right">Thời gian nộp</th>
-                <th className="py-3 px-3 text-center w-16">Xóa bài</th>
+                <th className="py-3 px-3 text-center w-24">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -617,18 +706,28 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                       </td>
                       <td className="py-3 px-4 text-center">
                         {isParticipated ? (
-                          <span
-                            className={`inline-block px-3 py-1 rounded-full font-black text-xs shadow-xs ${
-                              (s.score ?? 0) >= 8.0
-                                ? 'bg-purple-100 text-purple-800 border border-purple-200'
-                                : (s.score ?? 0) >= 5.0
-                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                                : 'bg-red-100 text-red-800 border border-red-200'
-                            }`}
-                            title="Điểm cao nhất trong các lần thi"
-                          >
-                            {s.score ?? 0}
-                          </span>
+                          <div className="inline-flex items-center space-x-1">
+                            <span
+                              className={`inline-block px-3 py-1 rounded-full font-black text-xs shadow-xs ${
+                                (s.score ?? 0) >= 8.0
+                                  ? 'bg-purple-100 text-purple-800 border border-purple-200'
+                                  : (s.score ?? 0) >= 5.0
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : 'bg-red-100 text-red-800 border border-red-200'
+                              }`}
+                              title="Điểm cao nhất trong các lần thi"
+                            >
+                              {s.score ?? 0}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openEditScoreModal(s)}
+                              className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                              title={`Chỉnh sửa / Khôi phục điểm cho học sinh ${s.name}`}
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         ) : (
                           // Học sinh không tham gia thi -> để trống hoàn toàn ô Điểm
                           <span className="inline-block min-w-[2.5rem] min-h-[1.5rem]" title="Học sinh chưa dự thi (để trống điểm)"></span>
@@ -670,16 +769,30 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
                         )}
                       </td>
                       <td className="py-3 px-3 text-center">
-                        {isParticipated && (
+                        <div className="inline-flex items-center justify-center space-x-1">
                           <button
                             type="button"
-                            onClick={() => setSubmissionToDelete(s)}
-                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
-                            title={`Xóa vĩnh viễn bài thi của ${s.name}`}
+                            onClick={() => openEditScoreModal(s)}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition cursor-pointer"
+                            title={
+                              isParticipated
+                                ? `Sửa điểm / Khôi phục điểm cho ${s.name}`
+                                : `Nhập điểm bổ sung cho ${s.name}`
+                            }
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Edit3 className="w-4 h-4" />
                           </button>
-                        )}
+                          {isParticipated && (
+                            <button
+                              type="button"
+                              onClick={() => setSubmissionToDelete(s)}
+                              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition cursor-pointer"
+                              title={`Xóa vĩnh viễn bài thi của ${s.name} để học sinh thi lại`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -954,6 +1067,223 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
               >
                 {isDeletingSubmission ? 'Đang xóa...' : 'Xác nhận xóa'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Sửa điểm / Khôi phục điểm cho học sinh */}
+      {editingScoreStudent && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 py-4 bg-indigo-900 text-white flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Edit3 className="w-4 h-4 text-indigo-300" />
+                <h3 className="font-bold text-sm">
+                  CẬP NHẬT / KHÔI PHỤC ĐIỂM HỌC SINH
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingScoreStudent(null)}
+                className="p-1 rounded-lg text-slate-300 hover:text-white hover:bg-indigo-800 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditedScore} className="p-5 space-y-4">
+              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs grid grid-cols-2 gap-2">
+                <div>
+                  <span className="text-slate-500">Học sinh:</span>{' '}
+                  <span className="font-bold text-slate-900">{editingScoreStudent.name}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Lớp:</span>{' '}
+                  <span className="font-bold text-slate-900">{editingScoreStudent.class}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Tổng số câu:</span>{' '}
+                  <span className="font-bold text-indigo-700">{editingScoreStudent.totalQuestions || 10} câu</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Điểm hiện tại:</span>{' '}
+                  <span className="font-bold text-amber-600">
+                    {editingScoreStudent.score !== null && editingScoreStudent.score !== undefined && editingScoreStudent.score !== ''
+                      ? `${editingScoreStudent.score} điểm`
+                      : 'Chưa có'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Số câu trả lời đúng
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={editingScoreStudent.totalQuestions || 100}
+                    value={editCorrectValue}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setEditCorrectValue(val);
+                      const num = parseInt(val, 10);
+                      const totalQ = Number(editingScoreStudent.totalQuestions || 10);
+                      if (!isNaN(num) && totalQ > 0) {
+                        const clamped = Math.max(0, Math.min(totalQ, num));
+                        const autoScore = Math.round((clamped * 10 / totalQ) * 100) / 100;
+                        setEditScoreValue(String(autoScore));
+                      }
+                    }}
+                    className="w-full px-3 py-2 text-sm font-bold text-emerald-700 bg-slate-50 border border-slate-300 rounded-xl outline-none focus:border-indigo-500"
+                  />
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    Nhập số câu đúng sẽ tự tính điểm
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Điểm số chuẩn (Thang 10)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    max={10}
+                    value={editScoreValue}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setEditScoreValue(val);
+                      const num = parseFloat(val);
+                      const totalQ = Number(editingScoreStudent.totalQuestions || 10);
+                      if (!isNaN(num) && totalQ > 0) {
+                        const autoCorrect = Math.round((Math.max(0, Math.min(10, num)) / 10) * totalQ);
+                        setEditCorrectValue(String(autoCorrect));
+                      }
+                    }}
+                    className="w-full px-3 py-2 text-sm font-black text-indigo-700 bg-indigo-50/50 border border-indigo-300 rounded-xl outline-none focus:border-indigo-600"
+                    required
+                  />
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    Lưu vĩnh viễn lên Cloud &amp; Excel
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingScoreStudent(null)}
+                  disabled={isSavingScore}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs cursor-pointer"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingScore}
+                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingScore ? 'Đang lưu...' : 'Lưu điểm mới'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Chấm lại toàn bộ bài thi đã nộp */}
+      {showRegradeModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 py-4 bg-amber-500 text-white flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Calculator className="w-5 h-5 text-white" />
+                <h3 className="font-bold text-sm">
+                  CHẤM LẠI BÀI ĐÃ NỘP TRÊN CLOUD
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRegradeModal(false)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-amber-600 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs text-slate-600">
+              <p className="leading-relaxed">
+                Hệ thống sẽ tải lại toàn bộ bài đã nộp của học sinh trên Cloud Firestore và đối chiếu với bộ đáp án đúng hiện tại của đề thi.
+              </p>
+
+              <div className="space-y-2.5">
+                <label
+                  onClick={() => setRegradeOnlyIncrease(true)}
+                  className={`flex items-start space-x-2.5 p-3 rounded-xl border cursor-pointer transition ${
+                    regradeOnlyIncrease
+                      ? 'bg-emerald-50/70 border-emerald-400 text-emerald-950'
+                      : 'bg-slate-50 border-slate-200 text-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    checked={regradeOnlyIncrease}
+                    onChange={() => setRegradeOnlyIncrease(true)}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <div className="font-bold">Chế độ An toàn (Khuyên dùng)</div>
+                    <div className="text-[11px] opacity-80 mt-0.5">
+                      Chỉ cập nhật những bài có điểm mới cao hơn điểm cũ (bảo vệ kết quả học sinh không bị tụt điểm).
+                    </div>
+                  </div>
+                </label>
+
+                <label
+                  onClick={() => setRegradeOnlyIncrease(false)}
+                  className={`flex items-start space-x-2.5 p-3 rounded-xl border cursor-pointer transition ${
+                    !regradeOnlyIncrease
+                      ? 'bg-amber-50 border-amber-400 text-amber-950'
+                      : 'bg-slate-50 border-slate-200 text-slate-700'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    checked={!regradeOnlyIncrease}
+                    onChange={() => setRegradeOnlyIncrease(false)}
+                    className="mt-0.5"
+                  />
+                  <div>
+                    <div className="font-bold">Chấm lại tuyệt đối theo đáp án đề hiện tại</div>
+                    <div className="text-[11px] opacity-80 mt-0.5">
+                      Áp dụng khi Thầy vừa đổi đáp án đúng trong đề hoặc đề không bật đảo thứ tự A/B/C/D ở các ca thi cũ.
+                    </div>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRegradeModal(false)}
+                  disabled={isRegrading}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs cursor-pointer"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmRegrade}
+                  disabled={isRegrading}
+                  className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-xl text-xs cursor-pointer disabled:opacity-50"
+                >
+                  {isRegrading ? 'Đang chấm lại...' : 'Thực hiện chấm lại'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

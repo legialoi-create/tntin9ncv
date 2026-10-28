@@ -54,6 +54,8 @@ export interface FirestoreSubmission {
   startedAt?: string;
   answeredCount?: number;
   answers?: Record<string, string>;
+  questionOrder?: string[];
+  optionOrder?: Record<string, Record<string, string>>;
 }
 
 // 1. Initial Student Session in Firestore (Saved when student ENTERS the exam room)
@@ -70,6 +72,8 @@ export async function saveStudentSessionToFirestore(session: {
   totalQuestions?: number;
   violationCount?: number;
   answeredCount?: number;
+  questionOrder?: string[];
+  optionOrder?: Record<string, Record<string, string>>;
 }): Promise<boolean> {
   if (!session || !session.sessionId) return false;
   try {
@@ -92,6 +96,13 @@ export async function saveStudentSessionToFirestore(session: {
       answeredCount: Number(session.answeredCount) || 0,
       updatedAt: new Date().toISOString()
     };
+
+    if (Array.isArray(session.questionOrder) && session.questionOrder.length > 0) {
+      payload.questionOrder = session.questionOrder.map(String);
+    }
+    if (session.optionOrder && typeof session.optionOrder === 'object') {
+      payload.optionOrder = session.optionOrder;
+    }
 
     await setDoc(doc(firestore, 'submissions', docId), payload, { merge: true });
     return true;
@@ -164,6 +175,13 @@ export async function savePermanentSubmission(sub: FirestoreSubmission): Promise
         }
       });
       cleanPayload.answers = cleanAnswers;
+    }
+
+    if (Array.isArray(sub.questionOrder) && sub.questionOrder.length > 0) {
+      cleanPayload.questionOrder = sub.questionOrder.map(String);
+    }
+    if (sub.optionOrder && typeof sub.optionOrder === 'object' && Object.keys(sub.optionOrder).length > 0) {
+      cleanPayload.optionOrder = sub.optionOrder;
     }
 
     await setDoc(doc(firestore, 'submissions', docId), cleanPayload, { merge: true });
@@ -257,7 +275,9 @@ export async function getSubmissionsFromFirestore(
           status: data.status || 'submitted',
           startedAt: data.startedAt,
           answeredCount: Number(data.answeredCount) || (data.status === 'submitted' ? (Number(data.totalQuestions) || 10) : 0),
-          answers: data.answers || {}
+          answers: data.answers || {},
+          questionOrder: Array.isArray(data.questionOrder) ? data.questionOrder : undefined,
+          optionOrder: data.optionOrder && typeof data.optionOrder === 'object' ? data.optionOrder : undefined
         });
       }
     });

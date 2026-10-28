@@ -1694,7 +1694,9 @@ export const api = {
             attemptNumber: serverSession.attemptNumber || 1,
             totalQuestions: serverSession.questions?.length || 10,
             violationCount: 0,
-            answeredCount: 0
+            answeredCount: 0,
+            questionOrder: serverSession.questionOrder,
+            optionOrder: serverSession.optionOrder
           }).catch(() => {});
 
           const activeItem = {
@@ -1885,7 +1887,9 @@ export const api = {
         attemptNumber: 1,
         totalQuestions: studentQuestions.length,
         violationCount: 0,
-        answeredCount: 0
+        answeredCount: 0,
+        questionOrder: fallbackQuestionOrder,
+        optionOrder: fallbackOptionOrder
       }).catch(() => {});
 
       const activeItem = {
@@ -2411,7 +2415,9 @@ export const api = {
           violationCount: payload.violationCount || 0,
           submittedAt: result.submittedAt || new Date().toISOString(),
           status: 'submitted',
-          answers: payload.answers || {}
+          answers: payload.answers || {},
+          questionOrder: payload.questionOrder,
+          optionOrder: payload.optionOrder
         });
       } catch (e) {
         console.warn('[Firebase] Save submission warning:', e);
@@ -3199,6 +3205,308 @@ export const api = {
     }
 
     return { success: true, message: 'Đã xóa bài thi thành công' };
+  },
+
+  // Manually adjust/fix a student's score or correct count (for recovering misgraded past attempts)
+  updateStudentScore: async (params: {
+    sessionId?: string;
+    examId: string;
+    examCode?: string;
+    studentName: string;
+    studentClass: string;
+    sbd?: string;
+    newScore: number;
+    newCorrectCount?: number;
+    totalQuestions?: number;
+  }) => {
+    const cleanExamId = String(params.examId || '').trim();
+    const cleanExamCode = String(params.examCode || cleanExamId).trim();
+    const totalQ = Number(params.totalQuestions) > 0 ? Number(params.totalQuestions) : 10;
+    const clampedScore = Math.max(0, Math.min(10, Math.round(Number(params.newScore) * 100) / 100));
+    const computedCorrect =
+      params.newCorrectCount !== undefined && !isNaN(Number(params.newCorrectCount))
+        ? Math.max(0, Math.min(totalQ, Math.round(Number(params.newCorrectCount))))
+        : Math.round((clampedScore / 10) * totalQ);
+    const computedIncorrect = Math.max(0, totalQ - computedCorrect);
+    const targetSessionId =
+      params.sessionId && !params.sessionId.startsWith('no-sub-')
+        ? params.sessionId
+        : `ses-manual-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+    // 1. Find all existing submissions for this student in this exam from Firestore so we update their bestScore too
+    const aliases = Array.from(new Set([cleanExamId, cleanExamCode].filter(Boolean)));
+    try {
+      const fbSubs = await getSubmissionsFromFirestore(cleanExamId, cleanExamCode, aliases);
+      const sNameNorm = String(params.studentName || '').trim().toLowerCase();
+      const sClassNorm = String(params.studentClass || '').trim().toLowerCase();
+      const studentSubs = fbSubs.filter(
+        (s) =>
+          String(s.studentName || '').trim().toLowerCase() === sNameNorm &&
+          String(s.studentClass || '').trim().toLowerCase() === sClassNorm &&
+          s.status !== 'in_progress' &&
+          s.status !== 'cancelled_disconnection'
+      );
+
+      if (studentSubs.length > 0) {
+        for (const sub of studentSubs) {
+          await savePermanentSubmission({
+            ...sub,
+            score: sub.sessionId === targetSessionId || studentSubs.length === 1 ? clampedScore : Math.min(sub.score, clampedScore),
+            bestScore: clampedScore,
+            correctCount: sub.sessionId === targetSessionId || studentSubs.length === 1 ? computedCorrect : sub.correctCount,
+            incorrectCount: sub.sessionId === targetSessionId || studentSubs.length === 1 ? computedIncorrect : sub.incorrectCount,
+            unansweredCount: 0,
+            totalQuestions: sub.totalQuestions || totalQ,
+            status: 'submitted'
+          });
+        }
+      } else {
+        await savePermanentSubmission({
+          sessionId: targetSessionId,
+          examId: cleanExamId,
+          examCode: cleanExamCode,
+          studentName: params.studentName,
+          studentClass: params.studentClass,
+          sbd: params.sbd || '',
+          score: clampedScore,
+          bestScore: clampedScore,
+          correctCount: computedCorrect,
+          incorrectCount: computedIncorrect,
+          unansweredCount: 0,
+          totalQuestions: totalQ,
+          attemptNumber: 1,
+          violationCount: 0,
+          submittedAt: new Date().toISOString(),
+          status: 'submitted'
+        });
+      }
+    } catch (e) {
+      console.warn('updateStudentScore Firestore error:', e);
+    }
+
+    // 2. Update local caches
+    try {
+      const updatedItem = {
+        sessionId: targetSessionId,
+        examId: cleanExamId,
+        examCode: cleanExamCode,
+        name: params.studentName,
+        studentName: params.studentName,
+        class: params.studentClass,
+        studentClass: params.studentClass,
+        sbd: params.sbd || '',
+        score: clampedScore,
+        bestScore: clampedScore,
+        correctCount: computedCorrect,
+        incorrectCount: computedIncorrect,
+        unansweredCount: 0,
+        totalQuestions: totalQ,
+        attemptNumber: 1,
+        violationCount: 0,
+        submittedAt: new Date().toISOString(),
+        status: 'submitted'
+      };
+
+      const sNameNorm = String(params.studentName || '').trim().toLowerCase();
+      const sClassNorm = String(params.studentClass || '').trim().toLowerCase();
+
+      for (const a of aliases) {
+        const key = `ncv_submissions_${a}`;
+        const arr = JSON.parse(localStorage.getItem(key) || '[]');
+        if (Array.isArray(arr)) {
+          let found = false;
+          const nextArr = arr.map((s: any) => {
+            if (
+              s &&
+              (s.sessionId === targetSessionId ||
+                (String(s.studentName || s.name || '').trim().toLowerCase() === sNameNorm &&
+                  String(s.studentClass || s.class || '').trim().toLowerCase() === sClassNorm))
+            ) {
+              found = true;
+              return {
+                ...s,
+                score: clampedScore,
+                bestScore: clampedScore,
+                correctCount: computedCorrect,
+                incorrectCount: computedIncorrect,
+                unansweredCount: 0,
+                status: 'submitted'
+              };
+            }
+            return s;
+          });
+          if (!found) nextArr.unshift(updatedItem);
+          localStorage.setItem(key, JSON.stringify(nextArr));
+        }
+        localStorage.removeItem(`ncv_reports_cache_${a}`);
+      }
+
+      // Sync to backend memory
+      fetch('/api/sessions/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessions: [{
+            id: targetSessionId,
+            examId: cleanExamId,
+            examCode: cleanExamCode,
+            studentName: params.studentName,
+            studentClass: params.studentClass,
+            sbd: params.sbd || '',
+            score: clampedScore,
+            correctCount: computedCorrect,
+            incorrectCount: computedIncorrect,
+            unansweredCount: 0,
+            status: 'submitted',
+            submittedAt: updatedItem.submittedAt
+          }]
+        })
+      }).catch(() => {});
+    } catch (e) {}
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('ncv_submission_update', { detail: { sessionId: targetSessionId } }));
+    }
+
+    return {
+      success: true,
+      score: clampedScore,
+      correctCount: computedCorrect,
+      incorrectCount: computedIncorrect
+    };
+  },
+
+  // Batch regrade all submitted sessions of an exam from their stored answers + exam's authoritative questions
+  regradeExamSubmissions: async (examId: string, onlyIncreaseScore = true) => {
+    const cleanExamId = String(examId || '').trim();
+    if (!cleanExamId) throw new Error('Không tìm thấy mã bài kiểm tra');
+
+    // 1. Load authoritative exam with correctAnswer
+    let examObj: Exam | undefined;
+    try {
+      const fbExams = await getExamsFromFirestore();
+      examObj = fbExams.find(
+        (e) => e.id === cleanExamId || (e.code && e.code.toUpperCase() === cleanExamId.toUpperCase())
+      );
+    } catch (e) {}
+    if (!examObj) {
+      try {
+        const cached = localStorage.getItem('ncv_exams_data');
+        if (cached) {
+          const arr: Exam[] = JSON.parse(cached);
+          examObj = arr.find(
+            (e) => e.id === cleanExamId || (e.code && e.code.toUpperCase() === cleanExamId.toUpperCase())
+          );
+        }
+      } catch (e) {}
+    }
+    if (!examObj || !Array.isArray(examObj.questions) || examObj.questions.length === 0) {
+      throw new Error('Không tìm thấy bộ câu hỏi và đáp án gốc của đề thi này');
+    }
+
+    const normalizeKey = (val: any, options?: QuestionOption[]): 'A' | 'B' | 'C' | 'D' | '' => {
+      if (val === undefined || val === null) return '';
+      const raw = String(val).trim();
+      if (!raw) return '';
+      const upper = raw.toUpperCase();
+      if (upper === 'A' || upper === 'B' || upper === 'C' || upper === 'D') return upper as any;
+      const m = upper.match(/^(?:ĐÁP\s*ÁN|PHƯƠNG\s*ÁN|CHỌN|KEY|CÂU)?[\s\:\-\.\(\[]*([A-D])(?:[\.\)\]\:\-\s]|$)/i);
+      if (m && m[1]) return m[1].toUpperCase() as any;
+      if (Array.isArray(options) && options.length > 0) {
+        const found = options.find((o) => o && String(o.text || '').trim().toLowerCase() === raw.toLowerCase());
+        if (found && found.id) {
+          const idUp = String(found.id).trim().toUpperCase();
+          if (idUp === 'A' || idUp === 'B' || idUp === 'C' || idUp === 'D') return idUp as any;
+        }
+      }
+      return '';
+    };
+
+    const resolvedId = examObj.id || cleanExamId;
+    const resolvedCode = examObj.code || cleanExamId;
+    const aliases = Array.from(new Set([cleanExamId, resolvedId, resolvedCode].filter(Boolean)));
+    const fbSubs = await getSubmissionsFromFirestore(resolvedId, resolvedCode, aliases);
+
+    let checkedCount = 0;
+    let updatedCount = 0;
+
+    for (const sub of fbSubs) {
+      if (sub.status === 'in_progress' || sub.status === 'cancelled_disconnection') continue;
+      const answers = sub.answers || {};
+      if (!answers || Object.keys(answers).length === 0) continue;
+
+      checkedCount++;
+      const allQ = examObj.questions;
+      const orderedQ =
+        Array.isArray(sub.questionOrder) && sub.questionOrder.length > 0
+          ? (sub.questionOrder.map((qId) => allQ.find((q) => q && q.id === qId)).filter(Boolean) as Question[])
+          : [];
+      const questionsToGrade = orderedQ.length > 0 ? orderedQ : allQ;
+      const total = questionsToGrade.length || sub.totalQuestions || 10;
+
+      let correct = 0;
+      let incorrect = 0;
+
+      for (const q of questionsToGrade) {
+        if (!q || !q.id) continue;
+        const safeKey = q.id.replace(/[\/\.]/g, '_');
+        const rawAns = answers[q.id] ?? answers[safeKey];
+        const displayChoice = normalizeKey(rawAns, q.options);
+        if (!displayChoice) continue;
+
+        let origChoice = displayChoice;
+        const mapping = sub.optionOrder ? (sub.optionOrder[q.id] || sub.optionOrder[safeKey]) : undefined;
+        if (mapping && typeof mapping === 'object') {
+          const mappedVal = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
+          const normMapped = normalizeKey(mappedVal, q.options);
+          if (normMapped) origChoice = normMapped;
+        }
+
+        const expected = normalizeKey(q.correctAnswer, q.options);
+        if (origChoice === expected) {
+          correct++;
+        } else {
+          incorrect++;
+        }
+      }
+
+      const unanswered = Math.max(0, total - (correct + incorrect));
+      const newScore = total > 0 ? Math.round((correct * 10 / total) * 100) / 100 : 0;
+      const oldScore = Number(sub.score ?? 0);
+
+      const shouldUpdate = onlyIncreaseScore ? newScore > oldScore : newScore !== oldScore;
+      if (shouldUpdate) {
+        updatedCount++;
+        const nextBest = onlyIncreaseScore ? Math.max(Number(sub.bestScore ?? 0), newScore) : newScore;
+        await savePermanentSubmission({
+          ...sub,
+          score: newScore,
+          bestScore: nextBest,
+          correctCount: correct,
+          incorrectCount: incorrect,
+          unansweredCount: unanswered,
+          totalQuestions: total,
+          status: 'submitted'
+        });
+      }
+    }
+
+    // Clear local report caches so fresh data is loaded
+    for (const a of aliases) {
+      localStorage.removeItem(`ncv_submissions_${a}`);
+      localStorage.removeItem(`ncv_reports_cache_${a}`);
+    }
+    localStorage.removeItem('ncv_submissions_global_all');
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('ncv_submission_update', { detail: { examId: resolvedId, regraded: true } }));
+    }
+
+    return {
+      success: true,
+      checkedCount,
+      updatedCount
+    };
   },
 
   // Backup & Restore
