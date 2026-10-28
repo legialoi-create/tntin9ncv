@@ -19,6 +19,7 @@ import {
 import { StudentQuestion } from '../types';
 import { api } from '../services/api';
 import { saveStudentSessionToFirestore, updateSessionProgressInFirestore } from '../services/firebase';
+import { sealValue, unsealValue } from '../utils/security';
 import { CodeBlock } from './CodeBlock';
 
 interface StudentExamRoomProps {
@@ -29,6 +30,7 @@ interface StudentExamRoomProps {
     questions: StudentQuestion[];
     questionOrder?: string[];
     optionOrder?: Record<string, Record<string, string>>;
+    sealedOptionOrder?: string;
     savedAnswers: Record<string, 'A' | 'B' | 'C' | 'D'>;
     flaggedQuestions?: string[];
     violationCount?: number;
@@ -67,7 +69,8 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     try {
       const offlineLocal = localStorage.getItem(`offline_ans_${sessionData.sessionId}`);
       if (offlineLocal) {
-        const parsed = JSON.parse(offlineLocal);
+        const unsealed = unsealValue(offlineLocal, 'OFFLINE_ANS::' + sessionData.sessionId) || offlineLocal;
+        const parsed = JSON.parse(unsealed);
         if (parsed && typeof parsed === 'object') {
           return { ...serverAnswers, ...parsed };
         }
@@ -118,18 +121,39 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
   const currentQ = questions[currentIdx];
   const maxViolations = examInfo.maxViolationsBeforeLock || 3;
 
+  const answersRef = useRef(answers);
+  answersRef.current = answers;
+
   // Handle exiting lock screen after 1 minute or manually
   const handleLockExit = useCallback(async () => {
     if (isLockExiting) return;
     setIsLockExiting(true);
     try {
-      await api.lockExit({ sessionId: currentSession.sessionId });
+      await api.lockExit({
+        sessionId: currentSession.sessionId,
+        examId: examInfo.id,
+        examCode: examInfo.code,
+        studentName: studentInfo.name,
+        studentClass: studentInfo.class,
+        sbd: studentInfo.sbd,
+        answers: answersRef.current,
+        questionOrder: currentSession.questionOrder || (currentSession.questions ? currentSession.questions.map(q => q.id) : undefined),
+        optionOrder: currentSession.optionOrder,
+        sealedOptionOrder: currentSession.sealedOptionOrder,
+        violationCount,
+        attemptNumber: currentSession.attemptNumber || 1,
+        bestScoreSoFar: currentSession.bestScoreSoFar,
+        startedAt: currentSession.startedAt
+      });
+      try {
+        sessionStorage.removeItem('ncv_active_exam_state');
+      } catch (e) {}
     } catch (e) {
       console.error('Error exiting lock session:', e);
     } finally {
       onExit();
     }
-  }, [currentSession.sessionId, isLockExiting, onExit]);
+  }, [currentSession, examInfo.id, examInfo.code, studentInfo.name, studentInfo.class, studentInfo.sbd, violationCount, isLockExiting, onExit]);
 
   // Calculate remaining seconds based on server expiresAt
   const updateTimer = useCallback(() => {
@@ -347,9 +371,6 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
   }, [currentSession.sessionId, examInfo.id, examInfo.code, studentInfo.name, studentInfo.class, studentInfo.sbd, questions.length]);
 
   // 2. Zero periodic Firestore writes during exam: only sync to Firestore if student gets locked
-  const answersRef = useRef(answers);
-  answersRef.current = answers;
-
   useEffect(() => {
     if (submitResult || !isLocked) return;
     const currentAnsCount = Object.keys(answersRef.current).length;
@@ -527,9 +548,12 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
     const newAnswers = { ...answers, [currentQ.id]: optionId };
     setAnswers(newAnswers);
 
-    // Offline fallback storage
+    // Offline fallback storage (encrypted)
     try {
-      localStorage.setItem(`offline_ans_${currentSession.sessionId}`, JSON.stringify(newAnswers));
+      localStorage.setItem(
+        `offline_ans_${currentSession.sessionId}`,
+        sealValue(JSON.stringify(newAnswers), 'OFFLINE_ANS::' + currentSession.sessionId)
+      );
     } catch (e) {}
 
     // Async save to server
@@ -614,6 +638,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
         answers: answers,
         questionOrder: currentSession.questionOrder || (currentSession.questions ? currentSession.questions.map(q => q.id) : undefined),
         optionOrder: currentSession.optionOrder,
+        sealedOptionOrder: currentSession.sealedOptionOrder,
         attemptNumber: currentSession.attemptNumber || 1,
         bestScoreSoFar: currentSession.bestScoreSoFar,
         violationCount: violationCount,
@@ -622,6 +647,7 @@ export const StudentExamRoom: React.FC<StudentExamRoomProps> = ({
       setSubmitResult(res);
       try {
         sessionStorage.removeItem('ncv_active_exam_state');
+        localStorage.removeItem(`offline_ans_${currentSession.sessionId}`);
       } catch (e) {}
       // Exit fullscreen peacefully
       if (document.fullscreenElement) {

@@ -456,13 +456,17 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
     data.push(['STT', 'Họ và tên', 'Lớp', 'SBD', 'Tên đăng nhập (Username)', 'Mật khẩu', 'Trạng thái mật khẩu']);
 
     rosterStudents.forEach((st, idx) => {
+      const isHashed = typeof st.password === 'string' && (st.password.startsWith('ncv_pw$') || st.password.startsWith('pbkdf2$'));
+      const exportPass = st.isPasswordChanged
+        ? (isHashed ? 'Đã đổi MK riêng (Đã mã hoá)' : (st.password || defaultPass))
+        : defaultPass;
       data.push([
         idx + 1,
         st.name,
         st.class,
         st.sbd || `${selectedClassForRoster}-${(idx + 1).toString().padStart(2, '0')}`,
         st.username || '',
-        st.password || defaultPass,
+        exportPass,
         st.isPasswordChanged ? 'Đã đổi mật khẩu riêng' : 'Mật khẩu mặc định'
       ]);
     });
@@ -1039,7 +1043,8 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
                           <tbody className="divide-y divide-slate-100 bg-white">
                             {rosterStudents.map((st, idx) => {
                               const defaultPass = `${(st.class || selectedClassForRoster || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}123`;
-                              const currentPass = st.password || defaultPass;
+                              const isHashed = typeof st.password === 'string' && (st.password.startsWith('ncv_pw$') || st.password.startsWith('pbkdf2$'));
+                              const currentPass = (!st.isPasswordChanged || isHashed) ? defaultPass : (st.password || defaultPass);
                               const isJustReset = justResetStudentId === st.id;
                               const isResetting = resettingStudentId === st.id;
                               return (
@@ -1089,19 +1094,21 @@ export const ClassManager: React.FC<ClassManagerProps> = ({ onClassesUpdated }) 
                                             : 'bg-slate-50 font-semibold text-slate-800 border-slate-200'
                                         }`}
                                       >
-                                        {st.isPasswordChanged ? '••••••••' : currentPass}
+                                        {st.isPasswordChanged ? '•••••••• (Đã mã hoá)' : currentPass}
                                       </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          navigator.clipboard.writeText(currentPass);
-                                          showFeedback('success', `Đã sao chép mật khẩu: ${currentPass}`);
-                                        }}
-                                        className="p-1 text-slate-400 hover:text-indigo-600 transition cursor-pointer"
-                                        title="Sao chép mật khẩu"
-                                      >
-                                        <Copy className="w-3 h-3" />
-                                      </button>
+                                      {!st.isPasswordChanged && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            navigator.clipboard.writeText(currentPass);
+                                            showFeedback('success', `Đã sao chép mật khẩu mặc định: ${currentPass}`);
+                                          }}
+                                          className="p-1 text-slate-400 hover:text-indigo-600 transition cursor-pointer"
+                                          title="Sao chép mật khẩu mặc định"
+                                        >
+                                          <Copy className="w-3 h-3" />
+                                        </button>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="py-2.5 px-3 text-center">

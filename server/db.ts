@@ -3,6 +3,14 @@ import path from 'path';
 import crypto from 'crypto';
 import type { Exam, ExamSession, ClassInfo, StudentInfo } from '../src/types.ts';
 import { SEED_APP_DATA } from './seedData.ts';
+import {
+  hashPasswordSync,
+  verifyPasswordSync,
+  isHashedPassword,
+  normalizeStudentName,
+  normalizeClassName,
+  sealExamQuestions,
+} from '../src/utils/security.ts';
 
 interface DatabaseSchema {
   exams: Exam[];
@@ -24,12 +32,11 @@ const DB_DIR = process.env.VERCEL ? '/tmp' : DATA_DIR;
 const DB_FILE = path.join(DB_DIR, 'app_data.json');
 
 
-// Cryptographic Password Hashing & Verification (PBKDF2 with Salt)
+// Cryptographic Password Hashing & Verification (Supports both PBKDF2 and ncv_pw$v2$)
 export function hashPassword(plainText: string): string {
   if (!plainText) return '';
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.pbkdf2Sync(plainText.trim(), salt, 10000, 64, 'sha512').toString('hex');
-  return `pbkdf2$${salt}$${hash}`;
+  if (isHashedPassword(plainText)) return plainText;
+  return hashPasswordSync(plainText.trim());
 }
 
 export function verifyPassword(inputPassword: string, storedPasswordOrHash: string): boolean {
@@ -37,6 +44,14 @@ export function verifyPassword(inputPassword: string, storedPasswordOrHash: stri
   const trimmedInput = inputPassword.trim();
   const collapsedInput = trimmedInput.replace(/\s+/g, ' ');
   const noSpaceInput = trimmedInput.replace(/\s+/g, '');
+
+  if (storedPasswordOrHash.startsWith('ncv_pw$v2$')) {
+    return (
+      verifyPasswordSync(trimmedInput, storedPasswordOrHash) ||
+      verifyPasswordSync(collapsedInput, storedPasswordOrHash) ||
+      verifyPasswordSync(noSpaceInput, storedPasswordOrHash)
+    );
+  }
 
   if (storedPasswordOrHash.startsWith('pbkdf2$')) {
     const parts = storedPasswordOrHash.split('$');
@@ -542,14 +557,15 @@ class DatabaseManager {
   }
 
   public saveExam(exam: Exam): void {
+    const sealedExam = sealExamQuestions(exam);
     if (this.data.deletedExamIds) {
-      this.data.deletedExamIds = this.data.deletedExamIds.filter(id => id !== exam.id);
+      this.data.deletedExamIds = this.data.deletedExamIds.filter(id => id !== sealedExam.id);
     }
-    const idx = this.data.exams.findIndex(e => e.id === exam.id);
+    const idx = this.data.exams.findIndex(e => e.id === sealedExam.id);
     if (idx >= 0) {
-      this.data.exams[idx] = exam;
+      this.data.exams[idx] = sealedExam;
     } else {
-      this.data.exams.unshift(exam);
+      this.data.exams.unshift(sealedExam);
     }
     this.persist(true);
   }
@@ -622,6 +638,8 @@ class DatabaseManager {
     const exam = this.data.exams.find(e => e.id.toUpperCase() === cleanId || (e.code && e.code.trim().toUpperCase() === cleanId));
     const code = exam?.code?.trim().toUpperCase();
     const targetId = exam?.id?.trim().toUpperCase() || cleanId;
+    const normName = normalizeStudentName(studentName);
+    const normClass = normalizeClassName(studentClass);
 
     return this.data.sessions.find(
       s => {
@@ -629,8 +647,8 @@ class DatabaseManager {
         const sExamIdUpper = String(s.examId).trim().toUpperCase();
         const matchExam = sExamIdUpper === targetId || (code ? sExamIdUpper === code : false);
         return matchExam &&
-               String(s.studentClass || '').trim().toLowerCase() === String(studentClass || '').trim().toLowerCase() &&
-               String(s.studentName || '').trim().toLowerCase() === String(studentName || '').trim().toLowerCase() &&
+               normalizeClassName(s.studentClass) === normClass &&
+               normalizeStudentName(s.studentName) === normName &&
                s.status !== 'submitted';
       }
     );
@@ -716,7 +734,12 @@ class DatabaseManager {
   }
 
   public saveStudents(students: StudentInfo[]): void {
-    this.data.students = students;
+    this.data.students = students.map(s => {
+      if (s && s.password && !isHashedPassword(s.password)) {
+        return { ...s, password: hashPasswordSync(s.password) };
+      }
+      return s;
+    });
     this.persist();
   }
 

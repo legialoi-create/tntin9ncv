@@ -12,6 +12,13 @@ import {
   where
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
+import {
+  sealExamQuestions,
+  sealOptionOrder,
+  unsealOptionOrder,
+  hashPasswordSync,
+  isHashedPassword,
+} from '../utils/security.ts';
 
 // Set Firestore log level to avoid benign offline / backend timeout warnings in preview environments
 try {
@@ -100,8 +107,11 @@ export async function saveStudentSessionToFirestore(session: {
     if (Array.isArray(session.questionOrder) && session.questionOrder.length > 0) {
       payload.questionOrder = session.questionOrder.map(String);
     }
-    if (session.optionOrder && typeof session.optionOrder === 'object') {
-      payload.optionOrder = session.optionOrder;
+    if (session.optionOrder) {
+      payload.sealedOptionOrder =
+        typeof session.optionOrder === 'string'
+          ? session.optionOrder
+          : sealOptionOrder(session.optionOrder as any, String(session.sessionId));
     }
 
     await setDoc(doc(firestore, 'submissions', docId), payload, { merge: true });
@@ -180,8 +190,11 @@ export async function savePermanentSubmission(sub: FirestoreSubmission): Promise
     if (Array.isArray(sub.questionOrder) && sub.questionOrder.length > 0) {
       cleanPayload.questionOrder = sub.questionOrder.map(String);
     }
-    if (sub.optionOrder && typeof sub.optionOrder === 'object' && Object.keys(sub.optionOrder).length > 0) {
-      cleanPayload.optionOrder = sub.optionOrder;
+    if (sub.optionOrder) {
+      cleanPayload.sealedOptionOrder =
+        typeof sub.optionOrder === 'string'
+          ? sub.optionOrder
+          : sealOptionOrder(sub.optionOrder as any, String(sub.sessionId));
     }
 
     await setDoc(doc(firestore, 'submissions', docId), cleanPayload, { merge: true });
@@ -256,30 +269,36 @@ export async function getSubmissionsFromFirestore(
         const computedScore = rawScore !== undefined && !isNaN(rawScore) ? rawScore : (rawBest !== undefined && !isNaN(rawBest) ? rawBest : 0);
         const computedBest = rawBest !== undefined && !isNaN(rawBest) ? rawBest : computedScore;
 
-        results.push({
-          sessionId: String(data.sessionId || d.id.replace(/^sub_/, '')),
-          examId: String(data.examId || examId || ''),
-          examCode: String(data.examCode || examCode || data.examId || ''),
-          studentName: String(data.studentName || data.name || 'Học sinh').trim(),
-          studentClass: String(data.studentClass || data.class || '').trim(),
-          sbd: data.sbd ? String(data.sbd).trim() : undefined,
-          score: computedScore,
-          bestScore: computedBest,
-          correctCount: Number(data.correctCount) || 0,
-          incorrectCount: Number(data.incorrectCount) || 0,
-          unansweredCount: Number(data.unansweredCount) || 0,
-          totalQuestions: Number(data.totalQuestions) || 10,
-          attemptNumber: Number(data.attemptNumber) || 1,
-          violationCount: Number(data.violationCount) || 0,
-          submittedAt: data.submittedAt || data.updatedAt || new Date().toISOString(),
-          status: data.status || 'submitted',
-          startedAt: data.startedAt,
-          answeredCount: Number(data.answeredCount) || (data.status === 'submitted' ? (Number(data.totalQuestions) || 10) : 0),
-          answers: data.answers || {},
-          questionOrder: Array.isArray(data.questionOrder) ? data.questionOrder : undefined,
-          optionOrder: data.optionOrder && typeof data.optionOrder === 'object' ? data.optionOrder : undefined
-        });
-      }
+          const resolvedSessionId = String(data.sessionId || d.id.replace(/^sub_/, ''));
+          const decodedOptionOrder = unsealOptionOrder(
+            data.sealedOptionOrder || data.optionOrder,
+            resolvedSessionId
+          );
+
+          results.push({
+            sessionId: resolvedSessionId,
+            examId: String(data.examId || examId || ''),
+            examCode: String(data.examCode || examCode || data.examId || ''),
+            studentName: String(data.studentName || data.name || 'Học sinh').trim(),
+            studentClass: String(data.studentClass || data.class || '').trim(),
+            sbd: data.sbd ? String(data.sbd).trim() : undefined,
+            score: computedScore,
+            bestScore: computedBest,
+            correctCount: Number(data.correctCount) || 0,
+            incorrectCount: Number(data.incorrectCount) || 0,
+            unansweredCount: Number(data.unansweredCount) || 0,
+            totalQuestions: Number(data.totalQuestions) || 10,
+            attemptNumber: Number(data.attemptNumber) || 1,
+            violationCount: Number(data.violationCount) || 0,
+            submittedAt: data.submittedAt || data.updatedAt || new Date().toISOString(),
+            status: data.status || 'submitted',
+            startedAt: data.startedAt,
+            answeredCount: Number(data.answeredCount) || (data.status === 'submitted' ? (Number(data.totalQuestions) || 10) : 0),
+            answers: data.answers || {},
+            questionOrder: Array.isArray(data.questionOrder) ? data.questionOrder : undefined,
+            optionOrder: Object.keys(decodedOptionOrder).length > 0 ? (decodedOptionOrder as any) : undefined
+          });
+        }
     });
   } catch (err) {
     console.warn('[Firebase] getSubmissionsFromFirestore error:', err);
@@ -496,8 +515,9 @@ export async function saveExamToFirestore(exam: any): Promise<void> {
     const upperId = String(exam.id).trim().toUpperCase();
     const upperCode = exam.code ? String(exam.code).trim().toUpperCase() : '';
     await unmarkDeletedExamInFirestore(upperId, upperCode);
+    const sealedExam = sealExamQuestions(exam);
     await setDoc(doc(firestore, 'exams', String(exam.id).trim()), {
-      ...exam,
+      ...sealedExam,
       updatedAt: new Date().toISOString()
     }, { merge: true });
   } catch (err) {
@@ -589,6 +609,13 @@ export async function saveStudentsToFirestore(students: any[]): Promise<boolean>
       classCounter[clsKey] = (classCounter[clsKey] || 0) + 1;
       const sttVal = typeof s.stt === 'number' && s.stt > 0 ? s.stt : classCounter[clsKey];
 
+      const rawPass = s.password ? String(s.password).trim() : '';
+      const safeHashedPass = rawPass
+        ? isHashedPassword(rawPass)
+          ? rawPass
+          : hashPasswordSync(rawPass)
+        : '';
+
       const docId = `st_${s.id}`.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
       const payload: Record<string, any> = {
         id: String(s.id),
@@ -597,7 +624,7 @@ export async function saveStudentsToFirestore(students: any[]): Promise<boolean>
         sbd: s.sbd ? String(s.sbd).trim() : '',
         stt: sttVal,
         username: s.username ? String(s.username).trim() : '',
-        password: s.password ? String(s.password).trim() : '',
+        password: safeHashedPass,
         isPasswordChanged: Boolean(s.isPasswordChanged),
         updatedAt: new Date().toISOString()
       };

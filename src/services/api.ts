@@ -26,6 +26,70 @@ import {
   sortStudentsByRosterOrder
 } from './firebase';
 import { parseExamLocally } from '../utils/localExamParser';
+import {
+  extractQuestionCorrectAnswer,
+  sealExamQuestions,
+  unsealExamQuestions,
+  sanitizeExamForStudent,
+  sealOptionOrder,
+  unsealOptionOrder,
+  sealValue,
+  unsealValue,
+  hashPasswordSync,
+  verifyPasswordSync,
+  verifyTeacherPasswordHash,
+  isHashedPassword,
+  normalizeStudentName,
+  normalizeClassName,
+  getStudentRawAnswer,
+} from '../utils/security.ts';
+
+function saveEncryptedSessionMeta(sessionId: string, meta: Record<string, any>): void {
+  if (!sessionId) return;
+  try {
+    const sealed = sealValue(JSON.stringify(meta), `SESSION_META::${sessionId}`);
+    sessionStorage.setItem(`ncv_session_meta_${sessionId}`, sealed);
+  } catch (e) {}
+}
+
+function loadEncryptedSessionMeta(sessionId: string): Record<string, any> {
+  if (!sessionId) return {};
+  try {
+    const raw = sessionStorage.getItem(`ncv_session_meta_${sessionId}`);
+    if (!raw) return {};
+    const unsealed = unsealValue(raw, `SESSION_META::${sessionId}`);
+    if (unsealed) {
+      return JSON.parse(unsealed);
+    }
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+function saveEncryptedFallbackExam(sessionId: string, exam: any): void {
+  if (!sessionId || !exam) return;
+  try {
+    const sealedExam = sealExamQuestions(exam);
+    const cipher = sealValue(JSON.stringify(sealedExam), `FALLBACK_EXAM::${sessionId}`);
+    sessionStorage.setItem(`ncv_fallback_exam_${sessionId}`, cipher);
+  } catch (e) {}
+}
+
+function loadEncryptedFallbackExam(sessionId: string): any | null {
+  if (!sessionId) return null;
+  try {
+    const raw = sessionStorage.getItem(`ncv_fallback_exam_${sessionId}`);
+    if (!raw) return null;
+    const unsealed = unsealValue(raw, `FALLBACK_EXAM::${sessionId}`);
+    if (unsealed) {
+      return JSON.parse(unsealed);
+    }
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 const TEACHER_SESSION_KEY = 'ncv_teacher_auth_v3';
 
@@ -190,7 +254,8 @@ async function gatherStudentExamHistory(params: {
 
   let fbExam: Exam | undefined;
   try {
-    const fbExams = await getExamsFromFirestore();
+    // Force refresh from Firestore so teacher changes to maxAttempts, isOpen, or schedule apply immediately
+    const fbExams = await getExamsFromFirestore(true);
     if (Array.isArray(fbExams)) {
       fbExam = fbExams.find(matchesExam);
     }
@@ -201,9 +266,9 @@ async function gatherStudentExamHistory(params: {
     const localTime = new Date(localExam.updatedAt || localExam.createdAt || 0).getTime();
     const fbTime = new Date(fbExam.updatedAt || fbExam.createdAt || 0).getTime();
     const keyedQuestions =
-      Array.isArray(fbExam.questions) && fbExam.questions.some((q: any) => q && q.correctAnswer)
+      Array.isArray(fbExam.questions) && fbExam.questions.some((q: any) => q && extractQuestionCorrectAnswer(q, fbExam!.id) !== '')
         ? fbExam.questions
-        : Array.isArray(localExam.questions) && localExam.questions.some((q: any) => q && q.correctAnswer)
+        : Array.isArray(localExam.questions) && localExam.questions.some((q: any) => q && extractQuestionCorrectAnswer(q, localExam!.id) !== '')
         ? localExam.questions
         : fbExam.questions || localExam.questions;
 
@@ -216,6 +281,10 @@ async function gatherStudentExamHistory(params: {
 
   if (!resolvedExam) {
     resolvedExam = (SEED_APP_DATA.exams as any[]).find(matchesExam);
+  }
+
+  if (resolvedExam) {
+    resolvedExam = sealExamQuestions(resolvedExam);
   }
 
   const aliases = Array.from(
@@ -233,19 +302,19 @@ async function gatherStudentExamHistory(params: {
   const upperAliases = new Set(aliases.map((a) => a.toUpperCase()));
   const normAliases = new Set(aliases.map((a) => a.toUpperCase().replace(/[^A-Z0-9]/g, '')).filter(Boolean));
 
-  const sNameNorm = String(params.studentName || '').trim().toLowerCase();
-  const sClassNorm = String(params.studentClass || '').trim().toLowerCase();
+  const sNameNorm = normalizeStudentName(params.studentName);
+  const sClassNorm = normalizeClassName(params.studentClass);
   const excludeId = String(params.excludeSessionId || '').trim();
 
   const sessionMap = new Map<string, any>();
 
   const registerSubmittedRecord = (s: any) => {
-    if (!s || s.status !== 'submitted') return;
+    if (!s || (s.status !== 'submitted' && s.status !== 'locked')) return;
     const sid = String(s.sessionId || s.id || '').trim();
     if (!sid || (excludeId && sid === excludeId)) return;
 
-    const recName = String(s.studentName || s.name || '').trim().toLowerCase();
-    const recClass = String(s.studentClass || s.class || '').trim().toLowerCase();
+    const recName = normalizeStudentName(s.studentName || s.name);
+    const recClass = normalizeClassName(s.studentClass || s.class);
     if (!sNameNorm || !sClassNorm || recName !== sNameNorm || recClass !== sClassNorm) return;
 
     // Verify exam match if record has examId/examCode
@@ -392,29 +461,14 @@ export const api = {
       }
     }
 
-    // Client-side fallback / override strictly for Teacher Lợi's official passwords
+    // Client-side fallback / override strictly using one-way cryptographic hashes (no plain passwords in bundle)
     const allowedUsers = ['legialoi', 'legialoi@gmail.com', 'admin', 'teacher', 'gv'];
     const isValidUser = allowedUsers.includes(trimmedUser);
 
-    const allowedPasswords = [
-      '101   101!@#',
-      '101 101!@#',
-      '101101!@#',
-      '101   101',
-      '101 101',
-      '101101',
-      'GiaLoi@2026'
-    ];
-
-    const localPass = localStorage.getItem('ncv_admin_password');
-    const normalizedInputPass = trimmedPass.replace(/\s+/g, ' ');
-    const noSpaceInputPass = trimmedPass.replace(/\s+/g, '');
-
+    const localPassHash = localStorage.getItem('ncv_admin_password');
     const isValidPass =
-      (localPass && trimmedPass === localPass) ||
-      allowedPasswords.includes(trimmedPass) ||
-      allowedPasswords.includes(normalizedInputPass) ||
-      allowedPasswords.includes(noSpaceInputPass);
+      (localPassHash && verifyPasswordSync(trimmedPass, localPassHash)) ||
+      verifyTeacherPasswordHash(trimmedPass);
 
     if (isValidUser && isValidPass) {
       const token = btoa(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
@@ -485,6 +539,10 @@ export const api = {
   },
 
   changeTeacherPassword: async (currentPassword: string, newPassword: string) => {
+    const hashedNew = hashPasswordSync(newPassword.trim());
+    try {
+      localStorage.setItem('ncv_admin_password', hashedNew);
+    } catch (e) {}
     const res = await fetch('/api/auth/change-password', {
       method: 'POST',
       headers: getHeaders(true),
@@ -652,25 +710,37 @@ export const api = {
     });
 
     const cleanExams = Array.from(examMap.values());
-    localStorage.setItem('ncv_exams_data', JSON.stringify(cleanExams));
+    // Always store sealed questions in localStorage so DevTools inspection never reveals plain answers
+    const sealedForStorage = cleanExams.map((e) => sealExamQuestions(e));
+    localStorage.setItem('ncv_exams_data', JSON.stringify(sealedForStorage));
 
-    if (asTeacher && fbExams.length === 0 && cleanExams.length > 0) {
-      cleanExams.forEach((exam) => {
+    const isVerifiedTeacher = asTeacher && isValidTeacherToken(getAuthToken());
+
+    if (isVerifiedTeacher && fbExams.length === 0 && sealedForStorage.length > 0) {
+      sealedForStorage.forEach((exam) => {
         saveExamToFirestore(exam).catch(() => {});
       });
     }
 
-    return cleanExams;
+    if (isVerifiedTeacher) {
+      return sealedForStorage.map((e) => unsealExamQuestions(e));
+    }
+
+    // For students, return sanitized exams with no plain correctAnswer or explanation
+    return sealedForStorage.map((e) => sanitizeExamForStudent(e));
   },
 
   getExam: async (id: string, asTeacher = false): Promise<Exam> => {
+    const isVerifiedTeacher = asTeacher && isValidTeacherToken(getAuthToken());
     try {
       const res = await fetch(`/api/exams/${id}`, {
-        headers: getHeaders(asTeacher),
+        headers: getHeaders(isVerifiedTeacher),
       });
       if (res.ok) {
         const data = await res.json();
-        if (data && data.id) return data;
+        if (data && data.id) {
+          return isVerifiedTeacher ? unsealExamQuestions(data) : sanitizeExamForStudent(data);
+        }
       }
     } catch (e) {}
 
@@ -679,7 +749,9 @@ export const api = {
       try {
         const exams: Exam[] = JSON.parse(cached) || [];
         const found = exams.find((e) => e.id === id || e.code === id);
-        if (found) return found;
+        if (found) {
+          return isVerifiedTeacher ? unsealExamQuestions(found) : sanitizeExamForStudent(found);
+        }
       } catch (e) {}
     }
     throw new Error('Không tìm thấy bài kiểm tra');
@@ -692,6 +764,7 @@ export const api = {
       updatedAt: new Date().toISOString(),
       createdAt: exam.createdAt || new Date().toISOString(),
     };
+    const sealedFinalExam = sealExamQuestions(finalExam);
 
     // Unmark from deleted blacklist
     try {
@@ -714,15 +787,15 @@ export const api = {
     }
     const idx = exams.findIndex((e) => e.id === finalExam.id || (finalExam.code && e.code === finalExam.code));
     if (idx >= 0) {
-      exams[idx] = finalExam;
+      exams[idx] = sealedFinalExam;
     } else {
-      exams.unshift(finalExam);
+      exams.unshift(sealedFinalExam);
     }
     localStorage.setItem('ncv_exams_data', JSON.stringify(exams));
 
     // Save to Firebase Firestore for permanent cloud storage across all Vercel cold starts
     try {
-      await saveExamToFirestore(finalExam);
+      await saveExamToFirestore(sealedFinalExam);
     } catch (e) {
       console.warn('[Firebase] saveExamToFirestore error:', e);
     }
@@ -1771,6 +1844,37 @@ export const api = {
     currentPassword?: string;
     newPassword: string;
   }) => {
+    const hashedNewPass = hashPasswordSync(params.newPassword.trim());
+
+    const persistHashedPassLocallyAndCloud = () => {
+      if (params.username) {
+        try {
+          localStorage.setItem(`ncv_student_pass_${params.username.toLowerCase()}`, hashedNewPass);
+        } catch (e) {}
+      }
+      try {
+        const cached = localStorage.getItem('ncv_students_data');
+        if (cached) {
+          const all: StudentInfo[] = JSON.parse(cached) || [];
+          let updatedStudent: StudentInfo | null = null;
+          const nextAll = all.map((s) => {
+            if (
+              (params.studentId && s.id === params.studentId) ||
+              (params.username && s.username && s.username.toLowerCase() === params.username.trim().toLowerCase())
+            ) {
+              updatedStudent = { ...s, password: hashedNewPass, isPasswordChanged: true };
+              return updatedStudent;
+            }
+            return s;
+          });
+          if (updatedStudent) {
+            localStorage.setItem('ncv_students_data', JSON.stringify(nextAll));
+            saveStudentsToFirestore([updatedStudent]).catch(() => {});
+          }
+        }
+      } catch (e) {}
+    };
+
     let res: Response | null = null;
     try {
       res = await fetch('/api/students/change-password', {
@@ -1780,18 +1884,14 @@ export const api = {
       });
       if (res.ok) {
         const data = await res.json();
-        if (params.username) {
-          localStorage.setItem(`ncv_student_pass_${params.username.toLowerCase()}`, params.newPassword.trim());
-        }
+        persistHashedPassLocallyAndCloud();
         return data;
       }
     } catch (e) {
       // ignore fetch error
     }
 
-    if (params.username) {
-      localStorage.setItem(`ncv_student_pass_${params.username.toLowerCase()}`, params.newPassword.trim());
-    }
+    persistHashedPassLocallyAndCloud();
 
     return {
       success: true,
@@ -1813,7 +1913,7 @@ export const api = {
       studentName: params.studentName,
       studentClass: params.studentClass,
     });
-    const realExamSnapshot = history.exam || null;
+    const realExamSnapshot = history.exam ? sealExamQuestions(history.exam) : null;
 
     let res: Response | null = null;
     try {
@@ -1899,11 +1999,28 @@ export const api = {
     const usernameLower = String(params.username || '').toLowerCase();
     const storedCustomPass = usernameLower ? localStorage.getItem(`ncv_student_pass_${usernameLower}`) : null;
 
+    let rosterStoredPass: string | undefined;
+    try {
+      const cachedSt = localStorage.getItem('ncv_students_data');
+      if (cachedSt) {
+        const list: StudentInfo[] = JSON.parse(cachedSt) || [];
+        const normName = normalizeStudentName(params.studentName);
+        const normCls = normalizeClassName(params.studentClass);
+        const foundSt = list.find(
+          (s) =>
+            (usernameLower && s.username && s.username.toLowerCase() === usernameLower) ||
+            (normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls)
+        );
+        if (foundSt?.password) rosterStoredPass = foundSt.password;
+      }
+    } catch (e) {}
+
     const inputPassNoSpace = inputPass.replace(/\s+/g, '').toLowerCase();
     const defaultPassNoSpace = defaultPass.toLowerCase();
 
     const isPassValid =
-      (storedCustomPass && inputPass === storedCustomPass) ||
+      (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||
+      (rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass)) ||
       inputPassNoSpace === defaultPassNoSpace ||
       inputPassNoSpace === '123456' ||
       inputPassNoSpace === '123' ||
@@ -2033,6 +2150,10 @@ export const api = {
       );
     }
 
+    if (matchedCachedExam) {
+      matchedCachedExam = sealExamQuestions(matchedCachedExam);
+    }
+
     const effectiveMaxAttempts = Math.max(1, Number(matchedCachedExam?.maxAttempts ?? history.maxAttempts ?? 1));
 
     // Strictly enforce maxAttempts on the client before starting a new attempt
@@ -2073,6 +2194,7 @@ export const api = {
           questions: StudentQuestion[];
           questionOrder?: string[];
           optionOrder?: Record<string, Record<string, string>>;
+          sealedOptionOrder?: string;
           savedAnswers: Record<string, 'A' | 'B' | 'C' | 'D'>;
           flaggedQuestions: string[];
           violationCount: number;
@@ -2098,17 +2220,21 @@ export const api = {
 
         const resolvedExamId = matchedCachedExam?.id || String(params.examCode || '').trim();
         const resolvedExamCode = matchedCachedExam?.code || String(params.examCode || '').trim();
+        const sealedOpt =
+          serverSession.sealedOptionOrder ||
+          (serverSession.optionOrder
+            ? sealOptionOrder(serverSession.optionOrder as any, serverSession.sessionId)
+            : '');
+        delete serverSession.optionOrder;
+        serverSession.sealedOptionOrder = sealedOpt;
 
-        try {
-          sessionStorage.setItem(
-            `ncv_session_meta_${serverSession.sessionId}`,
-            JSON.stringify({
-              questionOrder: serverSession.questionOrder,
-              optionOrder: serverSession.optionOrder,
-              examId: resolvedExamId
-            })
-          );
-        } catch (e) {}
+        saveEncryptedSessionMeta(serverSession.sessionId, {
+          questionOrder: serverSession.questionOrder,
+          sealedOptionOrder: sealedOpt,
+          examId: resolvedExamId,
+          examCode: resolvedExamCode,
+        });
+
         // Register student session in Firebase Firestore so Live Proctoring immediately reflects student entry
         try {
           saveStudentSessionToFirestore({
@@ -2125,7 +2251,7 @@ export const api = {
             violationCount: 0,
             answeredCount: 0,
             questionOrder: serverSession.questionOrder,
-            optionOrder: serverSession.optionOrder
+            optionOrder: sealedOpt as any
           }).catch(() => {});
 
           const activeItem = {
@@ -2190,6 +2316,9 @@ export const api = {
     }
     if (!exam) {
       exam = (cachedExams && cachedExams.length > 0) ? (cachedExams.find(e => e.isOpen) || cachedExams[0]) : (SEED_APP_DATA.exams[0] as any);
+    }
+    if (exam) {
+      exam = sealExamQuestions(exam);
     }
 
     const fallbackMaxAttempts = Math.max(1, Number(exam?.maxAttempts ?? effectiveMaxAttempts));
@@ -2270,7 +2399,6 @@ export const api = {
         };
       });
 
-      // Keep original q.correctAnswer and original q.options so optionOrder mapping grades consistently
       gradedFallbackQuestions.push({
         ...q
       });
@@ -2290,21 +2418,18 @@ export const api = {
     const expiresAt = new Date(now.getTime() + (exam?.durationMinutes || 45) * 60 * 1000);
     const sessionId = `ses-fallback-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const nextAttemptNum = history.attemptsMade + 1;
+    const sealedFallbackOptOrder = sealOptionOrder(fallbackOptionOrder as any, sessionId);
 
-    try {
-      sessionStorage.setItem(`ncv_fallback_exam_${sessionId}`, JSON.stringify({
-        ...exam,
-        questions: gradedFallbackQuestions
-      }));
-      sessionStorage.setItem(
-        `ncv_session_meta_${sessionId}`,
-        JSON.stringify({
-          questionOrder: fallbackQuestionOrder,
-          optionOrder: fallbackOptionOrder,
-          examId: exam?.id || cleanCode
-        })
-      );
-    } catch (e) {}
+    saveEncryptedFallbackExam(sessionId, {
+      ...exam,
+      questions: gradedFallbackQuestions
+    });
+    saveEncryptedSessionMeta(sessionId, {
+      questionOrder: fallbackQuestionOrder,
+      sealedOptionOrder: sealedFallbackOptOrder,
+      examId: exam?.id || cleanCode,
+      examCode: exam?.code || cleanCode,
+    });
 
     const fallbackSession = {
       sessionId,
@@ -2312,7 +2437,7 @@ export const api = {
       expiresAt: expiresAt.toISOString(),
       questions: studentQuestions,
       questionOrder: fallbackQuestionOrder,
-      optionOrder: fallbackOptionOrder,
+      sealedOptionOrder: sealedFallbackOptOrder,
       savedAnswers: {},
       flaggedQuestions: [],
       violationCount: 0,
@@ -2337,7 +2462,7 @@ export const api = {
         violationCount: 0,
         answeredCount: 0,
         questionOrder: fallbackQuestionOrder,
-        optionOrder: fallbackOptionOrder
+        optionOrder: sealedFallbackOptOrder as any
       }).catch(() => {});
 
       const activeItem = {
@@ -2385,20 +2510,12 @@ export const api = {
       localStorage.setItem(key, JSON.stringify(current));
     } catch (e) {}
 
-    let metaPayload: Record<string, any> = {};
-    try {
-      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${params.sessionId}`);
-      if (metaRaw) {
-        const meta = JSON.parse(metaRaw);
-        if (meta && typeof meta === 'object') {
-          metaPayload = {
-            questionOrder: meta.questionOrder,
-            optionOrder: meta.optionOrder,
-            examId: meta.examId
-          };
-        }
-      }
-    } catch (e) {}
+    const meta = loadEncryptedSessionMeta(params.sessionId);
+    const metaPayload: Record<string, any> = {
+      questionOrder: meta.questionOrder,
+      sealedOptionOrder: meta.sealedOptionOrder || meta.optionOrder,
+      examId: meta.examId,
+    };
 
     try {
       const res = await fetch('/api/student/answer', {
@@ -2418,20 +2535,12 @@ export const api = {
     type: string;
     description: string;
   }) => {
-    let metaPayload: Record<string, any> = {};
-    try {
-      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${params.sessionId}`);
-      if (metaRaw) {
-        const meta = JSON.parse(metaRaw);
-        if (meta && typeof meta === 'object') {
-          metaPayload = {
-            questionOrder: meta.questionOrder,
-            optionOrder: meta.optionOrder,
-            examId: meta.examId
-          };
-        }
-      }
-    } catch (e) {}
+    const meta = loadEncryptedSessionMeta(params.sessionId);
+    const metaPayload: Record<string, any> = {
+      questionOrder: meta.questionOrder,
+      sealedOptionOrder: meta.sealedOptionOrder || meta.optionOrder,
+      examId: meta.examId,
+    };
 
     try {
       const res = await fetch('/api/student/violation', {
@@ -2450,12 +2559,59 @@ export const api = {
     return { violationCount: 1, isLocked: false, maxViolations: 3 };
   },
 
-  lockExit: async (params: { sessionId: string }) => {
+  lockExit: async (params: {
+    sessionId: string;
+    examId?: string;
+    examCode?: string;
+    studentName?: string;
+    studentClass?: string;
+    sbd?: string;
+    answers?: Record<string, string>;
+    questionOrder?: string[];
+    optionOrder?: Record<string, Record<string, string>>;
+    sealedOptionOrder?: string;
+    violationCount?: number;
+    attemptNumber?: number;
+    bestScoreSoFar?: number;
+    startedAt?: string;
+  }) => {
+    const meta = loadEncryptedSessionMeta(params.sessionId);
+    const resolvedExamId = String(params.examId || meta.examId || params.examCode || '').trim();
+    const resolvedExamCode = String(params.examCode || meta.examCode || resolvedExamId).trim();
+    const resolvedQuestionOrder = params.questionOrder || meta.questionOrder;
+    const resolvedSealedOptionOrder = params.sealedOptionOrder || meta.sealedOptionOrder || meta.optionOrder;
+
+    // Also submit/finalize through submitExam pipeline so locked session is permanently saved to Firestore and localStorage as 1 used attempt
+    try {
+      await api.submitExam({
+        sessionId: params.sessionId,
+        examId: resolvedExamId,
+        examCode: resolvedExamCode,
+        studentName: params.studentName,
+        studentClass: params.studentClass,
+        sbd: params.sbd,
+        answers: params.answers,
+        questionOrder: resolvedQuestionOrder,
+        optionOrder: params.optionOrder,
+        sealedOptionOrder: resolvedSealedOptionOrder,
+        violationCount: Math.max(Number(params.violationCount) || 3, 3),
+        attemptNumber: params.attemptNumber,
+        bestScoreSoFar: params.bestScoreSoFar,
+        startedAt: params.startedAt,
+      });
+    } catch (e) {}
+
     try {
       const res = await fetch('/api/student/lock-exit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({
+          ...params,
+          examId: resolvedExamId,
+          examCode: resolvedExamCode,
+          questionOrder: resolvedQuestionOrder,
+          sealedOptionOrder: resolvedSealedOptionOrder,
+        }),
       });
       if (res.ok) {
         return await safeJson(res, 'Lỗi cập nhật phiên bị khóa');
@@ -2475,20 +2631,12 @@ export const api = {
     status?: string;
     attemptNumber?: number;
   }) => {
-    let metaPayload: Record<string, any> = {};
-    try {
-      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${params.sessionId}`);
-      if (metaRaw) {
-        const meta = JSON.parse(metaRaw);
-        if (meta && typeof meta === 'object') {
-          metaPayload = {
-            questionOrder: meta.questionOrder,
-            optionOrder: meta.optionOrder,
-            examId: meta.examId
-          };
-        }
-      }
-    } catch (e) {}
+    const meta = loadEncryptedSessionMeta(params.sessionId);
+    const metaPayload: Record<string, any> = {
+      questionOrder: meta.questionOrder,
+      sealedOptionOrder: meta.sealedOptionOrder || meta.optionOrder,
+      examId: meta.examId,
+    };
 
     try {
       const res = await fetch('/api/student/heartbeat', {
@@ -2516,6 +2664,7 @@ export const api = {
     answers?: Record<string, string>;
     questionOrder?: string[];
     optionOrder?: Record<string, Record<string, string>>;
+    sealedOptionOrder?: string;
     violationCount?: number;
     attemptNumber?: number;
     bestScoreSoFar?: number;
@@ -2556,12 +2705,13 @@ export const api = {
           localStorage.getItem(`ncv_session_${sessionId}_answers`) ||
           localStorage.getItem(`offline_ans_${sessionId}`);
         if (savedAnswersRaw) {
-          payload.answers = JSON.parse(savedAnswersRaw);
+          const unsealedAns = unsealValue(savedAnswersRaw, `OFFLINE_ANS::${sessionId}`);
+          payload.answers = JSON.parse(unsealedAns || savedAnswersRaw);
         }
       } catch (e) {}
     }
 
-    // Attach session meta (questionOrder, optionOrder), examSnapshot, and prior student attempts for Vercel cold-start accuracy
+    // Attach session meta (questionOrder, sealedOptionOrder), examSnapshot, and prior student attempts for Vercel cold-start accuracy
     const history = await gatherStudentExamHistory({
       examId: payload.examId,
       examCode: payload.examCode,
@@ -2571,16 +2721,16 @@ export const api = {
     });
 
     try {
-      const metaRaw = sessionStorage.getItem(`ncv_session_meta_${sessionId}`);
-      if (metaRaw) {
-        const meta = JSON.parse(metaRaw);
-        if (!payload.questionOrder && meta.questionOrder) payload.questionOrder = meta.questionOrder;
-        if (!payload.optionOrder && meta.optionOrder) payload.optionOrder = meta.optionOrder;
-        if (!payload.examId && meta.examId) payload.examId = meta.examId;
+      const meta = loadEncryptedSessionMeta(sessionId);
+      if (!payload.questionOrder && meta.questionOrder) payload.questionOrder = meta.questionOrder;
+      if (!payload.sealedOptionOrder && (meta.sealedOptionOrder || meta.optionOrder)) {
+        payload.sealedOptionOrder = meta.sealedOptionOrder || meta.optionOrder;
       }
+      if (!payload.examId && meta.examId) payload.examId = meta.examId;
+      if (!payload.examCode && meta.examCode) payload.examCode = meta.examCode;
 
       if (history.exam) {
-        payload.examSnapshot = history.exam;
+        payload.examSnapshot = sealExamQuestions(history.exam);
         if (!payload.examId && history.exam.id) payload.examId = history.exam.id;
         if (!payload.examCode && history.exam.code) payload.examCode = history.exam.code;
       }
@@ -2615,14 +2765,14 @@ export const api = {
     // Fallback grading for client sessions or Vercel serverless temporary disconnection
     if (!result) {
       try {
-        const savedExamRaw = sessionStorage.getItem(`ncv_fallback_exam_${sessionId}`);
+        const savedExamObj = loadEncryptedFallbackExam(sessionId);
         const answers: Record<string, string> = payload.answers || {};
 
         let exam: Exam | null = null;
-        if (payload.examSnapshot && Array.isArray(payload.examSnapshot.questions) && payload.examSnapshot.questions.some((q: any) => q && q.correctAnswer)) {
+        if (payload.examSnapshot && Array.isArray(payload.examSnapshot.questions) && payload.examSnapshot.questions.some((q: any) => q && (extractQuestionCorrectAnswer(q, payload.examSnapshot.id) !== '' || q.correctAnswer))) {
           exam = payload.examSnapshot;
-        } else if (savedExamRaw) {
-          exam = JSON.parse(savedExamRaw);
+        } else if (savedExamObj) {
+          exam = savedExamObj;
         } else {
           const targetId = String(payload.examId || payload.examCode || '').trim().toUpperCase();
           const targetCode = String(payload.examCode || payload.examId || '').trim().toUpperCase();
@@ -2654,7 +2804,7 @@ export const api = {
         const allQuestions: Question[] = Array.isArray(exam?.questions) ? exam!.questions : [];
         const mappedQuestions = Array.isArray(payload.questionOrder) && payload.questionOrder.length > 0
           ? (payload.questionOrder
-              .map((qId: string) => allQuestions.find((q) => q && q.id === qId))
+              .map((qId: string) => allQuestions.find((q) => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, '_') === String(qId).replace(/[\/\.]/g, '_'))))
               .filter(Boolean) as Question[])
           : [];
         const questionsToGrade = mappedQuestions.length > 0 ? mappedQuestions : allQuestions;
@@ -2662,21 +2812,33 @@ export const api = {
         let correct = 0;
         let incorrect = 0;
 
+        const decodedOptOrder = unsealOptionOrder(
+          payload.sealedOptionOrder || payload.optionOrder,
+          sessionId
+        );
+
         for (const q of questionsToGrade) {
           if (!q || !q.id) continue;
-          const rawAns = answers[q.id];
+          const rawAns = getStudentRawAnswer(answers, q.id);
           const displayChoice = normalizeOptKey(rawAns, q.options);
           if (!displayChoice) continue;
 
-          const mapping = payload.optionOrder ? payload.optionOrder[q.id] : undefined;
+          const safeKey = String(q.id).replace(/[\/\.]/g, '_');
+          const mapping: any = decodedOptOrder ? (decodedOptOrder[q.id] || decodedOptOrder[safeKey]) : undefined;
           let origChoice = displayChoice;
-          if (mapping && typeof mapping === 'object') {
+          if (Array.isArray(mapping) && mapping.length >= 4) {
+            const idx = ['A', 'B', 'C', 'D'].indexOf(displayChoice);
+            if (idx !== -1 && mapping[idx]) {
+              const normMapped = normalizeOptKey(mapping[idx], q.options);
+              if (normMapped) origChoice = normMapped;
+            }
+          } else if (mapping && typeof mapping === 'object') {
             const mappedVal = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
             const normMapped = normalizeOptKey(mappedVal, q.options);
             if (normMapped) origChoice = normMapped;
           }
 
-          const expectedAnswer = normalizeOptKey(q.correctAnswer, q.options);
+          const expectedAnswer = extractQuestionCorrectAnswer(q, exam?.id) || normalizeOptKey(q.correctAnswer, q.options);
           if (origChoice === expectedAnswer) {
             correct++;
           } else {
@@ -2865,7 +3027,7 @@ export const api = {
           status: 'submitted',
           answers: payload.answers || {},
           questionOrder: payload.questionOrder,
-          optionOrder: payload.optionOrder
+          optionOrder: payload.sealedOptionOrder || payload.optionOrder
         });
       } catch (e) {
         console.warn('[Firebase] Save submission warning:', e);
@@ -3944,19 +4106,25 @@ export const api = {
       for (const q of questionsToGrade) {
         if (!q || !q.id) continue;
         const safeKey = q.id.replace(/[\/\.]/g, '_');
-        const rawAns = answers[q.id] ?? answers[safeKey];
+        const rawAns = getStudentRawAnswer(answers, q.id);
         const displayChoice = normalizeKey(rawAns, q.options);
         if (!displayChoice) continue;
 
         let origChoice = displayChoice;
-        const mapping = sub.optionOrder ? (sub.optionOrder[q.id] || sub.optionOrder[safeKey]) : undefined;
-        if (mapping && typeof mapping === 'object') {
+        const mapping: any = sub.optionOrder ? (sub.optionOrder[q.id] || sub.optionOrder[safeKey]) : undefined;
+        if (Array.isArray(mapping) && mapping.length >= 4) {
+          const idx = ['A', 'B', 'C', 'D'].indexOf(displayChoice);
+          if (idx !== -1 && mapping[idx]) {
+            const normMapped = normalizeKey(mapping[idx], q.options);
+            if (normMapped) origChoice = normMapped;
+          }
+        } else if (mapping && typeof mapping === 'object') {
           const mappedVal = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
           const normMapped = normalizeKey(mappedVal, q.options);
           if (normMapped) origChoice = normMapped;
         }
 
-        const expected = normalizeKey(q.correctAnswer, q.options);
+        const expected = extractQuestionCorrectAnswer(q, examObj.id) || normalizeKey(q.correctAnswer, q.options);
         if (origChoice === expected) {
           correct++;
         } else {
