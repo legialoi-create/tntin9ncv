@@ -639,23 +639,65 @@ export function verifyPasswordSync(inputPassword: string, storedPassword: string
 }
 
 /**
- * Danh sách mã băm mật khẩu Giáo viên mặc định ban đầu (chỉ có hiệu lực khi Giáo viên CHƯA đổi mật khẩu)
+ * Danh sách mã băm một chiều (Salted Hash ncv_pw$v3$) của mật khẩu Giáo viên mặc định ban đầu.
+ * Tuyệt đối KHÔNG lưu chuỗi mật khẩu gốc (plain-text) trong mã nguồn để học sinh mở F12 cũng không thể dò được.
  */
 const TEACHER_PASSWORD_SALT = '7a9e3b5c1d8f';
-const VALID_TEACHER_PASSWORD_HASHES = new Set<string>(
-  ['101   101!@#', '101 101!@#', '101101!@#', '101   101', '101 101', '101101', 'GiaLoi@2026'].map((p) =>
-    hashPasswordSync(p, TEACHER_PASSWORD_SALT)
-  )
-);
+export const DEFAULT_TEACHER_PASSWORD_HASH =
+  'ncv_pw$v3$7a9e3b5c1d8f$51ca636f0897d1e7e7b4caf440c23fbd3b7c16589fa2dd87b758ba51a5785f76';
+
+const VALID_TEACHER_PASSWORD_HASHES = new Set<string>([
+  DEFAULT_TEACHER_PASSWORD_HASH,
+  'ncv_pw$v3$7a9e3b5c1d8f$a6c5782d0fc9d6de398e507caac6ba69250caa1f24098f5a36de3a9e5ca565c0',
+  'ncv_pw$v3$7a9e3b5c1d8f$b549320d02eaf9589eefd41aedda7b8d94be25c30fae719c5a269c3ecf061669',
+  'ncv_pw$v3$7a9e3b5c1d8f$9a7925f53021f74d08821b700f74f3ce317cb8a8d784ad28d8648ce6fd09c866',
+  'ncv_pw$v3$7a9e3b5c1d8f$111599a0466227f0570d8e27a6c3961f828b9472a9cc424a76ebfdcf11ab4394',
+  'ncv_pw$v3$7a9e3b5c1d8f$44ad871a43ff4164bcc27257ced8e667f632a17b63a1e47e63627475d259920d',
+  'ncv_pw$v3$7a9e3b5c1d8f$df164a850998099261cac99a10d4d42d4682422b89690c6b80ee726bb26c6a90',
+]);
+
+export function isDefaultTeacherPasswordHash(storedHash: string | undefined | null): boolean {
+  if (!storedHash) return true;
+  const clean = String(storedHash).trim();
+  if (!clean) return true;
+  return VALID_TEACHER_PASSWORD_HASHES.has(clean);
+}
 
 export function verifyTeacherPasswordHash(inputPassword: string): boolean {
   const raw = String(inputPassword ?? '').trim();
   if (!raw) return false;
   const candidate1 = hashPasswordSync(raw, TEACHER_PASSWORD_SALT);
   if (VALID_TEACHER_PASSWORD_HASHES.has(candidate1)) return true;
+  const collapsedSpace = raw.replace(/\s+/g, ' ');
+  const candidate2 = hashPasswordSync(collapsedSpace, TEACHER_PASSWORD_SALT);
+  if (VALID_TEACHER_PASSWORD_HASHES.has(candidate2)) return true;
   const collapsed = raw.replace(/\s+/g, '');
-  const candidate2 = hashPasswordSync(collapsed, TEACHER_PASSWORD_SALT);
-  return VALID_TEACHER_PASSWORD_HASHES.has(candidate2);
+  const candidate3 = hashPasswordSync(collapsed, TEACHER_PASSWORD_SALT);
+  return VALID_TEACHER_PASSWORD_HASHES.has(candidate3);
+}
+
+const TEACHER_EMAIL_VAULT_CONTEXT = 'TEACHER_EMAIL_RECOVERY_VAULT_V3';
+
+/**
+ * Mã hoá mật khẩu hiện tại của Giáo viên thành chuỗi niêm phong (ncv$v2$...)
+ * để phục vụ gửi lại mật khẩu về email chính chủ legialoi@gmail.com khi quên.
+ * Không lưu mật khẩu dạng rõ trong code hay localStorage.
+ */
+export function sealTeacherPasswordVault(plainPassword: string): string {
+  const clean = String(plainPassword ?? '').trim();
+  if (!clean) return '';
+  if (isSealedValue(clean)) return clean;
+  return sealValue(clean, TEACHER_EMAIL_VAULT_CONTEXT, true);
+}
+
+/**
+ * Giải mã mật khẩu hiện tại của Giáo viên từ chuỗi niêm phong
+ */
+export function unsealTeacherPasswordVault(sealedVault: unknown): string {
+  if (!sealedVault || typeof sealedVault !== 'string') return '';
+  const trimmed = sealedVault.trim();
+  if (!isSealedValue(trimmed)) return '';
+  return unsealValue(trimmed, TEACHER_EMAIL_VAULT_CONTEXT);
 }
 
 /**

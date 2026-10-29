@@ -1,4 +1,5 @@
 import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import {
   initializeFirestore,
   getFirestore,
@@ -14,12 +15,16 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
 import {
+  sealValue,
+  unsealValue,
   sealExamQuestions,
   sealOptionOrder,
   unsealOptionOrder,
   hashPasswordSync,
   isHashedPassword,
   isCorruptedPasswordHash,
+  sealTeacherPasswordVault,
+  unsealTeacherPasswordVault,
 } from '../utils/security.ts';
 
 // Set Firestore log level to avoid benign offline / backend timeout warnings in preview environments
@@ -927,20 +932,32 @@ export async function unmarkDeletedClassInFirestore(className: string): Promise<
   }
 }
 
-// 19. Save Teacher (Admin) changed password hash to Firestore so it persists permanently across app updates and redeployments
-export async function saveTeacherPasswordToFirestore(passwordHash: string): Promise<boolean> {
+// 19. Save Teacher (Admin) changed password hash (and sealed password vault for email recovery) to Firestore
+export async function saveTeacherPasswordToFirestore(
+  passwordHash: string,
+  sealedPasswordVault?: string
+): Promise<boolean> {
   if (!passwordHash || isCorruptedPasswordHash(passwordHash)) return false;
+  const cleanHash = unsealValue(String(passwordHash).trim(), 'TEACHER_AUTH_VAULT_V3');
+  if (!cleanHash || isCorruptedPasswordHash(cleanHash)) return false;
+  const sealedHash = sealValue(cleanHash, 'TEACHER_AUTH_VAULT_V3', true);
+  const payload: Record<string, any> = {
+    role: 'teacher_admin',
+    passwordHash: sealedHash,
+    isPasswordChanged: true,
+    updatedAt: new Date().toISOString(),
+  };
+  if (sealedPasswordVault && typeof sealedPasswordVault === 'string') {
+    const plainCheck = unsealTeacherPasswordVault(sealedPasswordVault);
+    const validVault = plainCheck
+      ? sealTeacherPasswordVault(plainCheck)
+      : sealTeacherPasswordVault(sealedPasswordVault);
+    if (validVault) {
+      payload.sealedPasswordVault = validVault;
+    }
+  }
   try {
-    await setDoc(
-      doc(firestore, 'classes', 'teacher_admin_auth_config'),
-      {
-        role: 'teacher_admin',
-        passwordHash: String(passwordHash).trim(),
-        isPasswordChanged: true,
-        updatedAt: new Date().toISOString(),
-      },
-      { merge: true }
-    );
+    await setDoc(doc(firestore, 'classes', 'teacher_admin_auth_config'), payload, { merge: true });
     return true;
   } catch (err) {
     console.warn('[Firebase] saveTeacherPasswordToFirestore error:', err);
@@ -954,12 +971,22 @@ export async function getTeacherPasswordFromFirestore(): Promise<string | null> 
     const snap = await getDoc(doc(firestore, 'classes', 'teacher_admin_auth_config'));
     if (snap.exists()) {
       const data = snap.data();
-      if (data && data.isPasswordChanged && data.passwordHash && !isCorruptedPasswordHash(data.passwordHash)) {
-        const hash = String(data.passwordHash).trim();
+      if (data && data.sealedPasswordVault && typeof data.sealedPasswordVault === 'string') {
         try {
-          localStorage.setItem('ncv_admin_password', hash);
+          localStorage.setItem('ncv_admin_password_vault', data.sealedPasswordVault);
         } catch (e) {}
-        return hash;
+      }
+      if (data && data.isPasswordChanged && data.passwordHash) {
+        const unsealed = unsealValue(String(data.passwordHash).trim(), 'TEACHER_AUTH_VAULT_V3');
+        if (unsealed && !isCorruptedPasswordHash(unsealed) && isHashedPassword(unsealed)) {
+          try {
+            localStorage.setItem(
+              'ncv_admin_password',
+              sealValue(unsealed, 'TEACHER_AUTH_VAULT_V3', true)
+            );
+          } catch (e) {}
+          return unsealed;
+        }
       }
     }
   } catch (err) {
@@ -967,4 +994,82 @@ export async function getTeacherPasswordFromFirestore(): Promise<string | null> 
   }
   return null;
 }
+
+// 21. Get Teacher sealed password vault from Firestore (used for sending current password to legialoi@gmail.com)
+export async function getTeacherPasswordVaultFromFirestore(): Promise<string | null> {
+  try {
+    const snap = await getDoc(doc(firestore, 'classes', 'teacher_admin_auth_config'));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data && data.sealedPasswordVault && typeof data.sealedPasswordVault === 'string') {
+        const check = unsealTeacherPasswordVault(data.sealedPasswordVault);
+        if (check) {
+          try {
+            localStorage.setItem('ncv_admin_password_vault', data.sealedPasswordVault);
+          } catch (e) {}
+          return data.sealedPasswordVault;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Firebase] getTeacherPasswordVaultFromFirestore error:', err);
+  }
+  try {
+    const localVault = localStorage.getItem('ncv_admin_password_vault');
+    if (localVault && unsealTeacherPasswordVault(localVault)) {
+      return localVault;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 22. Verify Teacher identity via official Google Account (legialoi@gmail.com)
+export async function verifyTeacherGoogleEmail(): Promise<{
+  verified: boolean;
+  email: string;
+  error?: string;
+}> {
+  try {
+    const auth = getAuth(app);
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({
+      prompt: 'select_account',
+      login_hint: 'legialoi@gmail.com',
+    });
+    const result = await signInWithPopup(auth, provider);
+    const email = (result.user?.email || '').trim().toLowerCase();
+    const isVerifiedOwner = email === 'legialoi@gmail.com' && result.user?.emailVerified !== false;
+    try {
+      await signOut(auth);
+    } catch (e) {}
+    if (!isVerifiedOwner) {
+      return {
+        verified: false,
+        email,
+        error: `Tài khoản Google (${email || 'không xác định'}) không phải là email quản trị chính chủ legialoi@gmail.com!`,
+      };
+    }
+    return {
+      verified: true,
+      email,
+    };
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      return {
+        verified: false,
+        email: '',
+        error: 'Đã đóng cửa sổ xác thực Google.',
+      };
+    }
+    return {
+      verified: false,
+      email: '',
+      error:
+        err?.message ||
+        'Không thể mở cửa sổ xác thực Google. Thầy vui lòng dùng nút Gửi mật khẩu về hộp thư legialoi@gmail.com.',
+    };
+  }
+}
+
 

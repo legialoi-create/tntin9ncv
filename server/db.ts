@@ -8,6 +8,11 @@ import {
   verifyPasswordSync,
   isHashedPassword,
   isCorruptedPasswordHash,
+  DEFAULT_TEACHER_PASSWORD_HASH,
+  isDefaultTeacherPasswordHash,
+  verifyTeacherPasswordHash,
+  sealTeacherPasswordVault,
+  unsealTeacherPasswordVault,
   normalizeStudentName,
   normalizeClassName,
   sealExamQuestions,
@@ -20,6 +25,7 @@ interface DatabaseSchema {
   students: StudentInfo[];
   adminToken: string;
   adminPassword?: string;
+  adminPasswordVault?: string;
   deletedExamIds?: string[];
   deletedClassNames?: string[];
   deletedStudentIds?: string[];
@@ -188,7 +194,7 @@ class DatabaseManager {
         deletedClassNames: [],
         deletedStudentIds: [],
         adminToken: 'legialoi-ncv-session-secret',
-        adminPassword: '101   101!@#'
+        adminPassword: DEFAULT_TEACHER_PASSWORD_HASH
       };
     }
   }
@@ -436,16 +442,12 @@ class DatabaseManager {
               p.adminPassword &&
               !isCorruptedPasswordHash(p.adminPassword) &&
               isHashedPassword(p.adminPassword) &&
-              !verifyPassword('101   101!@#', p.adminPassword)
+              !isDefaultTeacherPasswordHash(p.adminPassword)
           )?.adminPassword ||
-          parsedList.find(
-            p =>
-              p.adminPassword &&
-              !isCorruptedPasswordHash(p.adminPassword) &&
-              p.adminPassword !== '101   101!@#'
-          )?.adminPassword ||
-          parsedList.find(p => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword))?.adminPassword ||
-          '101   101!@#'
+          parsedList.find(p => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && isHashedPassword(p.adminPassword))?.adminPassword ||
+          DEFAULT_TEACHER_PASSWORD_HASH,
+        adminPasswordVault:
+          parsedList.find(p => p.adminPasswordVault && unsealTeacherPasswordVault(p.adminPasswordVault))?.adminPasswordVault || undefined
       };
 
       // Always synchronize merged persistent state to all candidate locations
@@ -467,7 +469,7 @@ class DatabaseManager {
       deletedClassNames: [],
       deletedStudentIds: [],
       adminToken: 'legialoi-ncv-session-secret',
-      adminPassword: '101   101!@#'
+      adminPassword: DEFAULT_TEACHER_PASSWORD_HASH
     };
     this.saveData(initialData);
     return initialData;
@@ -892,7 +894,11 @@ class DatabaseManager {
 
   // Full backup & restore
   public getAdminPassword(): string {
-    return this.data.adminPassword || process.env.ADMIN_PASSWORD || '101   101!@#';
+    const stored = this.data.adminPassword;
+    if (stored && !isCorruptedPasswordHash(stored) && isHashedPassword(stored)) {
+      return stored;
+    }
+    return process.env.ADMIN_PASSWORD || DEFAULT_TEACHER_PASSWORD_HASH;
   }
 
   public verifyAdminPassword(inputPass: string): boolean {
@@ -900,60 +906,48 @@ class DatabaseManager {
     const cleanInput = inputPass.trim();
     const currentPass = this.getAdminPassword();
 
-    // Check if admin password has been explicitly changed from default ('101   101!@#')
+    // Check if admin password has been explicitly changed from default hash
     const storedAdminPass = this.data.adminPassword;
     const isCustomAdminPassword =
       Boolean(storedAdminPass) &&
       !isCorruptedPasswordHash(storedAdminPass) &&
-      storedAdminPass !== '101   101!@#' &&
-      !verifyPassword('101   101!@#', storedAdminPass!) &&
-      !verifyPassword('GiaLoi@2026', storedAdminPass!);
+      isHashedPassword(storedAdminPass!) &&
+      !isDefaultTeacherPasswordHash(storedAdminPass);
 
     if (isCustomAdminPassword) {
       // Strictly verify against the custom hashed password ONLY! Old default passwords must NOT work!
-      return verifyPassword(cleanInput, storedAdminPass!);
+      return (
+        verifyPassword(cleanInput, storedAdminPass!) ||
+        verifyPassword(cleanInput.replace(/\s+/g, ' '), storedAdminPass!) ||
+        verifyPassword(cleanInput.replace(/\s+/g, ''), storedAdminPass!)
+      );
     }
 
-    // 1. Direct verify (hashed PBKDF2 or exact string)
+    // 1. Direct verify against hashed password
     if (verifyPassword(cleanInput, currentPass)) {
       return true;
     }
 
-    // 2. Compare with collapsed whitespace (handling multiple spaces vs single space)
-    const collapsedInput = cleanInput.replace(/\s+/g, ' ');
-    const collapsedCurrent = currentPass.replace(/\s+/g, ' ');
-    if (collapsedInput === collapsedCurrent) {
-      return true;
-    }
-    if (cleanInput.replace(/\s+/g, '') === currentPass.replace(/\s+/g, '')) {
-      return true;
-    }
-
-    // 3. Fallback defaults (only when adminPassword has NOT been changed from default)
-    const allowedDefaults = [
-      '101   101!@#',
-      '101 101!@#',
-      '101101!@#',
-      '101   101',
-      '101 101',
-      '101101',
-      'GiaLoi@2026'
-    ];
-    if (
-      allowedDefaults.includes(cleanInput) ||
-      allowedDefaults.includes(collapsedInput) ||
-      allowedDefaults.includes(cleanInput.replace(/\s+/g, ''))
-    ) {
-      return true;
-    }
-
-    return false;
+    // 2. Verify against pre-hashed default password set (only when adminPassword has NOT been changed)
+    return verifyTeacherPasswordHash(cleanInput);
   }
 
-  public setAdminPassword(newPassword: string): void {
-    // Hash admin password using PBKDF2 with salt so plain-text is never stored in DB
-    this.data.adminPassword = hashPassword(newPassword.trim());
+  public setAdminPassword(newPassword: string, sealedVault?: string): void {
+    const clean = newPassword.trim();
+    this.data.adminPassword = hashPassword(clean);
+    if (sealedVault && unsealTeacherPasswordVault(sealedVault)) {
+      this.data.adminPasswordVault = sealedVault;
+    } else if (!isHashedPassword(clean)) {
+      this.data.adminPasswordVault = sealTeacherPasswordVault(clean);
+    }
     this.persist(true);
+  }
+
+  public getAdminPasswordVault(): string | undefined {
+    if (this.data.adminPasswordVault && unsealTeacherPasswordVault(this.data.adminPasswordVault)) {
+      return this.data.adminPasswordVault;
+    }
+    return undefined;
   }
 
   public getBackup() {

@@ -51,6 +51,9 @@ import {
   normalizeClassName,
   getStudentRawAnswer,
   isCorruptedPasswordHash,
+  isDefaultTeacherPasswordHash,
+  sealTeacherPasswordVault,
+  unsealTeacherPasswordVault,
 } from './src/utils/security.ts';
 
 dotenv.config();
@@ -148,6 +151,73 @@ function requireTeacherAuth(req: Request, res: Response, next: NextFunction) {
   return res.status(403).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn' });
 }
 
+// Helper: Send Teacher current password to official email legialoi@gmail.com
+let lastPasswordEmailSentAt = 0;
+
+async function dispatchPasswordEmailToTeacher(
+  plainPassword: string,
+  reason: 'forgot_password' | 'password_changed'
+): Promise<{ sent: boolean; message: string }> {
+  const recipient = 'legialoi@gmail.com';
+  const nowStr = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  const subject =
+    reason === 'password_changed'
+      ? `[THCS Nam Cửa Việt] Thông báo mật khẩu Giáo viên mới cập nhật (${nowStr})`
+      : `[THCS Nam Cửa Việt] Mật khẩu Giáo viên hiện có của Thầy Lê Gia Lợi (${nowStr})`;
+
+  try {
+    const response = await fetch(`https://formsubmit.co/ajax/${recipient}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Origin: process.env.APP_URL || 'https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app',
+        Referer: process.env.APP_URL || 'https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app/',
+      },
+      body: JSON.stringify({
+        _subject: subject,
+        _template: 'table',
+        _captcha: 'false',
+        'Hệ thống': 'Kiểm tra Trắc nghiệm Tin học - Trường THCS Nam Cửa Việt',
+        'Giáo viên quản trị': 'Thầy Lê Gia Lợi (legialoi@gmail.com)',
+        'Tài khoản đăng nhập': 'legialoi',
+        'Mật khẩu Giáo viên hiện có': plainPassword,
+        'Thời gian gửi': nowStr,
+        'Ghi chú':
+          reason === 'password_changed'
+            ? 'Mật khẩu Giáo viên vừa được đổi thành công. Lưu thư này để tra cứu khi cần.'
+            : 'Đây là mật khẩu hiện có theo yêu cầu khôi phục từ màn hình Đăng nhập Giáo viên.',
+      }),
+    });
+
+    if (response.ok) {
+      const resData: any = await response.json().catch(() => ({}));
+      if (resData && (resData.success === 'true' || resData.success === true)) {
+        return {
+          sent: true,
+          message:
+            'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com! Thầy vui lòng kiểm tra Hộp thư đến (hoặc mục Thư rác/Spam).',
+        };
+      }
+      if (resData && String(resData.message || '').toLowerCase().includes('activate')) {
+        return {
+          sent: true,
+          message:
+            'Hệ thống đã gửi thư kích hoạt lần đầu đến legialoi@gmail.com. Thầy mở Gmail bấm "Activate Form" hoặc bấm nút "Xác thực nhanh bằng Gmail legialoi@gmail.com" bên dưới để xem mật khẩu ngay lập tức!',
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('[Email] dispatchPasswordEmailToTeacher warning:', err);
+  }
+
+  return {
+    sent: false,
+    message:
+      'Máy chủ gửi mail đang bận. Thầy vui lòng bấm nút "Xác thực nhanh bằng Gmail legialoi@gmail.com" ngay bên dưới để xem mật khẩu hiện có tức thì!',
+  };
+}
+
 // 1. Auth routes
 app.post('/api/auth/login', (req: Request, res: Response) => {
   const { username, password } = req.body;
@@ -176,21 +246,27 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     req.body.adminPasswordHash.startsWith('ncv_pw$') &&
     !isCorruptedPasswordHash(req.body.adminPasswordHash)
   ) {
-    db.setAdminPassword(req.body.adminPasswordHash);
+    db.setAdminPassword(req.body.adminPasswordHash, req.body.sealedPasswordVault);
   }
 
   const isValidPass = db.verifyAdminPassword(trimmedPass);
 
   if (isValidUser && isValidPass) {
+    const sealedVault = sealTeacherPasswordVault(trimmedPass.trim());
+    db.setAdminPassword(db.getAdminPassword(), sealedVault);
     const token = Buffer.from(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`).toString('base64');
     const curAdminPass = db.getAdminPassword();
     return res.json({
       success: true,
       token,
       passwordHash:
-        curAdminPass && curAdminPass.startsWith('ncv_pw$') && !isCorruptedPasswordHash(curAdminPass)
+        curAdminPass &&
+        curAdminPass.startsWith('ncv_pw$') &&
+        !isCorruptedPasswordHash(curAdminPass) &&
+        !isDefaultTeacherPasswordHash(curAdminPass)
           ? curAdminPass
           : undefined,
+      sealedPasswordVault: sealedVault,
       user: {
         username: TEACHER_USERNAME,
         fullName: 'Thầy Lê Gia Lợi',
@@ -215,10 +291,12 @@ app.get('/api/auth/me', requireTeacherAuth, (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Response) => {
-  const { currentPassword, newPassword, adminPasswordHash, newPasswordHash } = req.body;
+  const { currentPassword, newPassword, adminPasswordHash, newPasswordHash, sealedPasswordVault } = req.body;
   if (!newPassword || String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: 'Mật khẩu mới của giáo viên phải có ít nhất 6 ký tự để đảm bảo an toàn' });
   }
+
+  const cleanNew = String(newPassword).trim();
 
   if (
     adminPasswordHash &&
@@ -233,21 +311,107 @@ app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Re
     return res.status(400).json({ error: 'Mật khẩu hiện tại của giáo viên không chính xác' });
   }
 
+  const vaultToSave =
+    sealedPasswordVault && unsealTeacherPasswordVault(sealedPasswordVault)
+      ? sealedPasswordVault
+      : sealTeacherPasswordVault(cleanNew);
+
   if (
     newPasswordHash &&
     typeof newPasswordHash === 'string' &&
     newPasswordHash.startsWith('ncv_pw$') &&
     !isCorruptedPasswordHash(newPasswordHash)
   ) {
-    db.setAdminPassword(newPasswordHash);
+    db.setAdminPassword(newPasswordHash, vaultToSave);
   } else {
-    db.setAdminPassword(String(newPassword).trim());
+    db.setAdminPassword(cleanNew, vaultToSave);
   }
+
+  // Send backup notification email to legialoi@gmail.com in background
+  dispatchPasswordEmailToTeacher(cleanNew, 'password_changed').catch(() => {});
 
   res.json({
     success: true,
     passwordHash: db.getAdminPassword(),
-    message: 'Đã đổi mật khẩu Giáo viên (Admin) thành công! Mật khẩu cũ đã bị vô hiệu hóa hoàn toàn.'
+    sealedPasswordVault: vaultToSave,
+    message: 'Đã đổi mật khẩu Giáo viên thành công và gửi bản lưu mật khẩu mới về legialoi@gmail.com!'
+  });
+});
+
+app.post('/api/auth/send-password-email', async (req: Request, res: Response) => {
+  const now = Date.now();
+  if (now - lastPasswordEmailSentAt < 20000) {
+    const waitSec = Math.ceil((20000 - (now - lastPasswordEmailSentAt)) / 1000);
+    return res.status(429).json({
+      error: `Vui lòng đợi ${waitSec} giây trước khi gửi lại mật khẩu về hộp thư legialoi@gmail.com.`,
+    });
+  }
+
+  const incomingVault = req.body?.sealedPasswordVault;
+  const serverVault = db.getAdminPasswordVault();
+  const effectiveVault =
+    incomingVault && unsealTeacherPasswordVault(incomingVault) ? incomingVault : serverVault;
+
+  const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : '';
+
+  if (!plainPassword) {
+    return res.status(400).json({
+      needsGoogleVerify: true,
+      error:
+        'Chưa có bản lưu mật khẩu để gửi tự động. Thầy vui lòng bấm nút "Xác thực bằng Gmail legialoi@gmail.com" ngay bên dưới để đặt lại mật khẩu mới!',
+    });
+  }
+
+  lastPasswordEmailSentAt = now;
+  const result = await dispatchPasswordEmailToTeacher(plainPassword, 'forgot_password');
+
+  return res.json({
+    success: result.sent,
+    recipient: 'legialoi@gmail.com',
+    message: result.message,
+  });
+});
+
+app.post('/api/auth/recover-by-google', (req: Request, res: Response) => {
+  const { email, newPassword, newPasswordHash, sealedPasswordVault } = req.body;
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (cleanEmail !== 'legialoi@gmail.com') {
+    return res.status(403).json({
+      error: 'Chỉ tài khoản Gmail chính chủ legialoi@gmail.com mới có quyền khôi phục mật khẩu Giáo viên!',
+    });
+  }
+
+  if (newPassword && String(newPassword).trim().length >= 6) {
+    const cleanNew = String(newPassword).trim();
+    const vaultToSave =
+      sealedPasswordVault && unsealTeacherPasswordVault(sealedPasswordVault)
+        ? sealedPasswordVault
+        : sealTeacherPasswordVault(cleanNew);
+    if (
+      newPasswordHash &&
+      typeof newPasswordHash === 'string' &&
+      newPasswordHash.startsWith('ncv_pw$') &&
+      !isCorruptedPasswordHash(newPasswordHash)
+    ) {
+      db.setAdminPassword(newPasswordHash, vaultToSave);
+    } else {
+      db.setAdminPassword(cleanNew, vaultToSave);
+    }
+    dispatchPasswordEmailToTeacher(cleanNew, 'password_changed').catch(() => {});
+  }
+
+  const token = Buffer.from(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`).toString('base64');
+  return res.json({
+    success: true,
+    token,
+    passwordHash: db.getAdminPassword(),
+    sealedPasswordVault: db.getAdminPasswordVault(),
+    user: {
+      username: TEACHER_USERNAME,
+      fullName: 'Thầy Lê Gia Lợi',
+      role: 'teacher',
+      school: 'THCS Nam Cửa Việt',
+    },
   });
 });
 

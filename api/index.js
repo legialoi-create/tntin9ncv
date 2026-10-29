@@ -739,11 +739,47 @@ function verifyPasswordSync(inputPassword, storedPassword) {
   return cleanInput === cleanStored;
 }
 var TEACHER_PASSWORD_SALT = "7a9e3b5c1d8f";
-var VALID_TEACHER_PASSWORD_HASHES = new Set(
-  ["101   101!@#", "101 101!@#", "101101!@#", "101   101", "101 101", "101101", "GiaLoi@2026"].map(
-    (p) => hashPasswordSync(p, TEACHER_PASSWORD_SALT)
-  )
-);
+var DEFAULT_TEACHER_PASSWORD_HASH = "ncv_pw$v3$7a9e3b5c1d8f$51ca636f0897d1e7e7b4caf440c23fbd3b7c16589fa2dd87b758ba51a5785f76";
+var VALID_TEACHER_PASSWORD_HASHES = /* @__PURE__ */ new Set([
+  DEFAULT_TEACHER_PASSWORD_HASH,
+  "ncv_pw$v3$7a9e3b5c1d8f$a6c5782d0fc9d6de398e507caac6ba69250caa1f24098f5a36de3a9e5ca565c0",
+  "ncv_pw$v3$7a9e3b5c1d8f$b549320d02eaf9589eefd41aedda7b8d94be25c30fae719c5a269c3ecf061669",
+  "ncv_pw$v3$7a9e3b5c1d8f$9a7925f53021f74d08821b700f74f3ce317cb8a8d784ad28d8648ce6fd09c866",
+  "ncv_pw$v3$7a9e3b5c1d8f$111599a0466227f0570d8e27a6c3961f828b9472a9cc424a76ebfdcf11ab4394",
+  "ncv_pw$v3$7a9e3b5c1d8f$44ad871a43ff4164bcc27257ced8e667f632a17b63a1e47e63627475d259920d",
+  "ncv_pw$v3$7a9e3b5c1d8f$df164a850998099261cac99a10d4d42d4682422b89690c6b80ee726bb26c6a90"
+]);
+function isDefaultTeacherPasswordHash(storedHash) {
+  if (!storedHash) return true;
+  const clean = String(storedHash).trim();
+  if (!clean) return true;
+  return VALID_TEACHER_PASSWORD_HASHES.has(clean);
+}
+function verifyTeacherPasswordHash(inputPassword) {
+  const raw = String(inputPassword ?? "").trim();
+  if (!raw) return false;
+  const candidate1 = hashPasswordSync(raw, TEACHER_PASSWORD_SALT);
+  if (VALID_TEACHER_PASSWORD_HASHES.has(candidate1)) return true;
+  const collapsedSpace = raw.replace(/\s+/g, " ");
+  const candidate2 = hashPasswordSync(collapsedSpace, TEACHER_PASSWORD_SALT);
+  if (VALID_TEACHER_PASSWORD_HASHES.has(candidate2)) return true;
+  const collapsed = raw.replace(/\s+/g, "");
+  const candidate3 = hashPasswordSync(collapsed, TEACHER_PASSWORD_SALT);
+  return VALID_TEACHER_PASSWORD_HASHES.has(candidate3);
+}
+var TEACHER_EMAIL_VAULT_CONTEXT = "TEACHER_EMAIL_RECOVERY_VAULT_V3";
+function sealTeacherPasswordVault(plainPassword) {
+  const clean = String(plainPassword ?? "").trim();
+  if (!clean) return "";
+  if (isSealedValue(clean)) return clean;
+  return sealValue(clean, TEACHER_EMAIL_VAULT_CONTEXT, true);
+}
+function unsealTeacherPasswordVault(sealedVault) {
+  if (!sealedVault || typeof sealedVault !== "string") return "";
+  const trimmed = sealedVault.trim();
+  if (!isSealedValue(trimmed)) return "";
+  return unsealValue(trimmed, TEACHER_EMAIL_VAULT_CONTEXT);
+}
 function getStudentRawAnswer(answers, questionId) {
   if (!answers || !questionId) return "";
   if (answers[questionId] !== void 0 && answers[questionId] !== null) {
@@ -866,7 +902,7 @@ var DatabaseManager = class {
         deletedClassNames: [],
         deletedStudentIds: [],
         adminToken: "legialoi-ncv-session-secret",
-        adminPassword: "101   101!@#"
+        adminPassword: DEFAULT_TEACHER_PASSWORD_HASH
       };
     }
   }
@@ -1077,10 +1113,9 @@ var DatabaseManager = class {
         deletedStudentIds: Array.from(deletedStudentIdsSet),
         adminToken: parsedList.find((p) => p.adminToken)?.adminToken || "legialoi-ncv-session-secret",
         adminPassword: parsedList.find(
-          (p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && isHashedPassword(p.adminPassword) && !verifyPassword("101   101!@#", p.adminPassword)
-        )?.adminPassword || parsedList.find(
-          (p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && p.adminPassword !== "101   101!@#"
-        )?.adminPassword || parsedList.find((p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword))?.adminPassword || "101   101!@#"
+          (p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && isHashedPassword(p.adminPassword) && !isDefaultTeacherPasswordHash(p.adminPassword)
+        )?.adminPassword || parsedList.find((p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && isHashedPassword(p.adminPassword))?.adminPassword || DEFAULT_TEACHER_PASSWORD_HASH,
+        adminPasswordVault: parsedList.find((p) => p.adminPasswordVault && unsealTeacherPasswordVault(p.adminPasswordVault))?.adminPasswordVault || void 0
       };
       this.saveData(mergedData);
       return mergedData;
@@ -1099,7 +1134,7 @@ var DatabaseManager = class {
       deletedClassNames: [],
       deletedStudentIds: [],
       adminToken: "legialoi-ncv-session-secret",
-      adminPassword: "101   101!@#"
+      adminPassword: DEFAULT_TEACHER_PASSWORD_HASH
     };
     this.saveData(initialData);
     return initialData;
@@ -1461,45 +1496,41 @@ var DatabaseManager = class {
   }
   // Full backup & restore
   getAdminPassword() {
-    return this.data.adminPassword || process.env.ADMIN_PASSWORD || "101   101!@#";
+    const stored = this.data.adminPassword;
+    if (stored && !isCorruptedPasswordHash(stored) && isHashedPassword(stored)) {
+      return stored;
+    }
+    return process.env.ADMIN_PASSWORD || DEFAULT_TEACHER_PASSWORD_HASH;
   }
   verifyAdminPassword(inputPass) {
     if (!inputPass) return false;
     const cleanInput = inputPass.trim();
     const currentPass = this.getAdminPassword();
     const storedAdminPass = this.data.adminPassword;
-    const isCustomAdminPassword = Boolean(storedAdminPass) && !isCorruptedPasswordHash(storedAdminPass) && storedAdminPass !== "101   101!@#" && !verifyPassword("101   101!@#", storedAdminPass) && !verifyPassword("GiaLoi@2026", storedAdminPass);
+    const isCustomAdminPassword = Boolean(storedAdminPass) && !isCorruptedPasswordHash(storedAdminPass) && isHashedPassword(storedAdminPass) && !isDefaultTeacherPasswordHash(storedAdminPass);
     if (isCustomAdminPassword) {
-      return verifyPassword(cleanInput, storedAdminPass);
+      return verifyPassword(cleanInput, storedAdminPass) || verifyPassword(cleanInput.replace(/\s+/g, " "), storedAdminPass) || verifyPassword(cleanInput.replace(/\s+/g, ""), storedAdminPass);
     }
     if (verifyPassword(cleanInput, currentPass)) {
       return true;
     }
-    const collapsedInput = cleanInput.replace(/\s+/g, " ");
-    const collapsedCurrent = currentPass.replace(/\s+/g, " ");
-    if (collapsedInput === collapsedCurrent) {
-      return true;
-    }
-    if (cleanInput.replace(/\s+/g, "") === currentPass.replace(/\s+/g, "")) {
-      return true;
-    }
-    const allowedDefaults = [
-      "101   101!@#",
-      "101 101!@#",
-      "101101!@#",
-      "101   101",
-      "101 101",
-      "101101",
-      "GiaLoi@2026"
-    ];
-    if (allowedDefaults.includes(cleanInput) || allowedDefaults.includes(collapsedInput) || allowedDefaults.includes(cleanInput.replace(/\s+/g, ""))) {
-      return true;
-    }
-    return false;
+    return verifyTeacherPasswordHash(cleanInput);
   }
-  setAdminPassword(newPassword) {
-    this.data.adminPassword = hashPassword(newPassword.trim());
+  setAdminPassword(newPassword, sealedVault) {
+    const clean = newPassword.trim();
+    this.data.adminPassword = hashPassword(clean);
+    if (sealedVault && unsealTeacherPasswordVault(sealedVault)) {
+      this.data.adminPasswordVault = sealedVault;
+    } else if (!isHashedPassword(clean)) {
+      this.data.adminPasswordVault = sealTeacherPasswordVault(clean);
+    }
     this.persist(true);
+  }
+  getAdminPasswordVault() {
+    if (this.data.adminPasswordVault && unsealTeacherPasswordVault(this.data.adminPasswordVault)) {
+      return this.data.adminPasswordVault;
+    }
+    return void 0;
   }
   getBackup() {
     const liveSessions = this.data.sessions.filter((s) => s.status === "in_progress" || s.status === "locked" || s.status === "disconnected");
@@ -2404,6 +2435,55 @@ function requireTeacherAuth(req, res, next) {
   }
   return res.status(403).json({ error: "Phi\xEAn \u0111\u0103ng nh\u1EADp kh\xF4ng h\u1EE3p l\u1EC7 ho\u1EB7c \u0111\xE3 h\u1EBFt h\u1EA1n" });
 }
+var lastPasswordEmailSentAt = 0;
+async function dispatchPasswordEmailToTeacher(plainPassword, reason) {
+  const recipient = "legialoi@gmail.com";
+  const nowStr = (/* @__PURE__ */ new Date()).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+  const subject = reason === "password_changed" ? `[THCS Nam C\u1EEDa Vi\u1EC7t] Th\xF4ng b\xE1o m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn m\u1EDBi c\u1EADp nh\u1EADt (${nowStr})` : `[THCS Nam C\u1EEDa Vi\u1EC7t] M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn hi\u1EC7n c\xF3 c\u1EE7a Th\u1EA7y L\xEA Gia L\u1EE3i (${nowStr})`;
+  try {
+    const response = await fetch(`https://formsubmit.co/ajax/${recipient}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Origin: process.env.APP_URL || "https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app",
+        Referer: process.env.APP_URL || "https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app/"
+      },
+      body: JSON.stringify({
+        _subject: subject,
+        _template: "table",
+        _captcha: "false",
+        "H\u1EC7 th\u1ED1ng": "Ki\u1EC3m tra Tr\u1EAFc nghi\u1EC7m Tin h\u1ECDc - Tr\u01B0\u1EDDng THCS Nam C\u1EEDa Vi\u1EC7t",
+        "Gi\xE1o vi\xEAn qu\u1EA3n tr\u1ECB": "Th\u1EA7y L\xEA Gia L\u1EE3i (legialoi@gmail.com)",
+        "T\xE0i kho\u1EA3n \u0111\u0103ng nh\u1EADp": "legialoi",
+        "M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn hi\u1EC7n c\xF3": plainPassword,
+        "Th\u1EDDi gian g\u1EEDi": nowStr,
+        "Ghi ch\xFA": reason === "password_changed" ? "M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn v\u1EEBa \u0111\u01B0\u1EE3c \u0111\u1ED5i th\xE0nh c\xF4ng. L\u01B0u th\u01B0 n\xE0y \u0111\u1EC3 tra c\u1EE9u khi c\u1EA7n." : "\u0110\xE2y l\xE0 m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 theo y\xEAu c\u1EA7u kh\xF4i ph\u1EE5c t\u1EEB m\xE0n h\xECnh \u0110\u0103ng nh\u1EADp Gi\xE1o vi\xEAn."
+      })
+    });
+    if (response.ok) {
+      const resData = await response.json().catch(() => ({}));
+      if (resData && (resData.success === "true" || resData.success === true)) {
+        return {
+          sent: true,
+          message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com! Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c m\u1EE5c Th\u01B0 r\xE1c/Spam)."
+        };
+      }
+      if (resData && String(resData.message || "").toLowerCase().includes("activate")) {
+        return {
+          sent: true,
+          message: 'H\u1EC7 th\u1ED1ng \u0111\xE3 g\u1EEDi th\u01B0 k\xEDch ho\u1EA1t l\u1EA7n \u0111\u1EA7u \u0111\u1EBFn legialoi@gmail.com. Th\u1EA7y m\u1EDF Gmail b\u1EA5m "Activate Form" ho\u1EB7c b\u1EA5m n\xFAt "X\xE1c th\u1EF1c nhanh b\u1EB1ng Gmail legialoi@gmail.com" b\xEAn d\u01B0\u1EDBi \u0111\u1EC3 xem m\u1EADt kh\u1EA9u ngay l\u1EADp t\u1EE9c!'
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("[Email] dispatchPasswordEmailToTeacher warning:", err);
+  }
+  return {
+    sent: false,
+    message: 'M\xE1y ch\u1EE7 g\u1EEDi mail \u0111ang b\u1EADn. Th\u1EA7y vui l\xF2ng b\u1EA5m n\xFAt "X\xE1c th\u1EF1c nhanh b\u1EB1ng Gmail legialoi@gmail.com" ngay b\xEAn d\u01B0\u1EDBi \u0111\u1EC3 xem m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 t\u1EE9c th\xEC!'
+  };
+}
 app.post("/api/auth/login", (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
@@ -2415,16 +2495,19 @@ app.post("/api/auth/login", (req, res) => {
   const teacherEmailLower = (TEACHER_EMAIL || "legialoi@gmail.com").toLowerCase();
   const isValidUser = trimmedUser === teacherUserLower || trimmedUser === teacherEmailLower || trimmedUser === "legialoi" || trimmedUser === "legialoi@gmail.com" || trimmedUser === "admin" || trimmedUser === "teacher" || trimmedUser === "gv";
   if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === "string" && req.body.adminPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(req.body.adminPasswordHash)) {
-    db.setAdminPassword(req.body.adminPasswordHash);
+    db.setAdminPassword(req.body.adminPasswordHash, req.body.sealedPasswordVault);
   }
   const isValidPass = db.verifyAdminPassword(trimmedPass);
   if (isValidUser && isValidPass) {
+    const sealedVault = sealTeacherPasswordVault(trimmedPass.trim());
+    db.setAdminPassword(db.getAdminPassword(), sealedVault);
     const token = Buffer.from(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`).toString("base64");
     const curAdminPass = db.getAdminPassword();
     return res.json({
       success: true,
       token,
-      passwordHash: curAdminPass && curAdminPass.startsWith("ncv_pw$") && !isCorruptedPasswordHash(curAdminPass) ? curAdminPass : void 0,
+      passwordHash: curAdminPass && curAdminPass.startsWith("ncv_pw$") && !isCorruptedPasswordHash(curAdminPass) && !isDefaultTeacherPasswordHash(curAdminPass) ? curAdminPass : void 0,
+      sealedPasswordVault: sealedVault,
       user: {
         username: TEACHER_USERNAME,
         fullName: "Th\u1EA7y L\xEA Gia L\u1EE3i",
@@ -2446,25 +2529,89 @@ app.get("/api/auth/me", requireTeacherAuth, (req, res) => {
   });
 });
 app.post("/api/auth/change-password", requireTeacherAuth, (req, res) => {
-  const { currentPassword, newPassword, adminPasswordHash, newPasswordHash } = req.body;
+  const { currentPassword, newPassword, adminPasswordHash, newPasswordHash, sealedPasswordVault } = req.body;
   if (!newPassword || String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi c\u1EE7a gi\xE1o vi\xEAn ph\u1EA3i c\xF3 \xEDt nh\u1EA5t 6 k\xFD t\u1EF1 \u0111\u1EC3 \u0111\u1EA3m b\u1EA3o an to\xE0n" });
   }
+  const cleanNew = String(newPassword).trim();
   if (adminPasswordHash && typeof adminPasswordHash === "string" && adminPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(adminPasswordHash)) {
     db.setAdminPassword(adminPasswordHash);
   }
   if (currentPassword && !db.verifyAdminPassword(String(currentPassword).trim())) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i c\u1EE7a gi\xE1o vi\xEAn kh\xF4ng ch\xEDnh x\xE1c" });
   }
+  const vaultToSave = sealedPasswordVault && unsealTeacherPasswordVault(sealedPasswordVault) ? sealedPasswordVault : sealTeacherPasswordVault(cleanNew);
   if (newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(newPasswordHash)) {
-    db.setAdminPassword(newPasswordHash);
+    db.setAdminPassword(newPasswordHash, vaultToSave);
   } else {
-    db.setAdminPassword(String(newPassword).trim());
+    db.setAdminPassword(cleanNew, vaultToSave);
   }
+  dispatchPasswordEmailToTeacher(cleanNew, "password_changed").catch(() => {
+  });
   res.json({
     success: true,
     passwordHash: db.getAdminPassword(),
-    message: "\u0110\xE3 \u0111\u1ED5i m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn (Admin) th\xE0nh c\xF4ng! M\u1EADt kh\u1EA9u c\u0169 \u0111\xE3 b\u1ECB v\xF4 hi\u1EC7u h\xF3a ho\xE0n to\xE0n."
+    sealedPasswordVault: vaultToSave,
+    message: "\u0110\xE3 \u0111\u1ED5i m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn th\xE0nh c\xF4ng v\xE0 g\u1EEDi b\u1EA3n l\u01B0u m\u1EADt kh\u1EA9u m\u1EDBi v\u1EC1 legialoi@gmail.com!"
+  });
+});
+app.post("/api/auth/send-password-email", async (req, res) => {
+  const now = Date.now();
+  if (now - lastPasswordEmailSentAt < 2e4) {
+    const waitSec = Math.ceil((2e4 - (now - lastPasswordEmailSentAt)) / 1e3);
+    return res.status(429).json({
+      error: `Vui l\xF2ng \u0111\u1EE3i ${waitSec} gi\xE2y tr\u01B0\u1EDBc khi g\u1EEDi l\u1EA1i m\u1EADt kh\u1EA9u v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com.`
+    });
+  }
+  const incomingVault = req.body?.sealedPasswordVault;
+  const serverVault = db.getAdminPasswordVault();
+  const effectiveVault = incomingVault && unsealTeacherPasswordVault(incomingVault) ? incomingVault : serverVault;
+  const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : "";
+  if (!plainPassword) {
+    return res.status(400).json({
+      needsGoogleVerify: true,
+      error: 'Ch\u01B0a c\xF3 b\u1EA3n l\u01B0u m\u1EADt kh\u1EA9u \u0111\u1EC3 g\u1EEDi t\u1EF1 \u0111\u1ED9ng. Th\u1EA7y vui l\xF2ng b\u1EA5m n\xFAt "X\xE1c th\u1EF1c b\u1EB1ng Gmail legialoi@gmail.com" ngay b\xEAn d\u01B0\u1EDBi \u0111\u1EC3 \u0111\u1EB7t l\u1EA1i m\u1EADt kh\u1EA9u m\u1EDBi!'
+    });
+  }
+  lastPasswordEmailSentAt = now;
+  const result = await dispatchPasswordEmailToTeacher(plainPassword, "forgot_password");
+  return res.json({
+    success: result.sent,
+    recipient: "legialoi@gmail.com",
+    message: result.message
+  });
+});
+app.post("/api/auth/recover-by-google", (req, res) => {
+  const { email, newPassword, newPasswordHash, sealedPasswordVault } = req.body;
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  if (cleanEmail !== "legialoi@gmail.com") {
+    return res.status(403).json({
+      error: "Ch\u1EC9 t\xE0i kho\u1EA3n Gmail ch\xEDnh ch\u1EE7 legialoi@gmail.com m\u1EDBi c\xF3 quy\u1EC1n kh\xF4i ph\u1EE5c m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn!"
+    });
+  }
+  if (newPassword && String(newPassword).trim().length >= 6) {
+    const cleanNew = String(newPassword).trim();
+    const vaultToSave = sealedPasswordVault && unsealTeacherPasswordVault(sealedPasswordVault) ? sealedPasswordVault : sealTeacherPasswordVault(cleanNew);
+    if (newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(newPasswordHash)) {
+      db.setAdminPassword(newPasswordHash, vaultToSave);
+    } else {
+      db.setAdminPassword(cleanNew, vaultToSave);
+    }
+    dispatchPasswordEmailToTeacher(cleanNew, "password_changed").catch(() => {
+    });
+  }
+  const token = Buffer.from(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`).toString("base64");
+  return res.json({
+    success: true,
+    token,
+    passwordHash: db.getAdminPassword(),
+    sealedPasswordVault: db.getAdminPasswordVault(),
+    user: {
+      username: TEACHER_USERNAME,
+      fullName: "Th\u1EA7y L\xEA Gia L\u1EE3i",
+      role: "teacher",
+      school: "THCS Nam C\u1EEDa Vi\u1EC7t"
+    }
   });
 });
 app.post("/api/ai/parse-exam", requireTeacherAuth, async (req, res) => {

@@ -25,7 +25,9 @@ import {
   deleteSingleSubmissionFromFirestore,
   sortStudentsByRosterOrder,
   saveTeacherPasswordToFirestore,
-  getTeacherPasswordFromFirestore
+  getTeacherPasswordFromFirestore,
+  getTeacherPasswordVaultFromFirestore,
+  verifyTeacherGoogleEmail,
 } from './firebase';
 import { parseExamLocally } from '../utils/localExamParser';
 import {
@@ -45,6 +47,10 @@ import {
   verifyTeacherPasswordHash,
   isHashedPassword,
   isCorruptedPasswordHash,
+  isDefaultTeacherPasswordHash,
+  DEFAULT_TEACHER_PASSWORD_HASH,
+  sealTeacherPasswordVault,
+  unsealTeacherPasswordVault,
   normalizeStudentName,
   normalizeClassName,
   getStudentRawAnswer,
@@ -455,14 +461,26 @@ export const api = {
     }
 
     // 1. Check Cloud Firestore & localStorage for custom changed Teacher password
-    const rawLocalPassHash = localStorage.getItem('ncv_admin_password');
-    if (rawLocalPassHash && isCorruptedPasswordHash(rawLocalPassHash)) {
+    const rawLocalSealed = localStorage.getItem('ncv_admin_password');
+    const unsealedLocal = rawLocalSealed
+      ? unsealValue(rawLocalSealed, 'TEACHER_AUTH_VAULT_V3')
+      : null;
+    if (
+      rawLocalSealed &&
+      (!unsealedLocal ||
+        isCorruptedPasswordHash(unsealedLocal) ||
+        isDefaultTeacherPasswordHash(unsealedLocal))
+    ) {
       try {
         localStorage.removeItem('ncv_admin_password');
       } catch (e) {}
     }
     const localPassHash =
-      rawLocalPassHash && !isCorruptedPasswordHash(rawLocalPassHash) ? rawLocalPassHash : null;
+      unsealedLocal &&
+      !isCorruptedPasswordHash(unsealedLocal) &&
+      !isDefaultTeacherPasswordHash(unsealedLocal)
+        ? unsealedLocal
+        : null;
     const cloudPassHash = await getTeacherPasswordFromFirestore();
 
     if (localPassHash && !cloudPassHash) {
@@ -487,6 +505,8 @@ export const api = {
       }
     }
 
+    const sealedVaultFromInput = sealTeacherPasswordVault(trimmedPass);
+
     let res: Response | null = null;
     try {
       res = await fetch('/api/auth/login', {
@@ -496,6 +516,7 @@ export const api = {
           username,
           password,
           adminPasswordHash: effectivePassHash || undefined,
+          sealedPasswordVault: sealedVaultFromInput || undefined,
         }),
       });
     } catch {
@@ -505,11 +526,26 @@ export const api = {
     if (res && res.ok) {
       const data = await res.json();
       if (data && data.token) {
-        if (data.passwordHash && !isCorruptedPasswordHash(data.passwordHash) && !effectivePassHash) {
+        try {
+          if (sealedVaultFromInput) {
+            localStorage.setItem('ncv_admin_password_vault', sealedVaultFromInput);
+          }
+        } catch (e) {}
+        if (
+          data.passwordHash &&
+          !isCorruptedPasswordHash(data.passwordHash) &&
+          !isDefaultTeacherPasswordHash(data.passwordHash) &&
+          !effectivePassHash
+        ) {
           try {
-            localStorage.setItem('ncv_admin_password', data.passwordHash);
+            localStorage.setItem(
+              'ncv_admin_password',
+              sealValue(data.passwordHash, 'TEACHER_AUTH_VAULT_V3', true)
+            );
           } catch (e) {}
-          saveTeacherPasswordToFirestore(data.passwordHash).catch(() => {});
+          saveTeacherPasswordToFirestore(data.passwordHash, sealedVaultFromInput).catch(() => {});
+        } else if (effectivePassHash && sealedVaultFromInput) {
+          saveTeacherPasswordToFirestore(effectivePassHash, sealedVaultFromInput).catch(() => {});
         }
         setAuthToken(data.token);
         return data;
@@ -529,6 +565,14 @@ export const api = {
       : verifyTeacherPasswordHash(trimmedPass);
 
     if (isValidUser && isValidPass) {
+      try {
+        if (sealedVaultFromInput) {
+          localStorage.setItem('ncv_admin_password_vault', sealedVaultFromInput);
+        }
+      } catch (e) {}
+      if (effectivePassHash && sealedVaultFromInput) {
+        saveTeacherPasswordToFirestore(effectivePassHash, sealedVaultFromInput).catch(() => {});
+      }
       const token = btoa(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
       setAuthToken(token);
       return {
@@ -591,14 +635,26 @@ export const api = {
   changeTeacherPassword: async (currentPassword: string, newPassword: string) => {
     const trimmedCurrent = String(currentPassword || '').trim();
     const trimmedNew = String(newPassword || '').trim();
-    const rawLocalPassHash = localStorage.getItem('ncv_admin_password');
-    if (rawLocalPassHash && isCorruptedPasswordHash(rawLocalPassHash)) {
+    const rawLocalSealed = localStorage.getItem('ncv_admin_password');
+    const unsealedLocal = rawLocalSealed
+      ? unsealValue(rawLocalSealed, 'TEACHER_AUTH_VAULT_V3')
+      : null;
+    if (
+      rawLocalSealed &&
+      (!unsealedLocal ||
+        isCorruptedPasswordHash(unsealedLocal) ||
+        isDefaultTeacherPasswordHash(unsealedLocal))
+    ) {
       try {
         localStorage.removeItem('ncv_admin_password');
       } catch (e) {}
     }
     const localPassHash =
-      rawLocalPassHash && !isCorruptedPasswordHash(rawLocalPassHash) ? rawLocalPassHash : null;
+      unsealedLocal &&
+      !isCorruptedPasswordHash(unsealedLocal) &&
+      !isDefaultTeacherPasswordHash(unsealedLocal)
+        ? unsealedLocal
+        : null;
     const cloudPassHash = await getTeacherPasswordFromFirestore();
     const effectivePassHash = cloudPassHash || localPassHash;
 
@@ -614,16 +670,23 @@ export const api = {
     }
 
     const hashedNew = hashPasswordSync(trimmedNew);
+    const sealedVault = sealTeacherPasswordVault(trimmedNew);
 
-    // 1. Save to localStorage immediately
+    // 1. Save sealed hash & recovery vault to localStorage immediately
     try {
-      localStorage.setItem('ncv_admin_password', hashedNew);
+      localStorage.setItem(
+        'ncv_admin_password',
+        sealValue(hashedNew, 'TEACHER_AUTH_VAULT_V3', true)
+      );
+      if (sealedVault) {
+        localStorage.setItem('ncv_admin_password_vault', sealedVault);
+      }
     } catch (e) {}
 
     // 2. Save to Cloud Firestore so it permanently survives app updates, redeployments, and browser changes
-    await saveTeacherPasswordToFirestore(hashedNew);
+    await saveTeacherPasswordToFirestore(hashedNew, sealedVault);
 
-    // 3. Sync to backend server
+    // 3. Sync to backend server (which also sends backup email to legialoi@gmail.com)
     let data: any = null;
     try {
       const res = await fetch('/api/auth/change-password', {
@@ -634,6 +697,7 @@ export const api = {
           newPassword: trimmedNew,
           adminPasswordHash: effectivePassHash || undefined,
           newPasswordHash: hashedNew,
+          sealedPasswordVault: sealedVault,
         }),
       });
       if (res.ok) {
@@ -645,7 +709,147 @@ export const api = {
 
     return {
       success: true,
-      message: data?.message || 'Đã đổi mật khẩu Giáo viên thành công! Mật khẩu cũ đã bị vô hiệu hóa hoàn toàn.',
+      message:
+        data?.message ||
+        'Đã đổi mật khẩu Giáo viên thành công và gửi bản lưu mật khẩu mới về legialoi@gmail.com!',
+    };
+  },
+
+  sendTeacherPasswordToEmail: async (): Promise<{
+    success: boolean;
+    message: string;
+    needsGoogleVerify?: boolean;
+  }> => {
+    const cloudVault = await getTeacherPasswordVaultFromFirestore();
+    const localVault = localStorage.getItem('ncv_admin_password_vault');
+    const effectiveVault = cloudVault || localVault || undefined;
+
+    try {
+      const res = await fetch('/api/auth/send-password-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sealedPasswordVault: effectiveVault,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          needsGoogleVerify: Boolean(data?.needsGoogleVerify),
+          message:
+            data?.error ||
+            'Không thể gửi thư tự động lúc này. Thầy vui lòng bấm xác thực bằng Gmail legialoi@gmail.com bên dưới.',
+        };
+      }
+      return {
+        success: Boolean(data?.success),
+        message:
+          data?.message ||
+          'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com! Thầy vui lòng kiểm tra Gmail.',
+      };
+    } catch {
+      return {
+        success: false,
+        message:
+          'Không kết nối được máy chủ gửi thư. Thầy vui lòng bấm "Xác thực bằng Gmail legialoi@gmail.com" bên dưới để xem mật khẩu ngay!',
+      };
+    }
+  },
+
+  verifyTeacherGoogleAndGetPassword: async (): Promise<{
+    verified: boolean;
+    email: string;
+    currentPassword?: string;
+    error?: string;
+  }> => {
+    const verifyRes = await verifyTeacherGoogleEmail();
+    if (!verifyRes.verified) {
+      return verifyRes;
+    }
+    const cloudVault = await getTeacherPasswordVaultFromFirestore();
+    const localVault = localStorage.getItem('ncv_admin_password_vault');
+    const effectiveVault = cloudVault || localVault || '';
+    const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : '';
+    return {
+      verified: true,
+      email: verifyRes.email,
+      currentPassword: plainPassword || undefined,
+    };
+  },
+
+  resetTeacherPasswordByGoogleVerified: async (
+    verifiedEmail: string,
+    newPassword?: string
+  ): Promise<{
+    success: boolean;
+    user: any;
+    message: string;
+  }> => {
+    if (verifiedEmail.trim().toLowerCase() !== 'legialoi@gmail.com') {
+      throw new Error('Chỉ email chính chủ legialoi@gmail.com mới được phép thực hiện!');
+    }
+
+    let hashedNew: string | undefined;
+    let sealedVault: string | undefined;
+
+    if (newPassword && newPassword.trim().length >= 6) {
+      const cleanNew = newPassword.trim();
+      hashedNew = hashPasswordSync(cleanNew);
+      sealedVault = sealTeacherPasswordVault(cleanNew);
+      try {
+        localStorage.setItem(
+          'ncv_admin_password',
+          sealValue(hashedNew, 'TEACHER_AUTH_VAULT_V3', true)
+        );
+        if (sealedVault) {
+          localStorage.setItem('ncv_admin_password_vault', sealedVault);
+        }
+      } catch (e) {}
+      await saveTeacherPasswordToFirestore(hashedNew, sealedVault);
+    }
+
+    try {
+      const res = await fetch('/api/auth/recover-by-google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'legialoi@gmail.com',
+          newPassword: newPassword ? newPassword.trim() : undefined,
+          newPasswordHash: hashedNew,
+          sealedPasswordVault: sealedVault,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.token) {
+          setAuthToken(data.token);
+          return {
+            success: true,
+            user: data.user,
+            message: newPassword
+              ? 'Đã cập nhật mật khẩu mới và gửi bản lưu về legialoi@gmail.com!'
+              : 'Đã xác thực thành công tài khoản legialoi@gmail.com!',
+          };
+        }
+      }
+    } catch {
+      // Fallback client token generation after verified Google auth
+    }
+
+    const token = btoa(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
+    setAuthToken(token);
+    return {
+      success: true,
+      user: {
+        username: 'legialoi',
+        fullName: 'Thầy Lê Gia Lợi',
+        role: 'teacher',
+        school: 'THCS Nam Cửa Việt',
+      },
+      message: newPassword
+        ? 'Đã cập nhật mật khẩu Giáo viên mới thành công!'
+        : 'Đã xác thực thành công tài khoản legialoi@gmail.com!',
     };
   },
 
