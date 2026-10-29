@@ -344,6 +344,7 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
   const handleSelectStudent = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     setSelectedStudentId(val);
+    setErrorMsg(null);
 
     const found = classStudents.find((s) => s.id === val);
     if (found) {
@@ -352,10 +353,6 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
         setSbd(found.sbd);
       } else {
         setSbd('');
-      }
-      const defaultPass = `${studentClass.toUpperCase().replace(/[^A-Z0-9]/g, '')}123`;
-      if (!password.trim()) {
-        setPassword(defaultPass);
       }
     } else {
       setStudentName('');

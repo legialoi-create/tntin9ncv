@@ -444,13 +444,18 @@ export const api = {
   login: async (username: string, password: string) => {
     const trimmedUser = String(username || '').trim().toLowerCase();
     const trimmedPass = String(password || '').trim();
+    const localPassHash = localStorage.getItem('ncv_admin_password');
 
     let res: Response | null = null;
     try {
       res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          username,
+          password,
+          adminPasswordHash: localPassHash || undefined,
+        }),
       });
     } catch {
       // Network error or static environment
@@ -459,19 +464,28 @@ export const api = {
     if (res && res.ok) {
       const data = await res.json();
       if (data && data.token) {
+        // If local browser has a custom changed password hash, verify input matches it
+        if (localPassHash && !verifyPasswordSync(trimmedPass, localPassHash)) {
+          throw new Error('Mật khẩu Giáo viên không chính xác (Mật khẩu đã được thay đổi)');
+        }
         setAuthToken(data.token);
         return data;
       }
+    }
+
+    if (res && res.status === 401) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.error || 'Tên đăng nhập hoặc mật khẩu Giáo viên không chính xác');
     }
 
     // Client-side fallback / override strictly using one-way cryptographic hashes (no plain passwords in bundle)
     const allowedUsers = ['legialoi', 'legialoi@gmail.com', 'admin', 'teacher', 'gv'];
     const isValidUser = allowedUsers.includes(trimmedUser);
 
-    const localPassHash = localStorage.getItem('ncv_admin_password');
-    const isValidPass =
-      (localPassHash && verifyPasswordSync(trimmedPass, localPassHash)) ||
-      verifyTeacherPasswordHash(trimmedPass);
+    // CRITICAL: If teacher changed password (localPassHash exists), ONLY accept the new password and reject old default password
+    const isValidPass = localPassHash
+      ? verifyPasswordSync(trimmedPass, localPassHash)
+      : verifyTeacherPasswordHash(trimmedPass);
 
     if (isValidUser && isValidPass) {
       const token = btoa(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`);
@@ -486,14 +500,6 @@ export const api = {
           school: 'THCS Nam Cửa Việt'
         }
       };
-    }
-
-    if (res) {
-      const data = await safeJson(res, 'Tên đăng nhập hoặc mật khẩu Giáo viên không chính xác');
-      if (data && data.token && isValidTeacherToken(data.token)) {
-        setAuthToken(data.token);
-        return data;
-      }
     }
 
     throw new Error('Tên đăng nhập hoặc mật khẩu Giáo viên không chính xác');
@@ -542,16 +548,49 @@ export const api = {
   },
 
   changeTeacherPassword: async (currentPassword: string, newPassword: string) => {
-    const hashedNew = hashPasswordSync(newPassword.trim());
+    const trimmedCurrent = String(currentPassword || '').trim();
+    const trimmedNew = String(newPassword || '').trim();
+    const localPassHash = localStorage.getItem('ncv_admin_password');
+
+    // Verify current password locally first if custom password is set
+    const isCurrentValidLocal = localPassHash
+      ? verifyPasswordSync(trimmedCurrent, localPassHash)
+      : verifyTeacherPasswordHash(trimmedCurrent);
+
+    let res: Response | null = null;
+    try {
+      res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: getHeaders(true),
+        body: JSON.stringify({
+          currentPassword: trimmedCurrent,
+          newPassword: trimmedNew,
+          adminPasswordHash: localPassHash || undefined,
+        }),
+      });
+    } catch {
+      // Network/serverless fallback
+    }
+
+    if (res && !res.ok && res.status === 400) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.error || 'Mật khẩu hiện tại không chính xác');
+    }
+
+    if (!res?.ok && !isCurrentValidLocal) {
+      throw new Error('Mật khẩu hiện tại không chính xác');
+    }
+
+    const data = res && res.ok ? await res.json().catch(() => null) : null;
+    const hashedNew = data?.passwordHash || hashPasswordSync(trimmedNew);
     try {
       localStorage.setItem('ncv_admin_password', hashedNew);
     } catch (e) {}
-    const res = await fetch('/api/auth/change-password', {
-      method: 'POST',
-      headers: getHeaders(true),
-      body: JSON.stringify({ currentPassword, newPassword }),
-    });
-    return await safeJson<{ success: boolean; message: string }>(res, 'Lỗi đổi mật khẩu giáo viên');
+
+    return {
+      success: true,
+      message: data?.message || 'Đã đổi mật khẩu Giáo viên thành công! Mật khẩu cũ đã bị vô hiệu hóa.',
+    };
   },
 
   // AI Exam Parser
@@ -1811,6 +1850,11 @@ export const api = {
         : s.id === params.studentId;
       if (isTarget) {
         const defaultPass = `${(s.class || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}123`;
+        if (s.username) {
+          try {
+            localStorage.removeItem(`ncv_student_pass_${s.username.toLowerCase()}`);
+          } catch (e) {}
+        }
         return { ...s, password: defaultPass, isPasswordChanged: false };
       }
       return s;
@@ -1890,15 +1934,22 @@ export const api = {
         persistHashedPassLocallyAndCloud();
         return data;
       }
-    } catch (e) {
-      // ignore fetch error
+      if (res.status === 400) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(errData?.error || 'Mật khẩu hiện tại không chính xác');
+      }
+    } catch (e: any) {
+      if (e?.message && e.message.includes('Mật khẩu hiện tại')) {
+        throw e;
+      }
+      // ignore network error
     }
 
     persistHashedPassLocallyAndCloud();
 
     return {
       success: true,
-      message: 'Đổi mật khẩu thành công! Em hãy ghi nhớ mật khẩu mới để đăng nhập cho các bài kiểm tra sau.'
+      message: 'Đổi mật khẩu thành công! Em hãy ghi nhớ mật khẩu mới để đăng nhập cho các bài kiểm tra sau (mật khẩu cũ đã hết hiệu lực).'
     };
   },
 
@@ -1918,6 +1969,43 @@ export const api = {
     });
     const realExamSnapshot = history.exam ? sealExamQuestions(history.exam) : null;
 
+    // Look up student's current password status in localStorage / synced roster
+    const inputPass = String(params.password || '').trim();
+    const studentClassNorm = String(params.studentClass || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const defaultPass = `${studentClassNorm}123`;
+    const usernameLower = String(params.username || '').trim().toLowerCase();
+    const storedCustomPass = usernameLower ? localStorage.getItem(`ncv_student_pass_${usernameLower}`) : null;
+
+    let rosterStoredPass: string | undefined;
+    let rosterPassChanged = false;
+    try {
+      const cachedSt = localStorage.getItem('ncv_students_data');
+      if (cachedSt) {
+        const list: StudentInfo[] = JSON.parse(cachedSt) || [];
+        const normName = normalizeStudentName(params.studentName);
+        const normCls = normalizeClassName(params.studentClass);
+        const foundSt = list.find(
+          (s) =>
+            (usernameLower && s.username && s.username.toLowerCase() === usernameLower) ||
+            (normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls)
+        );
+        if (foundSt) {
+          if (foundSt.password) rosterStoredPass = foundSt.password;
+          if (
+            foundSt.isPasswordChanged ||
+            (foundSt.password &&
+              foundSt.password.toLowerCase() !== defaultPass.toLowerCase() &&
+              foundSt.password.startsWith('ncv_pw$'))
+          ) {
+            rosterPassChanged = true;
+          }
+        }
+      }
+    } catch (e) {}
+
+    const effectiveCustomPassHash = storedCustomPass || (rosterPassChanged ? rosterStoredPass : undefined);
+    const isStudentPasswordChanged = Boolean(storedCustomPass || rosterPassChanged);
+
     let res: Response | null = null;
     try {
       res = await fetch('/api/student/validate-entry', {
@@ -1929,10 +2017,24 @@ export const api = {
           previousSessions: history.previousSessions,
           clientAttemptsMade: history.attemptsMade,
           clientBestScore: history.bestScore,
+          studentPasswordHash: effectiveCustomPassHash,
+          studentIsPasswordChanged: isStudentPasswordChanged,
         }),
       });
 
       if (res.ok) {
+        // Also enforce locally if student has changed password on this client/cloud
+        if (isStudentPasswordChanged && effectiveCustomPassHash) {
+          const matchesCustom =
+            (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||
+            (rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass));
+          if (!matchesCustom) {
+            throw new Error(
+              'Mật khẩu đăng nhập không chính xác! Em đã đổi mật khẩu riêng nên mật khẩu mặc định cũ không còn hiệu lực. Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!'
+            );
+          }
+        }
+
         const serverData: any = await safeJson(res, 'Không thể xác thực thông tin vào thi');
         const effectiveMaxAttempts = Math.max(
           1,
@@ -1979,6 +2081,16 @@ export const api = {
         };
       }
 
+      if (res.status === 401) {
+        const errData = await res.json().catch(() => null);
+        throw new Error(
+          errData?.error ||
+            (isStudentPasswordChanged
+              ? 'Mật khẩu đăng nhập không chính xác! Em đã đổi mật khẩu riêng nên mật khẩu mặc định cũ không còn hiệu lực.'
+              : `Mật khẩu đăng nhập không chính xác! Mật khẩu mặc định là ${defaultPass}.`)
+        );
+      }
+
       // If server returned 403 or specific student block (like max attempts exceeded), throw server error
       if (res.status === 403) {
         return await safeJson(res, 'Không thể xác thực thông tin vào thi');
@@ -1987,7 +2099,10 @@ export const api = {
       if (
         e?.status === 403 ||
         e?.data?.hasCompletedAllAttempts ||
-        (e?.message && (e.message.includes('quá số lần') || e.message.includes('hoàn thành đủ')))
+        (e?.message &&
+          (e.message.includes('quá số lần') ||
+            e.message.includes('hoàn thành đủ') ||
+            e.message.includes('Mật khẩu đăng nhập không chính xác')))
       ) {
         throw e;
       }
@@ -1995,47 +2110,25 @@ export const api = {
     }
 
     // Client-side fallback check for Vercel static or serverless state resets
-    const inputPass = String(params.password || '').trim();
-    const studentClassNorm = String(params.studentClass || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const defaultPass = `${studentClassNorm}123`;
-
-    const usernameLower = String(params.username || '').toLowerCase();
-    const storedCustomPass = usernameLower ? localStorage.getItem(`ncv_student_pass_${usernameLower}`) : null;
-
-    let rosterStoredPass: string | undefined;
-    try {
-      const cachedSt = localStorage.getItem('ncv_students_data');
-      if (cachedSt) {
-        const list: StudentInfo[] = JSON.parse(cachedSt) || [];
-        const normName = normalizeStudentName(params.studentName);
-        const normCls = normalizeClassName(params.studentClass);
-        const foundSt = list.find(
-          (s) =>
-            (usernameLower && s.username && s.username.toLowerCase() === usernameLower) ||
-            (normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls)
-        );
-        if (foundSt?.password) rosterStoredPass = foundSt.password;
-      }
-    } catch (e) {}
-
     const inputPassNoSpace = inputPass.replace(/\s+/g, '').toLowerCase();
     const defaultPassNoSpace = defaultPass.toLowerCase();
 
-    const isPassValid =
-      (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||
-      (rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass)) ||
-      inputPassNoSpace === defaultPassNoSpace ||
-      inputPassNoSpace === '123456' ||
-      inputPassNoSpace === '123' ||
-      inputPassNoSpace === 'admin';
-
-    if (!isPassValid && res && res.status === 401) {
-      return await safeJson(res, 'Mật khẩu đăng nhập không chính xác');
-    }
+    // CRITICAL: If student has changed their password, strictly verify against new password ONLY and reject old default password
+    const isPassValid = isStudentPasswordChanged
+      ? Boolean(
+          (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||
+            (rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass))
+        )
+      : Boolean(
+          (rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass)) ||
+            inputPassNoSpace === defaultPassNoSpace
+        );
 
     if (!isPassValid) {
       throw new Error(
-        `Mật khẩu đăng nhập không chính xác! Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}). Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!`
+        isStudentPasswordChanged
+          ? 'Mật khẩu đăng nhập không chính xác! Em đã đổi mật khẩu riêng nên mật khẩu mặc định cũ không còn hiệu lực. Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!'
+          : `Mật khẩu đăng nhập không chính xác! Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}). Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!`
       );
     }
 

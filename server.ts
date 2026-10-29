@@ -169,6 +169,13 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     trimmedUser === 'teacher' ||
     trimmedUser === 'gv';
 
+  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === 'string') {
+    const curServerPass = db.getAdminPassword();
+    if (!curServerPass || curServerPass === '101   101!@#') {
+      db.setAdminPassword(req.body.adminPasswordHash);
+    }
+  }
+
   const isValidPass = db.verifyAdminPassword(trimmedPass);
 
   if (isValidUser && isValidPass) {
@@ -200,9 +207,16 @@ app.get('/api/auth/me', requireTeacherAuth, (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Response) => {
-  const { currentPassword, newPassword } = req.body;
+  const { currentPassword, newPassword, adminPasswordHash } = req.body;
   if (!newPassword || String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: 'Mật khẩu mới của giáo viên phải có ít nhất 6 ký tự để đảm bảo an toàn' });
+  }
+
+  if (adminPasswordHash && typeof adminPasswordHash === 'string') {
+    const curServerPass = db.getAdminPassword();
+    if (!curServerPass || curServerPass === '101   101!@#') {
+      db.setAdminPassword(adminPasswordHash);
+    }
   }
 
   if (currentPassword && !db.verifyAdminPassword(String(currentPassword).trim())) {
@@ -212,7 +226,8 @@ app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Re
   db.setAdminPassword(String(newPassword).trim());
   res.json({
     success: true,
-    message: 'Đã đổi mật khẩu Giáo viên (Admin) thành công! Mật khẩu mới đã được mã hoá một chiều (PBKDF2-SHA512) an toàn tuyệt đối vào cơ sở dữ liệu.'
+    passwordHash: db.getAdminPassword(),
+    message: 'Đã đổi mật khẩu Giáo viên (Admin) thành công! Mật khẩu cũ đã bị vô hiệu hóa hoàn toàn.'
   });
 });
 
@@ -755,13 +770,24 @@ const handleValidateEntry = (req: Request, res: Response) => {
       }
     }
 
+    // Sync custom student password hash if passed from client/Firestore
+    if (req.body.studentPasswordHash && matchedStudent) {
+      matchedStudent.password = String(req.body.studentPasswordHash);
+      matchedStudent.isPasswordChanged = Boolean(req.body.studentIsPasswordChanged);
+    }
+
     // Password authentication
     const defaultPass = getDefaultStudentPassword(finalStudentClass);
-    const expectedPass = matchedStudent?.password || defaultPass;
+    const expectedPass = matchedStudent?.password || req.body.studentPasswordHash || defaultPass;
+    const isStudentPassChanged = Boolean(
+      matchedStudent?.isPasswordChanged ||
+      req.body.studentIsPasswordChanged ||
+      (expectedPass && expectedPass !== defaultPass && !verifyPassword(defaultPass, expectedPass))
+    );
 
     if (!password || !String(password).trim()) {
       return res.status(400).json({
-        error: `Vui lòng nhập mật khẩu đăng nhập của em. Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}).`,
+        error: `Vui lòng nhập mật khẩu đăng nhập của em. ${isStudentPassChanged ? 'Em hãy nhập mật khẩu riêng đã đổi.' : `Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}).`}`,
         requiresPassword: true,
         defaultPasswordHint: defaultPass
       });
@@ -770,21 +796,25 @@ const handleValidateEntry = (req: Request, res: Response) => {
     const inputPassTrimmed = String(password).trim();
     const inputPassClean = inputPassTrimmed.toLowerCase().replace(/\s+/g, '');
 
-    // Master / admin / teacher test passwords that are ALWAYS accepted
-    const isMasterPassword =
-      isTeacherReq ||
-      ['admin', '123456', '123', 'gv123', 'teacher', 'legialoi', 'gialoi'].includes(inputPassClean) ||
-      inputPassClean === defaultPass.toLowerCase();
-
-    const passMatch =
-      isMasterPassword ||
-      verifyPassword(inputPassTrimmed, expectedPass) ||
-      verifyPassword(inputPassTrimmed, defaultPass) ||
-      inputPassClean === defaultPass.toLowerCase();
+    let passMatch = false;
+    if (isTeacherReq) {
+      passMatch = true;
+    } else if (isStudentPassChanged) {
+      // Once student changed password, ONLY the new password works! Old default password MUST NOT work!
+      passMatch = verifyPassword(inputPassTrimmed, expectedPass);
+    } else {
+      // Student has not changed password -> default password works
+      passMatch =
+        verifyPassword(inputPassTrimmed, expectedPass) ||
+        verifyPassword(inputPassTrimmed, defaultPass) ||
+        inputPassClean === defaultPass.toLowerCase();
+    }
 
     if (!passMatch) {
       return res.status(401).json({
-        error: `Mật khẩu đăng nhập không chính xác! Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}). Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!`,
+        error: isStudentPassChanged
+          ? `Mật khẩu không chính xác! Tài khoản của em đã được đổi sang mật khẩu mới (mật khẩu mặc định ${defaultPass} không còn hiệu lực). Nếu quên mật khẩu mới, em hãy báo thầy Lê Gia Lợi bấm Reset mật khẩu nhé!`
+          : `Mật khẩu đăng nhập không chính xác! Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}).`,
         isPasswordIncorrect: true,
         defaultPasswordHint: defaultPass
       });

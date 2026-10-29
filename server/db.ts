@@ -428,7 +428,11 @@ class DatabaseManager {
         deletedClassNames: Array.from(deletedClassNamesSet),
         deletedStudentIds: Array.from(deletedStudentIdsSet),
         adminToken: parsedList.find(p => p.adminToken)?.adminToken || 'legialoi-ncv-session-secret',
-        adminPassword: parsedList.find(p => p.adminPassword)?.adminPassword || '101   101!@#'
+        adminPassword:
+          parsedList.find(p => p.adminPassword && isHashedPassword(p.adminPassword) && !verifyPassword('101   101!@#', p.adminPassword))?.adminPassword ||
+          parsedList.find(p => p.adminPassword && p.adminPassword !== '101   101!@#')?.adminPassword ||
+          parsedList.find(p => p.adminPassword)?.adminPassword ||
+          '101   101!@#'
       };
 
       // Always synchronize merged persistent state to all candidate locations
@@ -883,6 +887,19 @@ class DatabaseManager {
     const cleanInput = inputPass.trim();
     const currentPass = this.getAdminPassword();
 
+    // Check if admin password has been explicitly changed from default ('101   101!@#')
+    const storedAdminPass = this.data.adminPassword;
+    const isCustomAdminPassword =
+      Boolean(storedAdminPass) &&
+      storedAdminPass !== '101   101!@#' &&
+      !verifyPassword('101   101!@#', storedAdminPass!) &&
+      !verifyPassword('GiaLoi@2026', storedAdminPass!);
+
+    if (isCustomAdminPassword) {
+      // Strictly verify against the custom hashed password ONLY! Old default passwords must NOT work!
+      return verifyPassword(cleanInput, currentPass);
+    }
+
     // 1. Direct verify (hashed PBKDF2 or exact string)
     if (verifyPassword(cleanInput, currentPass)) {
       return true;
@@ -898,7 +915,7 @@ class DatabaseManager {
       return true;
     }
 
-    // 3. Fallback defaults (only Teacher Lợi's official passwords, never weak '123456' or 'admin' or 'legialoi')
+    // 3. Fallback defaults (only when adminPassword has NOT been changed from default)
     const allowedDefaults = [
       '101   101!@#',
       '101 101!@#',
@@ -922,7 +939,7 @@ class DatabaseManager {
   public setAdminPassword(newPassword: string): void {
     // Hash admin password using PBKDF2 with salt so plain-text is never stored in DB
     this.data.adminPassword = hashPassword(newPassword.trim());
-    this.persist();
+    this.persist(true);
   }
 
   public getBackup() {
