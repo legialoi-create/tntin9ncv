@@ -2783,6 +2783,22 @@ export const api = {
           : history.bestScore;
     }
 
+    const effectiveMaxAttempts = Math.max(1, Number(history.exam?.maxAttempts ?? payload.examSnapshot?.maxAttempts ?? 1));
+    if (history.attemptsMade >= effectiveMaxAttempts && !history.previousSessions.some((s: any) => (s.sessionId || s.id) === sessionId)) {
+      const blockErr: any = new Error(
+        `Bạn đã hoàn thành đủ ${history.attemptsMade}/${effectiveMaxAttempts} lần làm bài cho phép. Hệ thống không ghi nhận thêm bài nộp mới.`
+      );
+      blockErr.status = 403;
+      blockErr.data = {
+        hasCompletedAllAttempts: true,
+        attemptsMade: history.attemptsMade,
+        maxAttempts: effectiveMaxAttempts,
+        bestScore: history.bestScore ?? 0,
+        pastAttempts: history.pastAttempts,
+      };
+      throw blockErr;
+    }
+
     let result: any = null;
     try {
       const res = await fetch('/api/student/submit', {

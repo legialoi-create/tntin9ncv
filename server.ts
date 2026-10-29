@@ -1976,6 +1976,26 @@ app.post('/api/student/submit', (req: Request, res: Response) => {
       normalizeClassName(s.studentClass) === normSubClass &&
       s.status === 'submitted'
   ).length;
+
+  const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
+  const isTeacherReq = isVerifiedTeacherRequest(req);
+  if (!isTeacherReq && priorSubmittedCount >= maxAttempts) {
+    const prevSessions = db.getSessions(exam.id).filter(
+      s =>
+        normalizeStudentName(s.studentName) === normSubName &&
+        normalizeClassName(s.studentClass) === normSubClass &&
+        s.status === 'submitted'
+    );
+    const bestScore = prevSessions.length > 0 ? Math.max(...prevSessions.map(s => s.score ?? 0)) : 0;
+    return res.status(403).json({
+      error: `Học sinh ${effectiveStudentName} (Lớp ${effectiveStudentClass}) đã hoàn thành tối đa ${priorSubmittedCount}/${maxAttempts} lần làm bài cho phép. Hệ thống không nhận thêm lượt làm bài mới. Điểm cao nhất đã ghi nhận: ${bestScore} điểm.`,
+      hasCompletedAllAttempts: true,
+      maxAttempts,
+      attemptsMade: priorSubmittedCount,
+      bestScore
+    });
+  }
+
   const clientAttemptsMade = Math.max(0, Number(req.body.clientAttemptsMade) || 0);
   const resolvedAttemptNumber = Math.max(
     Number(attemptNumber) || 1,
