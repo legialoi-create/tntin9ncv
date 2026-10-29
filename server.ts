@@ -169,20 +169,19 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     trimmedUser === 'teacher' ||
     trimmedUser === 'gv';
 
-  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === 'string') {
-    const curServerPass = db.getAdminPassword();
-    if (!curServerPass || curServerPass === '101   101!@#') {
-      db.setAdminPassword(req.body.adminPasswordHash);
-    }
+  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === 'string' && req.body.adminPasswordHash.startsWith('ncv_pw$')) {
+    db.setAdminPassword(req.body.adminPasswordHash);
   }
 
   const isValidPass = db.verifyAdminPassword(trimmedPass);
 
   if (isValidUser && isValidPass) {
     const token = Buffer.from(`legialoi_verified_v3:::${AUTH_SECRET}:::${Date.now()}`).toString('base64');
+    const curAdminPass = db.getAdminPassword();
     return res.json({
       success: true,
       token,
+      passwordHash: curAdminPass && curAdminPass.startsWith('ncv_pw$') ? curAdminPass : undefined,
       user: {
         username: TEACHER_USERNAME,
         fullName: 'Thầy Lê Gia Lợi',
@@ -207,23 +206,25 @@ app.get('/api/auth/me', requireTeacherAuth, (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Response) => {
-  const { currentPassword, newPassword, adminPasswordHash } = req.body;
+  const { currentPassword, newPassword, adminPasswordHash, newPasswordHash } = req.body;
   if (!newPassword || String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: 'Mật khẩu mới của giáo viên phải có ít nhất 6 ký tự để đảm bảo an toàn' });
   }
 
-  if (adminPasswordHash && typeof adminPasswordHash === 'string') {
-    const curServerPass = db.getAdminPassword();
-    if (!curServerPass || curServerPass === '101   101!@#') {
-      db.setAdminPassword(adminPasswordHash);
-    }
+  if (adminPasswordHash && typeof adminPasswordHash === 'string' && adminPasswordHash.startsWith('ncv_pw$')) {
+    db.setAdminPassword(adminPasswordHash);
   }
 
   if (currentPassword && !db.verifyAdminPassword(String(currentPassword).trim())) {
     return res.status(400).json({ error: 'Mật khẩu hiện tại của giáo viên không chính xác' });
   }
 
-  db.setAdminPassword(String(newPassword).trim());
+  if (newPasswordHash && typeof newPasswordHash === 'string' && newPasswordHash.startsWith('ncv_pw$')) {
+    db.setAdminPassword(newPasswordHash);
+  } else {
+    db.setAdminPassword(String(newPassword).trim());
+  }
+
   res.json({
     success: true,
     passwordHash: db.getAdminPassword(),
@@ -623,38 +624,61 @@ app.post('/api/students/reset-password', requireTeacherAuth, (req: Request, res:
 });
 
 app.post('/api/students/change-password', (req: Request, res: Response) => {
-  const { studentId, username, currentPassword, newPassword } = req.body;
+  const { studentId, studentName, studentClass, sbd, username, currentPassword, newPassword, newPasswordHash } = req.body;
   if (!newPassword || newPassword.trim().length < 4) {
     return res.status(400).json({ error: 'Mật khẩu mới phải có ít nhất 4 ký tự' });
   }
 
   const allStudents = db.getStudents();
-  const student = allStudents.find(s =>
+  const normName = normalizeStudentName(studentName);
+  const normCls = normalizeClassName(studentClass);
+  let student = allStudents.find(s =>
     (studentId && s.id === studentId) ||
-    (username && s.username && s.username.toLowerCase() === username.trim().toLowerCase())
+    (username && s.username && s.username.toLowerCase() === String(username).trim().toLowerCase()) ||
+    (normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls)
   );
 
-  if (!student) {
+  if (student) {
+    const defaultPass = getDefaultStudentPassword(student.class);
+    const curPass = student.password || defaultPass;
+    if (currentPassword) {
+      const match = student.isPasswordChanged
+        ? verifyPassword(currentPassword.trim(), curPass)
+        : verifyPassword(currentPassword.trim(), curPass) || verifyPassword(currentPassword.trim(), defaultPass);
+      if (!match) {
+        return res.status(400).json({ error: 'Mật khẩu hiện tại không chính xác' });
+      }
+    }
+    student.password =
+      newPasswordHash && typeof newPasswordHash === 'string' && newPasswordHash.startsWith('ncv_pw$')
+        ? newPasswordHash
+        : hashPassword(newPassword.trim());
+    student.isPasswordChanged = true;
+    db.saveStudents(allStudents);
+  } else if (studentName && studentClass) {
+    const hashed =
+      newPasswordHash && typeof newPasswordHash === 'string' && newPasswordHash.startsWith('ncv_pw$')
+        ? newPasswordHash
+        : hashPassword(newPassword.trim());
+    const createdStudent = {
+      id: studentId || `st-${normCls}-${Date.now()}`,
+      name: String(studentName).trim(),
+      class: String(studentClass).trim(),
+      sbd: sbd ? String(sbd).trim() : '',
+      username: username ? String(username).trim() : generateStudentUsername(String(studentName), String(studentClass)),
+      password: hashed,
+      isPasswordChanged: true
+    };
+    student = createdStudent;
+    allStudents.push(createdStudent);
+    db.saveStudents(allStudents);
+  } else {
     return res.status(404).json({ error: 'Không tìm thấy tài khoản học sinh' });
   }
 
-  const defaultPass = getDefaultStudentPassword(student.class);
-  const curPass = student.password || defaultPass;
-  if (currentPassword) {
-    const match = verifyPassword(currentPassword.trim(), curPass);
-    if (!match) {
-      return res.status(400).json({ error: 'Mật khẩu hiện tại không chính xác' });
-    }
-  }
-
-  // Hash new password using PBKDF2 with salt before saving
-  student.password = hashPassword(newPassword.trim());
-  student.isPasswordChanged = true;
-  db.saveStudents(allStudents);
-
   res.json({
     success: true,
-    message: 'Đổi mật khẩu thành công! Em hãy ghi nhớ mật khẩu mới để đăng nhập cho các bài kiểm tra sau.',
+    message: 'Đổi mật khẩu thành công! Em hãy ghi nhớ mật khẩu mới để đăng nhập cho các bài kiểm tra sau (mật khẩu cũ đã hết hiệu lực).',
     student: {
       id: student.id,
       name: student.name,
@@ -771,9 +795,25 @@ const handleValidateEntry = (req: Request, res: Response) => {
     }
 
     // Sync custom student password hash if passed from client/Firestore
-    if (req.body.studentPasswordHash && matchedStudent) {
-      matchedStudent.password = String(req.body.studentPasswordHash);
-      matchedStudent.isPasswordChanged = Boolean(req.body.studentIsPasswordChanged);
+    if (req.body.studentPasswordHash) {
+      if (matchedStudent) {
+        matchedStudent.password = String(req.body.studentPasswordHash);
+        matchedStudent.isPasswordChanged = Boolean(req.body.studentIsPasswordChanged);
+        db.saveStudents(allStudents);
+      } else if (finalStudentName && finalStudentClass) {
+        const createdSt = {
+          id: req.body.studentId || `st-${normalizeClassName(finalStudentClass)}-${Date.now()}`,
+          name: finalStudentName,
+          class: finalStudentClass,
+          sbd: finalSbd || '',
+          username: username ? String(username).trim() : generateStudentUsername(finalStudentName, finalStudentClass),
+          password: String(req.body.studentPasswordHash),
+          isPasswordChanged: Boolean(req.body.studentIsPasswordChanged)
+        };
+        matchedStudent = createdSt;
+        allStudents.push(createdSt);
+        db.saveStudents(allStudents);
+      }
     }
 
     // Password authentication
@@ -797,9 +837,7 @@ const handleValidateEntry = (req: Request, res: Response) => {
     const inputPassClean = inputPassTrimmed.toLowerCase().replace(/\s+/g, '');
 
     let passMatch = false;
-    if (isTeacherReq) {
-      passMatch = true;
-    } else if (isStudentPassChanged) {
+    if (isStudentPassChanged) {
       // Once student changed password, ONLY the new password works! Old default password MUST NOT work!
       passMatch = verifyPassword(inputPassTrimmed, expectedPass);
     } else {

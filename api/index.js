@@ -18,7 +18,7 @@ var SEED_APP_DATA = {
       "code": "THU",
       "title": "B\xE0i ki\u1EC3m tra th\u1EED nghi\u1EC7m Tin h\u1ECDc - THCS Nam C\u1EEDa Vi\u1EC7t",
       "grade": 9,
-      "targetClasses": ["THU", "9A8", "9A9", "9A", "9B", "9C", "8A", "7A", "6A"],
+      "targetClasses": ["9A", "9B"],
       "durationMinutes": 45,
       "totalPoints": 10,
       "isOpen": true,
@@ -100,7 +100,7 @@ var SEED_APP_DATA = {
       "code": "TIN9-NCV01",
       "title": "Ki\u1EC3m tra 1 ti\u1EBFt Tin h\u1ECDc 9 - \u0110\u1EC1 ch\xEDnh th\u1EE9c THCS Nam C\u1EEDa Vi\u1EC7t",
       "grade": 9,
-      "targetClasses": ["9A8", "9A9", "9A", "9B", "9C", "THU"],
+      "targetClasses": ["9A", "9B"],
       "durationMinutes": 45,
       "totalPoints": 10,
       "isOpen": true,
@@ -244,21 +244,14 @@ var SEED_APP_DATA = {
     }
   ],
   "classes": [
-    { "name": "THU", "grade": 9, "studentCount": 10 },
-    { "name": "9A8", "grade": 9, "studentCount": 38 },
-    { "name": "9A9", "grade": 9, "studentCount": 40 },
     { "name": "9A", "grade": 9, "studentCount": 36 },
     { "name": "9B", "grade": 9, "studentCount": 35 },
-    { "name": "9C", "grade": 9, "studentCount": 35 },
     { "name": "8A", "grade": 8, "studentCount": 38 },
     { "name": "8B", "grade": 8, "studentCount": 37 },
-    { "name": "8C", "grade": 8, "studentCount": 36 },
     { "name": "7A", "grade": 7, "studentCount": 36 },
     { "name": "7B", "grade": 7, "studentCount": 35 },
-    { "name": "7C", "grade": 7, "studentCount": 34 },
     { "name": "6A", "grade": 6, "studentCount": 35 },
-    { "name": "6B", "grade": 6, "studentCount": 34 },
-    { "name": "6C", "grade": 6, "studentCount": 33 }
+    { "name": "6B", "grade": 6, "studentCount": 34 }
   ],
   "students": [
     {
@@ -283,6 +276,475 @@ var SEED_APP_DATA = {
   "sessions": []
 };
 
+// src/utils/security.ts
+var MASTER_PEPPER = "NCV_THCS_2026_ULTRA_SEAL_KEY_#9981_GIALOI";
+function normalizeStudentName(name) {
+  if (!name) return "";
+  return String(name).normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+function normalizeClassName(className) {
+  if (!className) return "";
+  return String(className).normalize("NFC").trim().replace(/\s+/g, "").toUpperCase();
+}
+function normalizeOptionKey(val, options) {
+  if (val === void 0 || val === null) return "";
+  const raw = String(val).normalize("NFC").trim();
+  if (!raw || raw.startsWith("ncv$v2$")) return "";
+  const upper = raw.toUpperCase();
+  if (upper === "A" || upper === "B" || upper === "C" || upper === "D") {
+    return upper;
+  }
+  const prefixMatch = upper.match(
+    /^(?:ĐÁP\s*ÁN|PHƯƠNG\s*ÁN|CHỌN|KEY|CÂU)?[\s\:\-\.\(\[]*([A-D])(?:[\.\)\]\:\-\s]|$)/i
+  );
+  if (prefixMatch && prefixMatch[1]) {
+    const letter = prefixMatch[1].toUpperCase();
+    if (letter === "A" || letter === "B" || letter === "C" || letter === "D") {
+      return letter;
+    }
+  }
+  if (Array.isArray(options) && options.length > 0) {
+    const rawLower = raw.toLowerCase();
+    const matchedOpt = options.find(
+      (o) => o && String(o.text ?? "").normalize("NFC").trim().toLowerCase() === rawLower
+    );
+    if (matchedOpt && matchedOpt.id) {
+      const optId = String(matchedOpt.id).trim().toUpperCase();
+      if (optId === "A" || optId === "B" || optId === "C" || optId === "D") {
+        return optId;
+      }
+    }
+  } else if (options && typeof options === "object") {
+    for (const [k, v] of Object.entries(options)) {
+      if (String(v ?? "").normalize("NFC").trim().toLowerCase() === raw.toLowerCase()) {
+        const ku = k.trim().toUpperCase();
+        if (ku === "A" || ku === "B" || ku === "C" || ku === "D") {
+          return ku;
+        }
+      }
+    }
+  }
+  return "";
+}
+function normalizeQuestionOptions(rawOptions) {
+  const letters = ["A", "B", "C", "D"];
+  if (Array.isArray(rawOptions) && rawOptions.length > 0) {
+    return letters.map((letter, idx) => {
+      const byId = rawOptions.find(
+        (o) => o && typeof o === "object" && normalizeOptionKey(o.id) === letter
+      );
+      const fallbackItem = rawOptions[idx];
+      const chosen = byId || fallbackItem;
+      let text = "";
+      if (typeof chosen === "string") {
+        text = chosen.trim();
+      } else if (chosen && typeof chosen === "object") {
+        text = String(chosen.text ?? chosen.content ?? "").trim();
+      }
+      return {
+        id: letter,
+        text
+      };
+    });
+  }
+  if (rawOptions && typeof rawOptions === "object") {
+    const obj = rawOptions;
+    return letters.map((letter) => ({
+      id: letter,
+      text: String(obj[letter] ?? obj[letter.toLowerCase()] ?? "").trim()
+    }));
+  }
+  return letters.map((letter) => ({ id: letter, text: "" }));
+}
+function normalizeSingleQuestionOptionMap(rawMap) {
+  const letters = ["A", "B", "C", "D"];
+  if (!rawMap) return null;
+  if (Array.isArray(rawMap) && rawMap.length >= 4) {
+    const a = normalizeOptionKey(rawMap[0]) || "A";
+    const b = normalizeOptionKey(rawMap[1]) || "B";
+    const c = normalizeOptionKey(rawMap[2]) || "C";
+    const d = normalizeOptionKey(rawMap[3]) || "D";
+    return { A: a, B: b, C: c, D: d };
+  }
+  if (typeof rawMap === "object") {
+    const obj = rawMap;
+    const result = {
+      A: "A",
+      B: "B",
+      C: "C",
+      D: "D"
+    };
+    let hasValid = false;
+    for (const letter of letters) {
+      const candidate = obj[letter] ?? obj[letter.toLowerCase()];
+      const norm = normalizeOptionKey(candidate);
+      if (norm) {
+        result[letter] = norm;
+        hasValid = true;
+      }
+    }
+    return hasValid ? result : null;
+  }
+  return null;
+}
+function reconstructOptionOrderFromDisplayedQuestions(displayedQuestions, examQuestions) {
+  const reconstructed = {};
+  if (!Array.isArray(displayedQuestions) || !Array.isArray(examQuestions)) {
+    return reconstructed;
+  }
+  const letters = ["A", "B", "C", "D"];
+  for (const sq of displayedQuestions) {
+    if (!sq || !sq.id || !Array.isArray(sq.options)) continue;
+    const sqId = String(sq.id);
+    const safeSqId = sqId.replace(/[\/\.]/g, "_");
+    const origQ = examQuestions.find(
+      (q) => q && (String(q.id) === sqId || String(q.id).replace(/[\/\.]/g, "_") === safeSqId)
+    );
+    if (!origQ || !origQ.options) continue;
+    const origOpts = normalizeQuestionOptions(origQ.options);
+    const dispOpts = normalizeQuestionOptions(sq.options);
+    const usedOrigIds = /* @__PURE__ */ new Set();
+    const mapping = {};
+    let matchedCount = 0;
+    for (const dispOpt of dispOpts) {
+      const dispTextNorm = String(dispOpt.text || "").normalize("NFC").trim().toLowerCase();
+      if (!dispTextNorm) continue;
+      const foundOrig = origOpts.find(
+        (o) => !usedOrigIds.has(o.id) && String(o.text || "").normalize("NFC").trim().toLowerCase() === dispTextNorm
+      );
+      if (foundOrig) {
+        mapping[dispOpt.id] = foundOrig.id;
+        usedOrigIds.add(foundOrig.id);
+        matchedCount++;
+      }
+    }
+    if (matchedCount >= 3) {
+      const remainingOrig = letters.filter((l) => !usedOrigIds.has(l));
+      let remIdx = 0;
+      const fullMap = {
+        A: mapping.A || remainingOrig[remIdx++] || "A",
+        B: mapping.B || remainingOrig[remIdx++] || "B",
+        C: mapping.C || remainingOrig[remIdx++] || "C",
+        D: mapping.D || remainingOrig[remIdx++] || "D"
+      };
+      reconstructed[origQ.id] = fullMap;
+      reconstructed[sqId] = fullMap;
+    }
+  }
+  return reconstructed;
+}
+function deriveKeyBytes(contextSalt, ivHex, length) {
+  const seedStr = `${MASTER_PEPPER}::${contextSalt}::${ivHex}`;
+  const seedBytes = new TextEncoder().encode(seedStr);
+  const out = new Uint8Array(length);
+  let h1 = 3735928559 ^ seedBytes.length;
+  let h2 = 1103547991 ^ seedBytes.length * 31;
+  for (let i = 0; i < seedBytes.length; i++) {
+    const ch = seedBytes[i];
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  for (let i = 0; i < length; i++) {
+    h1 = Math.imul(h1 ^ h1 >>> 16 ^ i, 2246822507);
+    h1 = Math.imul(h1 ^ h2 >>> 13, 3266489909);
+    h2 = Math.imul(h2 ^ h2 >>> 16 ^ i * 7, 2246822507);
+    h2 = Math.imul(h2 ^ h1 >>> 13, 3266489909);
+    const combined = (h1 ^ h2) >>> 0;
+    out[i] = combined >>> i % 4 * 8 & 255;
+  }
+  return out;
+}
+function bytesToHex(bytes) {
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+function hexToBytes(hex) {
+  if (hex.length % 2 !== 0) return new Uint8Array(0);
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const byteVal = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byteVal)) return new Uint8Array(0);
+    out[i] = byteVal;
+  }
+  return out;
+}
+function generateIvHex(deterministicSeed) {
+  if (deterministicSeed) {
+    const kb = deriveKeyBytes("IV_GEN", deterministicSeed, 6);
+    return bytesToHex(kb);
+  }
+  const bytes = new Uint8Array(6);
+  for (let i = 0; i < 6; i++) {
+    bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return bytesToHex(bytes);
+}
+function computeMacHex(ivHex, cipherBytes, contextSalt) {
+  const macKey = deriveKeyBytes(`MAC::${contextSalt}`, ivHex, Math.max(16, cipherBytes.length));
+  let m1 = 2166136261;
+  let m2 = 16777619;
+  for (let i = 0; i < cipherBytes.length; i++) {
+    const b = cipherBytes[i] ^ macKey[i % macKey.length];
+    m1 = Math.imul(m1 ^ b, 16777619) >>> 0;
+    m2 = Math.imul(m2 ^ b + i & 255, 2166136261) >>> 0;
+  }
+  return m1.toString(16).padStart(8, "0") + m2.toString(16).padStart(8, "0");
+}
+function sealValue(plainText, contextSalt = "DEFAULT", deterministic = false) {
+  if (!plainText) return "";
+  if (plainText.startsWith("ncv$v2$")) return plainText;
+  const ivHex = generateIvHex(deterministic ? `${contextSalt}::${plainText}` : void 0);
+  const plainBytes = new TextEncoder().encode(plainText);
+  const keyBytes = deriveKeyBytes(contextSalt, ivHex, plainBytes.length);
+  const cipherBytes = new Uint8Array(plainBytes.length);
+  for (let i = 0; i < plainBytes.length; i++) {
+    cipherBytes[i] = (plainBytes[i] ^ keyBytes[i] ^ i * 29 & 255) & 255;
+  }
+  const macHex = computeMacHex(ivHex, cipherBytes, contextSalt);
+  return `ncv$v2$${ivHex}$${macHex}$${bytesToHex(cipherBytes)}`;
+}
+function unsealValue(sealedText, contextSalt = "DEFAULT") {
+  if (sealedText === void 0 || sealedText === null) return "";
+  const str = String(sealedText);
+  if (!str.startsWith("ncv$v2$")) return str;
+  const parts = str.split("$");
+  if (parts.length !== 5) return "";
+  const [, , ivHex, macHex, cipherHex] = parts;
+  const cipherBytes = hexToBytes(cipherHex);
+  const expectedMac = computeMacHex(ivHex, cipherBytes, contextSalt);
+  if (expectedMac !== macHex) {
+    return "";
+  }
+  const keyBytes = deriveKeyBytes(contextSalt, ivHex, cipherBytes.length);
+  const plainBytes = new Uint8Array(cipherBytes.length);
+  for (let i = 0; i < cipherBytes.length; i++) {
+    plainBytes[i] = (cipherBytes[i] ^ keyBytes[i] ^ i * 29 & 255) & 255;
+  }
+  try {
+    return new TextDecoder().decode(plainBytes);
+  } catch {
+    return "";
+  }
+}
+function isSealedValue(val) {
+  return typeof val === "string" && val.startsWith("ncv$v2$");
+}
+function extractQuestionCorrectAnswer(q, examId) {
+  if (!q) return "";
+  const qId = String(q.id || "");
+  if (q.correctAnswer && !isSealedValue(q.correctAnswer)) {
+    const plainDirect = normalizeOptionKey(q.correctAnswer, q.options);
+    if (plainDirect) return plainDirect;
+  }
+  const candidates = [q.correctAnswer, q._ak].filter(Boolean);
+  const candidateSalts = Array.from(
+    /* @__PURE__ */ new Set([
+      `Q_ANS::${examId || ""}::${qId}`,
+      `Q_ANS::${q._eid || ""}::${qId}`,
+      `Q_ANS::::${qId}`,
+      `Q_ANS::GLOBAL::${qId}`
+    ])
+  );
+  for (const rawCandidate of candidates) {
+    if (isSealedValue(rawCandidate)) {
+      for (const salt of candidateSalts) {
+        const unsealed = unsealValue(rawCandidate, salt);
+        if (unsealed) {
+          const norm = normalizeOptionKey(unsealed, q.options);
+          if (norm) return norm;
+        }
+      }
+    } else {
+      const norm = normalizeOptionKey(rawCandidate, q.options);
+      if (norm) return norm;
+    }
+  }
+  return "";
+}
+function extractQuestionExplanation(q, examId) {
+  if (!q) return "";
+  const qId = String(q.id || "");
+  if (q.explanation && !isSealedValue(q.explanation)) {
+    return String(q.explanation);
+  }
+  const candidates = [q.explanation, q._ek].filter(Boolean);
+  const candidateSalts = Array.from(
+    /* @__PURE__ */ new Set([
+      `Q_EXP::${examId || ""}::${qId}`,
+      `Q_EXP::${q._eid || ""}::${qId}`,
+      `Q_EXP::::${qId}`,
+      `Q_EXP::GLOBAL::${qId}`
+    ])
+  );
+  for (const rawCandidate of candidates) {
+    if (isSealedValue(rawCandidate)) {
+      for (const salt of candidateSalts) {
+        const unsealed = unsealValue(rawCandidate, salt);
+        if (unsealed) return unsealed;
+      }
+    } else {
+      return String(rawCandidate || "");
+    }
+  }
+  return "";
+}
+function sealExamQuestions(exam) {
+  if (!exam || !Array.isArray(exam.questions)) return exam;
+  const examId = String(exam.id || "");
+  const seenIds = /* @__PURE__ */ new Set();
+  const sealedQuestions = exam.questions.map((q, idx) => {
+    let qId = String(q?.id || `q-${idx + 1}`).trim();
+    if (!qId || seenIds.has(qId)) {
+      qId = `${qId || "q"}-${idx + 1}`;
+    }
+    seenIds.add(qId);
+    const normalizedOpts = normalizeQuestionOptions(q?.options);
+    const plainAns = extractQuestionCorrectAnswer({ ...q, options: normalizedOpts }, examId) || "A";
+    const plainExp = extractQuestionExplanation(q, examId);
+    const sealedAns = sealValue(plainAns, `Q_ANS::${examId}::${qId}`, true);
+    const sealedExp = plainExp ? sealValue(plainExp, `Q_EXP::${examId}::${qId}`, true) : "";
+    return {
+      ...q,
+      id: qId,
+      number: q?.number || idx + 1,
+      options: normalizedOpts,
+      correctAnswer: sealedAns,
+      _ak: sealedAns,
+      _eid: examId,
+      explanation: sealedExp,
+      ...sealedExp ? { _ek: sealedExp } : {}
+    };
+  });
+  return {
+    ...exam,
+    questions: sealedQuestions
+  };
+}
+function unsealExamQuestions(exam) {
+  if (!exam || !Array.isArray(exam.questions)) return exam;
+  const examId = String(exam.id || "");
+  const seenIds = /* @__PURE__ */ new Set();
+  const unsealedQuestions = exam.questions.map((q, idx) => {
+    let qId = String(q?.id || `q-${idx + 1}`).trim();
+    if (!qId || seenIds.has(qId)) {
+      qId = `${qId || "q"}-${idx + 1}`;
+    }
+    seenIds.add(qId);
+    const normalizedOpts = normalizeQuestionOptions(q?.options);
+    const plainAns = extractQuestionCorrectAnswer({ ...q, options: normalizedOpts }, examId) || "A";
+    const plainExp = extractQuestionExplanation(q, examId);
+    const clone = {
+      ...q,
+      id: qId,
+      number: q?.number || idx + 1,
+      options: normalizedOpts,
+      correctAnswer: plainAns,
+      explanation: plainExp
+    };
+    delete clone._ak;
+    delete clone._ek;
+    return clone;
+  });
+  return {
+    ...exam,
+    questions: unsealedQuestions
+  };
+}
+function sealOptionOrder(optionOrder, sessionId) {
+  if (!optionOrder) return "";
+  if (typeof optionOrder === "string") {
+    if (isSealedValue(optionOrder)) return optionOrder;
+  }
+  const cleanSid = String(sessionId || "").trim();
+  const salt = cleanSid ? `OPT_ORDER::${cleanSid}` : "OPT_ORDER::GLOBAL";
+  return sealValue(JSON.stringify(optionOrder), salt);
+}
+function unsealOptionOrder(sealedOrRaw, sessionId) {
+  if (!sealedOrRaw) return {};
+  if (typeof sealedOrRaw === "string") {
+    if (isSealedValue(sealedOrRaw)) {
+      const cleanSid = String(sessionId || "").trim();
+      const candidateSalts = Array.from(
+        /* @__PURE__ */ new Set([
+          `OPT_ORDER::${cleanSid}`,
+          `OPT_ORDER::${sessionId || ""}`,
+          "OPT_ORDER::GLOBAL",
+          "OPT_ORDER::"
+        ])
+      );
+      for (const salt of candidateSalts) {
+        const json = unsealValue(sealedOrRaw, salt);
+        if (json) {
+          try {
+            const parsed = JSON.parse(json);
+            if (parsed && typeof parsed === "object") return parsed;
+          } catch {
+          }
+        }
+      }
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(sealedOrRaw);
+      if (parsed && typeof parsed === "object") return parsed;
+      return {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof sealedOrRaw === "object") {
+    return sealedOrRaw;
+  }
+  return {};
+}
+function hashPasswordSync(plainPassword, customSaltHex) {
+  const clean = String(plainPassword ?? "").trim();
+  if (!clean) return "";
+  if (clean.startsWith("ncv_pw$v2$") || clean.startsWith("pbkdf2$")) {
+    return clean;
+  }
+  const saltHex = customSaltHex || generateIvHex();
+  let state = deriveKeyBytes(`PW_HASH_V2::${saltHex}`, clean, 32);
+  for (let round = 0; round < 256; round++) {
+    let acc = round * 37;
+    for (let i = 0; i < state.length; i++) {
+      acc = acc + state[i] * 131 + i & 255;
+      state[i] = (state[i] ^ acc ^ round >> i % 4 & 255) & 255;
+    }
+  }
+  return `ncv_pw$v2$${saltHex}$${bytesToHex(state)}`;
+}
+function isHashedPassword(val) {
+  return typeof val === "string" && (val.startsWith("ncv_pw$v2$") || val.startsWith("pbkdf2$"));
+}
+function verifyPasswordSync(inputPassword, storedPassword) {
+  const cleanInput = String(inputPassword ?? "").trim();
+  const cleanStored = String(storedPassword ?? "").trim();
+  if (!cleanInput || !cleanStored) return false;
+  if (cleanStored.startsWith("ncv_pw$v2$")) {
+    const parts = cleanStored.split("$");
+    if (parts.length !== 4) return false;
+    const saltHex = parts[2];
+    const computed = hashPasswordSync(cleanInput, saltHex);
+    return computed === cleanStored;
+  }
+  return cleanInput === cleanStored;
+}
+function getStudentRawAnswer(answers, questionId) {
+  if (!answers || !questionId) return "";
+  if (answers[questionId] !== void 0 && answers[questionId] !== null) {
+    return String(answers[questionId]);
+  }
+  const safeKey = String(questionId).replace(/[\/\.]/g, "_");
+  if (answers[safeKey] !== void 0 && answers[safeKey] !== null) {
+    return String(answers[safeKey]);
+  }
+  return "";
+}
+
 // server/db.ts
 var DATA_DIR = path.resolve(process.cwd(), "data");
 var DATA_FILE = path.join(DATA_DIR, "app_data.json");
@@ -290,15 +752,17 @@ var DB_DIR = process.env.VERCEL ? "/tmp" : DATA_DIR;
 var DB_FILE = path.join(DB_DIR, "app_data.json");
 function hashPassword(plainText) {
   if (!plainText) return "";
-  const salt = crypto.randomBytes(16).toString("hex");
-  const hash = crypto.pbkdf2Sync(plainText.trim(), salt, 1e4, 64, "sha512").toString("hex");
-  return `pbkdf2$${salt}$${hash}`;
+  if (isHashedPassword(plainText)) return plainText;
+  return hashPasswordSync(plainText.trim());
 }
 function verifyPassword(inputPassword, storedPasswordOrHash) {
   if (!storedPasswordOrHash || !inputPassword) return false;
   const trimmedInput = inputPassword.trim();
   const collapsedInput = trimmedInput.replace(/\s+/g, " ");
   const noSpaceInput = trimmedInput.replace(/\s+/g, "");
+  if (storedPasswordOrHash.startsWith("ncv_pw$v2$")) {
+    return verifyPasswordSync(trimmedInput, storedPasswordOrHash) || verifyPasswordSync(collapsedInput, storedPasswordOrHash) || verifyPasswordSync(noSpaceInput, storedPasswordOrHash);
+  }
   if (storedPasswordOrHash.startsWith("pbkdf2$")) {
     const parts = storedPasswordOrHash.split("$");
     if (parts.length === 3) {
@@ -528,21 +992,25 @@ var DatabaseManager = class {
         }
       }
       const classMap = /* @__PURE__ */ new Map();
-      for (const defC of DEFAULT_CLASSES) {
-        const upper = defC.name.trim().toUpperCase();
-        if (!deletedClassNamesSet.has(upper)) {
-          classMap.set(upper, defC);
-        }
-      }
-      for (const p of parsedList) {
-        if (Array.isArray(p.classes)) {
-          for (const c of p.classes) {
-            if (c && c.name) {
-              const upper = c.name.trim().toUpperCase();
-              if (!deletedClassNamesSet.has(upper)) {
-                classMap.set(upper, c);
+      const hasSavedClasses = parsedList.some((p) => Array.isArray(p.classes) && p.classes.length > 0);
+      if (hasSavedClasses) {
+        for (const p of parsedList) {
+          if (Array.isArray(p.classes)) {
+            for (const c of p.classes) {
+              if (c && c.name) {
+                const upper = c.name.trim().toUpperCase();
+                if (!deletedClassNamesSet.has(upper)) {
+                  classMap.set(upper, c);
+                }
               }
             }
+          }
+        }
+      } else {
+        for (const defC of DEFAULT_CLASSES) {
+          const upper = defC.name.trim().toUpperCase();
+          if (!deletedClassNamesSet.has(upper) && upper !== "THU" && upper !== "9A8" && upper !== "9A9") {
+            classMap.set(upper, defC);
           }
         }
       }
@@ -596,7 +1064,7 @@ var DatabaseManager = class {
         deletedClassNames: Array.from(deletedClassNamesSet),
         deletedStudentIds: Array.from(deletedStudentIdsSet),
         adminToken: parsedList.find((p) => p.adminToken)?.adminToken || "legialoi-ncv-session-secret",
-        adminPassword: parsedList.find((p) => p.adminPassword)?.adminPassword || "101   101!@#"
+        adminPassword: parsedList.find((p) => p.adminPassword && isHashedPassword(p.adminPassword) && !verifyPassword("101   101!@#", p.adminPassword))?.adminPassword || parsedList.find((p) => p.adminPassword && p.adminPassword !== "101   101!@#")?.adminPassword || parsedList.find((p) => p.adminPassword)?.adminPassword || "101   101!@#"
       };
       this.saveData(mergedData);
       return mergedData;
@@ -703,14 +1171,15 @@ var DatabaseManager = class {
     );
   }
   saveExam(exam) {
+    const sealedExam = sealExamQuestions(exam);
     if (this.data.deletedExamIds) {
-      this.data.deletedExamIds = this.data.deletedExamIds.filter((id) => id !== exam.id);
+      this.data.deletedExamIds = this.data.deletedExamIds.filter((id) => id !== sealedExam.id);
     }
-    const idx = this.data.exams.findIndex((e) => e.id === exam.id);
+    const idx = this.data.exams.findIndex((e) => e.id === sealedExam.id);
     if (idx >= 0) {
-      this.data.exams[idx] = exam;
+      this.data.exams[idx] = sealedExam;
     } else {
-      this.data.exams.unshift(exam);
+      this.data.exams.unshift(sealedExam);
     }
     this.persist(true);
   }
@@ -771,12 +1240,14 @@ var DatabaseManager = class {
     const exam = this.data.exams.find((e) => e.id.toUpperCase() === cleanId || e.code && e.code.trim().toUpperCase() === cleanId);
     const code = exam?.code?.trim().toUpperCase();
     const targetId = exam?.id?.trim().toUpperCase() || cleanId;
+    const normName = normalizeStudentName(studentName);
+    const normClass = normalizeClassName(studentClass);
     return this.data.sessions.find(
       (s) => {
         if (!s || !s.examId) return false;
         const sExamIdUpper = String(s.examId).trim().toUpperCase();
         const matchExam = sExamIdUpper === targetId || (code ? sExamIdUpper === code : false);
-        return matchExam && String(s.studentClass || "").trim().toLowerCase() === String(studentClass || "").trim().toLowerCase() && String(s.studentName || "").trim().toLowerCase() === String(studentName || "").trim().toLowerCase() && s.status !== "submitted";
+        return matchExam && normalizeClassName(s.studentClass) === normClass && normalizeStudentName(s.studentName) === normName && s.status !== "submitted";
       }
     );
   }
@@ -850,7 +1321,12 @@ var DatabaseManager = class {
     return this.data.students;
   }
   saveStudents(students) {
-    this.data.students = students;
+    this.data.students = students.map((s) => {
+      if (s && s.password && !isHashedPassword(s.password)) {
+        return { ...s, password: hashPasswordSync(s.password) };
+      }
+      return s;
+    });
     this.persist();
   }
   deleteStudent(studentId) {
@@ -975,6 +1451,11 @@ var DatabaseManager = class {
     if (!inputPass) return false;
     const cleanInput = inputPass.trim();
     const currentPass = this.getAdminPassword();
+    const storedAdminPass = this.data.adminPassword;
+    const isCustomAdminPassword = Boolean(storedAdminPass) && storedAdminPass !== "101   101!@#" && !verifyPassword("101   101!@#", storedAdminPass) && !verifyPassword("GiaLoi@2026", storedAdminPass);
+    if (isCustomAdminPassword) {
+      return verifyPassword(cleanInput, currentPass);
+    }
     if (verifyPassword(cleanInput, currentPass)) {
       return true;
     }
@@ -993,9 +1474,6 @@ var DatabaseManager = class {
       "101   101",
       "101 101",
       "101101",
-      "legialoi",
-      "admin",
-      "123456",
       "GiaLoi@2026"
     ];
     if (allowedDefaults.includes(cleanInput) || allowedDefaults.includes(collapsedInput) || allowedDefaults.includes(cleanInput.replace(/\s+/g, ""))) {
@@ -1005,7 +1483,7 @@ var DatabaseManager = class {
   }
   setAdminPassword(newPassword) {
     this.data.adminPassword = hashPassword(newPassword.trim());
-    this.persist();
+    this.persist(true);
   }
   getBackup() {
     const liveSessions = this.data.sessions.filter((s) => s.status === "in_progress" || s.status === "locked" || s.status === "disconnected");
@@ -1887,26 +2365,26 @@ app.use((req, res, next) => {
 var TEACHER_USERNAME = process.env.TEACHER_USERNAME || "legialoi";
 var TEACHER_EMAIL = process.env.TEACHER_EMAIL || "legialoi@gmail.com";
 var AUTH_SECRET = process.env.AUTH_SECRET || "ncv-tin-hoc-legialoi-token-2026";
-function requireTeacherAuth(req, res, next) {
+function isVerifiedTeacherRequest(req) {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Ch\u01B0a \u0111\u0103ng nh\u1EADp quy\u1EC1n gi\xE1o vi\xEAn" });
-  }
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return false;
   const token = authHeader.split(" ")[1];
   try {
     const decoded = Buffer.from(token, "base64").toString("utf-8");
     const parts = decoded.split(":::");
     const user = parts[0] || "";
     const secret = parts[1] || "";
-    const userLower = user.toLowerCase();
-    const teacherUserLower = (TEACHER_USERNAME || "legialoi").toLowerCase();
-    const teacherEmailLower = (TEACHER_EMAIL || "legialoi@gmail.com").toLowerCase();
-    const isValidUser = userLower === teacherUserLower || userLower === teacherEmailLower || userLower === "legialoi" || userLower === "legialoi@gmail.com" || userLower === "admin" || userLower === "teacher" || userLower === "gv" || userLower.includes("legialoi");
-    const isValidSecret = secret === AUTH_SECRET || secret.startsWith("ncv-tin-hoc-legialoi-token") || secret.includes("legialoi") || secret.length >= 6;
-    if (isValidUser && isValidSecret) {
-      return next();
-    }
-  } catch (e) {
+    return user === "legialoi_verified_v3" && (secret === AUTH_SECRET || secret === "ncv-tin-hoc-legialoi-token-2026");
+  } catch {
+    return false;
+  }
+}
+function requireTeacherAuth(req, res, next) {
+  if (!req.headers.authorization || !req.headers.authorization.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Ch\u01B0a \u0111\u0103ng nh\u1EADp quy\u1EC1n gi\xE1o vi\xEAn" });
+  }
+  if (isVerifiedTeacherRequest(req)) {
+    return next();
   }
   return res.status(403).json({ error: "Phi\xEAn \u0111\u0103ng nh\u1EADp kh\xF4ng h\u1EE3p l\u1EC7 ho\u1EB7c \u0111\xE3 h\u1EBFt h\u1EA1n" });
 }
@@ -1920,12 +2398,17 @@ app.post("/api/auth/login", (req, res) => {
   const teacherUserLower = (TEACHER_USERNAME || "legialoi").toLowerCase();
   const teacherEmailLower = (TEACHER_EMAIL || "legialoi@gmail.com").toLowerCase();
   const isValidUser = trimmedUser === teacherUserLower || trimmedUser === teacherEmailLower || trimmedUser === "legialoi" || trimmedUser === "legialoi@gmail.com" || trimmedUser === "admin" || trimmedUser === "teacher" || trimmedUser === "gv";
+  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === "string" && req.body.adminPasswordHash.startsWith("ncv_pw$")) {
+    db.setAdminPassword(req.body.adminPasswordHash);
+  }
   const isValidPass = db.verifyAdminPassword(trimmedPass);
   if (isValidUser && isValidPass) {
-    const token = Buffer.from(`${TEACHER_USERNAME}:::${AUTH_SECRET}:::${Date.now()}`).toString("base64");
+    const token = Buffer.from(`legialoi_verified_v3:::${AUTH_SECRET}:::${Date.now()}`).toString("base64");
+    const curAdminPass = db.getAdminPassword();
     return res.json({
       success: true,
       token,
+      passwordHash: curAdminPass && curAdminPass.startsWith("ncv_pw$") ? curAdminPass : void 0,
       user: {
         username: TEACHER_USERNAME,
         fullName: "Th\u1EA7y L\xEA Gia L\u1EE3i",
@@ -1947,17 +2430,25 @@ app.get("/api/auth/me", requireTeacherAuth, (req, res) => {
   });
 });
 app.post("/api/auth/change-password", requireTeacherAuth, (req, res) => {
-  const { currentPassword, newPassword } = req.body;
+  const { currentPassword, newPassword, adminPasswordHash, newPasswordHash } = req.body;
   if (!newPassword || String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi c\u1EE7a gi\xE1o vi\xEAn ph\u1EA3i c\xF3 \xEDt nh\u1EA5t 6 k\xFD t\u1EF1 \u0111\u1EC3 \u0111\u1EA3m b\u1EA3o an to\xE0n" });
+  }
+  if (adminPasswordHash && typeof adminPasswordHash === "string" && adminPasswordHash.startsWith("ncv_pw$")) {
+    db.setAdminPassword(adminPasswordHash);
   }
   if (currentPassword && !db.verifyAdminPassword(String(currentPassword).trim())) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i c\u1EE7a gi\xE1o vi\xEAn kh\xF4ng ch\xEDnh x\xE1c" });
   }
-  db.setAdminPassword(String(newPassword).trim());
+  if (newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$")) {
+    db.setAdminPassword(newPasswordHash);
+  } else {
+    db.setAdminPassword(String(newPassword).trim());
+  }
   res.json({
     success: true,
-    message: "\u0110\xE3 \u0111\u1ED5i m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn (Admin) th\xE0nh c\xF4ng! M\u1EADt kh\u1EA9u m\u1EDBi \u0111\xE3 \u0111\u01B0\u1EE3c m\xE3 ho\xE1 m\u1ED9t chi\u1EC1u (PBKDF2-SHA512) an to\xE0n tuy\u1EC7t \u0111\u1ED1i v\xE0o c\u01A1 s\u1EDF d\u1EEF li\u1EC7u."
+    passwordHash: db.getAdminPassword(),
+    message: "\u0110\xE3 \u0111\u1ED5i m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn (Admin) th\xE0nh c\xF4ng! M\u1EADt kh\u1EA9u c\u0169 \u0111\xE3 b\u1ECB v\xF4 hi\u1EC7u h\xF3a ho\xE0n to\xE0n."
   });
 });
 app.post("/api/ai/parse-exam", requireTeacherAuth, async (req, res) => {
@@ -2025,7 +2516,7 @@ app.post("/api/ai/chat-assistant", requireTeacherAuth, async (req, res) => {
 app.get("/api/exams", (req, res) => {
   try {
     const exams = db.getExams() || [];
-    const isTeacher = !!req.headers.authorization;
+    const isTeacher = isVerifiedTeacherRequest(req);
     if (!isTeacher) {
       return res.json(
         exams.map((e) => ({
@@ -2045,11 +2536,13 @@ app.get("/api/exams", (req, res) => {
           maxViolationsBeforeLock: e.maxViolationsBeforeLock || 3,
           shuffleQuestions: e.shuffleQuestions ?? true,
           shuffleOptions: e.shuffleOptions ?? true,
-          showScoreAfterSubmit: e.showScoreAfterSubmit ?? true
+          showScoreAfterSubmit: e.showScoreAfterSubmit ?? true,
+          createdAt: e.createdAt,
+          updatedAt: e.updatedAt
         }))
       );
     }
-    res.json(exams);
+    res.json(exams.map((e) => unsealExamQuestions(e)));
   } catch (err) {
     console.error("Error fetching exams:", err);
     res.status(500).json({ error: "L\u1ED7i t\u1EA3i danh s\xE1ch \u0111\u1EC1 thi" });
@@ -2060,7 +2553,7 @@ app.get("/api/exams/:id", (req, res) => {
   if (!exam) {
     return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y b\xE0i ki\u1EC3m tra" });
   }
-  const isTeacher = !!req.headers.authorization;
+  const isTeacher = isVerifiedTeacherRequest(req);
   if (!isTeacher) {
     const sanitizedQuestions = exam.questions.map((q) => ({
       id: q.id,
@@ -2087,12 +2580,17 @@ app.get("/api/exams/:id", (req, res) => {
       maxViolationsBeforeLock: exam.maxViolationsBeforeLock || 3,
       shuffleQuestions: exam.shuffleQuestions ?? true,
       shuffleOptions: exam.shuffleOptions ?? true,
-      showScoreAfterSubmit: exam.showScoreAfterSubmit ?? true,
+      showScoreAfterSubmit: eOrTrue(exam.showScoreAfterSubmit),
+      createdAt: exam.createdAt,
+      updatedAt: exam.updatedAt,
       questions: sanitizedQuestions
     });
   }
-  res.json(exam);
+  res.json(unsealExamQuestions(exam));
 });
+function eOrTrue(val) {
+  return val ?? true;
+}
 app.post("/api/exams", requireTeacherAuth, (req, res) => {
   const examData = req.body;
   if (!examData.title || !examData.code || !examData.questions || examData.questions.length === 0) {
@@ -2109,7 +2607,7 @@ app.post("/api/exams", requireTeacherAuth, (req, res) => {
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   db.saveExam(newExam);
-  res.json(newExam);
+  res.json(unsealExamQuestions(newExam));
 });
 app.put("/api/exams/:id", requireTeacherAuth, (req, res) => {
   const existing = db.getExam(req.params.id);
@@ -2129,7 +2627,7 @@ app.put("/api/exams/:id", requireTeacherAuth, (req, res) => {
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   db.saveExam(savedExam);
-  res.json(savedExam);
+  res.json(unsealExamQuestions(savedExam));
 });
 app.delete("/api/exams/:id", requireTeacherAuth, (req, res) => {
   const success = db.deleteExam(req.params.id);
@@ -2143,17 +2641,18 @@ app.post("/api/exams/:id/duplicate", requireTeacherAuth, (req, res) => {
   if (!exam) {
     return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y b\xE0i ki\u1EC3m tra" });
   }
-  const newCode = `${exam.code}-COPY-${Math.floor(100 + Math.random() * 900)}`;
+  const unsealedSource = unsealExamQuestions(exam);
+  const newCode = `${unsealedSource.code}-COPY-${Math.floor(100 + Math.random() * 900)}`;
   const duplicated = {
-    ...exam,
+    ...unsealedSource,
     id: `exam-${Date.now()}`,
-    title: `${exam.title} (B\u1EA3n sao)`,
+    title: `${unsealedSource.title} (B\u1EA3n sao)`,
     code: newCode,
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     updatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
   db.saveExam(duplicated);
-  res.json(duplicated);
+  res.json(unsealExamQuestions(duplicated));
 });
 app.post("/api/exams/:id/toggle", requireTeacherAuth, (req, res) => {
   const exam = db.getExam(req.params.id);
@@ -2194,19 +2693,7 @@ app.post("/api/classes/restore-defaults", requireTeacherAuth, (req, res) => {
 });
 app.get("/api/students", (req, res) => {
   const className = req.query.class;
-  const authHeader = req.headers.authorization;
-  let isTeacher = false;
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    const token = authHeader.split(" ")[1];
-    try {
-      const decoded = Buffer.from(token, "base64").toString("utf-8");
-      const [user, secret] = decoded.split(":::");
-      if ((user === TEACHER_USERNAME || user === TEACHER_EMAIL) && secret === AUTH_SECRET) {
-        isTeacher = true;
-      }
-    } catch (e) {
-    }
-  }
+  const isTeacher = isVerifiedTeacherRequest(req);
   const list = db.getStudents(className);
   if (!isTeacher) {
     return res.json(list.map((s) => ({
@@ -2305,31 +2792,48 @@ app.post("/api/students/reset-password", requireTeacherAuth, (req, res) => {
   res.status(400).json({ error: "Thi\u1EBFu th\xF4ng tin c\u1EA5p l\u1EA1i m\u1EADt kh\u1EA9u" });
 });
 app.post("/api/students/change-password", (req, res) => {
-  const { studentId, username, currentPassword, newPassword } = req.body;
+  const { studentId, studentName, studentClass, sbd, username, currentPassword, newPassword, newPasswordHash } = req.body;
   if (!newPassword || newPassword.trim().length < 4) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi ph\u1EA3i c\xF3 \xEDt nh\u1EA5t 4 k\xFD t\u1EF1" });
   }
   const allStudents = db.getStudents();
-  const student = allStudents.find(
-    (s) => studentId && s.id === studentId || username && s.username && s.username.toLowerCase() === username.trim().toLowerCase()
+  const normName = normalizeStudentName(studentName);
+  const normCls = normalizeClassName(studentClass);
+  let student = allStudents.find(
+    (s) => studentId && s.id === studentId || username && s.username && s.username.toLowerCase() === String(username).trim().toLowerCase() || normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls
   );
-  if (!student) {
+  if (student) {
+    const defaultPass = getDefaultStudentPassword(student.class);
+    const curPass = student.password || defaultPass;
+    if (currentPassword) {
+      const match = student.isPasswordChanged ? verifyPassword(currentPassword.trim(), curPass) : verifyPassword(currentPassword.trim(), curPass) || verifyPassword(currentPassword.trim(), defaultPass);
+      if (!match) {
+        return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i kh\xF4ng ch\xEDnh x\xE1c" });
+      }
+    }
+    student.password = newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$") ? newPasswordHash : hashPassword(newPassword.trim());
+    student.isPasswordChanged = true;
+    db.saveStudents(allStudents);
+  } else if (studentName && studentClass) {
+    const hashed = newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$") ? newPasswordHash : hashPassword(newPassword.trim());
+    const createdStudent = {
+      id: studentId || `st-${normCls}-${Date.now()}`,
+      name: String(studentName).trim(),
+      class: String(studentClass).trim(),
+      sbd: sbd ? String(sbd).trim() : "",
+      username: username ? String(username).trim() : generateStudentUsername(String(studentName), String(studentClass)),
+      password: hashed,
+      isPasswordChanged: true
+    };
+    student = createdStudent;
+    allStudents.push(createdStudent);
+    db.saveStudents(allStudents);
+  } else {
     return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y t\xE0i kho\u1EA3n h\u1ECDc sinh" });
   }
-  const defaultPass = getDefaultStudentPassword(student.class);
-  const curPass = student.password || defaultPass;
-  if (currentPassword) {
-    const match = verifyPassword(currentPassword.trim(), curPass);
-    if (!match) {
-      return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i kh\xF4ng ch\xEDnh x\xE1c" });
-    }
-  }
-  student.password = hashPassword(newPassword.trim());
-  student.isPasswordChanged = true;
-  db.saveStudents(allStudents);
   res.json({
     success: true,
-    message: "\u0110\u1ED5i m\u1EADt kh\u1EA9u th\xE0nh c\xF4ng! Em h\xE3y ghi nh\u1EDB m\u1EADt kh\u1EA9u m\u1EDBi \u0111\u1EC3 \u0111\u0103ng nh\u1EADp cho c\xE1c b\xE0i ki\u1EC3m tra sau.",
+    message: "\u0110\u1ED5i m\u1EADt kh\u1EA9u th\xE0nh c\xF4ng! Em h\xE3y ghi nh\u1EDB m\u1EADt kh\u1EA9u m\u1EDBi \u0111\u1EC3 \u0111\u0103ng nh\u1EADp cho c\xE1c b\xE0i ki\u1EC3m tra sau (m\u1EADt kh\u1EA9u c\u0169 \u0111\xE3 h\u1EBFt hi\u1EC7u l\u1EF1c).",
     student: {
       id: student.id,
       name: student.name,
@@ -2345,25 +2849,15 @@ var handleValidateEntry = (req, res) => {
     let finalStudentName = studentName ? String(studentName).trim() : "";
     let finalStudentClass = studentClass ? String(studentClass).trim() : "";
     let finalSbd = sbd ? String(sbd).trim() : "";
-    const authHeader = req.headers.authorization;
-    let isTeacherReq = false;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.split(" ")[1];
-      try {
-        const decoded = Buffer.from(token, "base64").toString("utf-8");
-        const [user, secret] = decoded.split(":::");
-        if ((user === TEACHER_USERNAME || user === TEACHER_EMAIL) && secret === AUTH_SECRET) {
-          isTeacherReq = true;
-        }
-      } catch (e) {
-      }
-    }
+    const isTeacherReq = isVerifiedTeacherRequest(req);
     const allStudents = db.getStudents();
+    const normInputName = normalizeStudentName(finalStudentName);
+    const normInputClass = normalizeClassName(finalStudentClass);
     let matchedStudent = allStudents.find((s) => {
       if (username && s.username && s.username.toLowerCase() === String(username).trim().toLowerCase()) {
         return true;
       }
-      if (finalStudentName && finalStudentClass && s.name.trim().toLowerCase() === finalStudentName.toLowerCase() && s.class.trim().toLowerCase() === finalStudentClass.toLowerCase()) {
+      if (normInputName && normInputClass && normalizeStudentName(s.name) === normInputName && normalizeClassName(s.class) === normInputClass) {
         return true;
       }
       return false;
@@ -2428,29 +2922,59 @@ var handleValidateEntry = (req, res) => {
         });
       }
     }
+    if (req.body.studentPasswordHash) {
+      if (matchedStudent) {
+        matchedStudent.password = String(req.body.studentPasswordHash);
+        matchedStudent.isPasswordChanged = Boolean(req.body.studentIsPasswordChanged);
+        db.saveStudents(allStudents);
+      } else if (finalStudentName && finalStudentClass) {
+        const createdSt = {
+          id: req.body.studentId || `st-${normalizeClassName(finalStudentClass)}-${Date.now()}`,
+          name: finalStudentName,
+          class: finalStudentClass,
+          sbd: finalSbd || "",
+          username: username ? String(username).trim() : generateStudentUsername(finalStudentName, finalStudentClass),
+          password: String(req.body.studentPasswordHash),
+          isPasswordChanged: Boolean(req.body.studentIsPasswordChanged)
+        };
+        matchedStudent = createdSt;
+        allStudents.push(createdSt);
+        db.saveStudents(allStudents);
+      }
+    }
     const defaultPass = getDefaultStudentPassword(finalStudentClass);
-    const expectedPass = matchedStudent?.password || defaultPass;
+    const expectedPass = matchedStudent?.password || req.body.studentPasswordHash || defaultPass;
+    const isStudentPassChanged = Boolean(
+      matchedStudent?.isPasswordChanged || req.body.studentIsPasswordChanged || expectedPass && expectedPass !== defaultPass && !verifyPassword(defaultPass, expectedPass)
+    );
     if (!password || !String(password).trim()) {
       return res.status(400).json({
-        error: `Vui l\xF2ng nh\u1EADp m\u1EADt kh\u1EA9u \u0111\u0103ng nh\u1EADp c\u1EE7a em. M\u1EADt kh\u1EA9u m\u1EB7c \u0111\u1ECBnh l\xE0 t\xEAn l\u1EDBp th\xEAm 123 (V\xED d\u1EE5: ${defaultPass}).`,
+        error: `Vui l\xF2ng nh\u1EADp m\u1EADt kh\u1EA9u \u0111\u0103ng nh\u1EADp c\u1EE7a em. ${isStudentPassChanged ? "Em h\xE3y nh\u1EADp m\u1EADt kh\u1EA9u ri\xEAng \u0111\xE3 \u0111\u1ED5i." : `M\u1EADt kh\u1EA9u m\u1EB7c \u0111\u1ECBnh l\xE0 t\xEAn l\u1EDBp th\xEAm 123 (V\xED d\u1EE5: ${defaultPass}).`}`,
         requiresPassword: true,
         defaultPasswordHint: defaultPass
       });
     }
     const inputPassTrimmed = String(password).trim();
     const inputPassClean = inputPassTrimmed.toLowerCase().replace(/\s+/g, "");
-    const isMasterPassword = isTeacherReq || ["admin", "123456", "123", "gv123", "teacher", "legialoi", "gialoi"].includes(inputPassClean) || inputPassClean === defaultPass.toLowerCase();
-    const passMatch = isMasterPassword || verifyPassword(inputPassTrimmed, expectedPass) || verifyPassword(inputPassTrimmed, defaultPass) || inputPassClean === defaultPass.toLowerCase();
+    let passMatch = false;
+    if (isStudentPassChanged) {
+      passMatch = verifyPassword(inputPassTrimmed, expectedPass);
+    } else {
+      passMatch = verifyPassword(inputPassTrimmed, expectedPass) || verifyPassword(inputPassTrimmed, defaultPass) || inputPassClean === defaultPass.toLowerCase();
+    }
     if (!passMatch) {
       return res.status(401).json({
-        error: `M\u1EADt kh\u1EA9u \u0111\u0103ng nh\u1EADp kh\xF4ng ch\xEDnh x\xE1c! M\u1EADt kh\u1EA9u m\u1EB7c \u0111\u1ECBnh l\xE0 t\xEAn l\u1EDBp th\xEAm 123 (V\xED d\u1EE5: ${defaultPass}). N\u1EBFu qu\xEAn m\u1EADt kh\u1EA9u, em h\xE3y nh\u1EDD th\u1EA7y L\xEA Gia L\u1EE3i c\u1EA5p l\u1EA1i nh\xE9!`,
+        error: isStudentPassChanged ? `M\u1EADt kh\u1EA9u kh\xF4ng ch\xEDnh x\xE1c! T\xE0i kho\u1EA3n c\u1EE7a em \u0111\xE3 \u0111\u01B0\u1EE3c \u0111\u1ED5i sang m\u1EADt kh\u1EA9u m\u1EDBi (m\u1EADt kh\u1EA9u m\u1EB7c \u0111\u1ECBnh ${defaultPass} kh\xF4ng c\xF2n hi\u1EC7u l\u1EF1c). N\u1EBFu qu\xEAn m\u1EADt kh\u1EA9u m\u1EDBi, em h\xE3y b\xE1o th\u1EA7y L\xEA Gia L\u1EE3i b\u1EA5m Reset m\u1EADt kh\u1EA9u nh\xE9!` : `M\u1EADt kh\u1EA9u \u0111\u0103ng nh\u1EADp kh\xF4ng ch\xEDnh x\xE1c! M\u1EADt kh\u1EA9u m\u1EB7c \u0111\u1ECBnh l\xE0 t\xEAn l\u1EDBp th\xEAm 123 (V\xED d\u1EE5: ${defaultPass}).`,
         isPasswordIncorrect: true,
         defaultPasswordHint: defaultPass
       });
     }
+    syncPreviousStudentSessions(req.body.previousSessions, exam.id);
     const existingSessions = db.getSessions(exam.id) || [];
+    const normFinalName = normalizeStudentName(finalStudentName);
+    const normFinalClass = normalizeClassName(finalStudentClass);
     const studentSessions = existingSessions.filter(
-      (s) => s.studentName && s.studentClass && s.studentName.trim().toLowerCase() === finalStudentName.toLowerCase() && s.studentClass.trim().toLowerCase() === finalStudentClass.toLowerCase()
+      (s) => s.studentName && s.studentClass && normalizeStudentName(s.studentName) === normFinalName && normalizeClassName(s.studentClass) === normFinalClass
     );
     const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
     const now = Date.now();
@@ -2479,8 +3003,12 @@ var handleValidateEntry = (req, res) => {
     const activeSession = studentSessions.find(
       (s) => s.status === "in_progress" && now < new Date(s.expiresAt).getTime() || s.status === "locked"
     );
-    const attemptsMade = submittedSessions.length;
+    const clientAttemptsMade = Number(req.body.clientAttemptsMade) > 0 ? Number(req.body.clientAttemptsMade) : 0;
+    const attemptsMade = Math.max(submittedSessions.length, clientAttemptsMade);
     const scores = submittedSessions.map((s) => s.score ?? 0);
+    if (req.body.clientBestScore !== void 0 && !isNaN(Number(req.body.clientBestScore))) {
+      scores.push(Number(req.body.clientBestScore));
+    }
     const bestScore = scores.length > 0 ? Math.max(...scores) : void 0;
     if (!activeSession && attemptsMade >= maxAttempts && !studentSessions.some((s) => s.retakeAllowed)) {
       return res.status(403).json({
@@ -2542,7 +3070,7 @@ var handleValidateEntry = (req, res) => {
 };
 app.post("/api/student/validate-entry", handleValidateEntry);
 app.post("/api/student/validate", handleValidateEntry);
-function normalizeOptionKey(val, options) {
+function normalizeOptionKey2(val, options) {
   if (val === void 0 || val === null) return "";
   const raw = String(val).trim();
   if (!raw) return "";
@@ -2569,40 +3097,135 @@ function normalizeOptionKey(val, options) {
   }
   return "";
 }
-function syncExamSnapshotIfValid(snapshot, examCode) {
-  if (!snapshot || !snapshot.id || !Array.isArray(snapshot.questions) || snapshot.questions.length === 0) {
-    return;
+function syncPreviousStudentSessions(previousSessions, examId) {
+  if (!Array.isArray(previousSessions) || !examId) return;
+  for (const s of previousSessions) {
+    if (!s) continue;
+    const sId = String(s.sessionId || s.id || "").trim();
+    if (!sId) continue;
+    const existing = db.getSession(sId);
+    const decodedOptOrder = unsealOptionOrder(
+      s.sealedOptionOrder || s.optionOrder,
+      sId
+    );
+    if (!existing) {
+      db.saveSession({
+        id: sId,
+        examId,
+        studentName: String(s.studentName || s.name || "H\u1ECDc sinh").trim(),
+        studentClass: String(s.studentClass || s.class || "").trim(),
+        sbd: s.sbd ? String(s.sbd).trim() : void 0,
+        attemptNumber: Number(s.attemptNumber) || 1,
+        startedAt: s.startedAt || s.submittedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        expiresAt: s.expiresAt || s.submittedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        submittedAt: s.submittedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        status: s.status === "locked" ? "locked" : "submitted",
+        score: s.score !== void 0 ? Number(s.score) : 0,
+        correctCount: s.correctCount !== void 0 ? Number(s.correctCount) : 0,
+        incorrectCount: s.incorrectCount !== void 0 ? Number(s.incorrectCount) : 0,
+        unansweredCount: s.unansweredCount !== void 0 ? Number(s.unansweredCount) : 0,
+        questionOrder: Array.isArray(s.questionOrder) ? s.questionOrder : [],
+        optionOrder: decodedOptOrder && typeof decodedOptOrder === "object" ? decodedOptOrder : {},
+        answers: s.answers && typeof s.answers === "object" ? s.answers : {},
+        flaggedQuestions: [],
+        violations: [],
+        violationCount: Number(s.violationCount) || 0,
+        lastHeartbeat: s.submittedAt || (/* @__PURE__ */ new Date()).toISOString()
+      }, false);
+    } else if (s.status === "submitted" && existing.status !== "submitted") {
+      existing.status = "submitted";
+      if (s.score !== void 0) existing.score = Number(s.score);
+      if (s.submittedAt) existing.submittedAt = s.submittedAt;
+      db.saveSession(existing, false);
+    }
   }
-  const hasAnswerKeys = snapshot.questions.some((q) => q && normalizeOptionKey(q.correctAnswer, q.options) !== "");
-  if (!hasAnswerKeys) {
+}
+function getExpectedQuestionAnswer(q, examId) {
+  if (!q) return "";
+  const fromSealed = extractQuestionCorrectAnswer(q, examId);
+  if (fromSealed) return fromSealed;
+  return normalizeOptionKey2(q.correctAnswer, q.options);
+}
+function syncExamSnapshotIfValid(snapshot, examCode) {
+  if (!snapshot || !snapshot.id && !snapshot.code) {
     return;
   }
   const cleanCode = examCode ? String(examCode).trim() : snapshot.code ? String(snapshot.code).trim() : "";
-  const existingExam = db.getExam(snapshot.id) || (cleanCode ? db.getExamByCode(cleanCode) : void 0);
+  const existingExam = (snapshot.id ? db.getExam(snapshot.id) : void 0) || (cleanCode ? db.getExamByCode(cleanCode) : void 0);
+  const hasAnswerKeys = Array.isArray(snapshot.questions) && snapshot.questions.length > 0 && snapshot.questions.some((q) => q && getExpectedQuestionAnswer(q, snapshot.id) !== "");
   if (!existingExam) {
-    db.saveExam(snapshot);
-    return;
-  }
-  const existingHasAnswers = Array.isArray(existingExam.questions) && existingExam.questions.length > 0 && existingExam.questions.some((q) => q && normalizeOptionKey(q.correctAnswer, q.options) !== "");
-  if (!existingHasAnswers) {
-    db.saveExam(snapshot);
+    if (hasAnswerKeys) {
+      db.saveExam(snapshot);
+    }
     return;
   }
   const existingTime = existingExam.updatedAt ? new Date(existingExam.updatedAt).getTime() : 0;
   const incomingTime = snapshot.updatedAt ? new Date(snapshot.updatedAt).getTime() : 0;
-  if (!existingExam.updatedAt || incomingTime > 0 && incomingTime >= existingTime) {
-    db.saveExam(snapshot);
+  const shouldSyncMeta = !existingExam.updatedAt || incomingTime > 0 && incomingTime >= existingTime;
+  if (shouldSyncMeta) {
+    if (snapshot.maxAttempts !== void 0 && Number(snapshot.maxAttempts) > 0) {
+      existingExam.maxAttempts = Number(snapshot.maxAttempts);
+    }
+    if (snapshot.durationMinutes !== void 0 && Number(snapshot.durationMinutes) > 0) {
+      existingExam.durationMinutes = Number(snapshot.durationMinutes);
+    }
+    if (snapshot.isOpen !== void 0) {
+      existingExam.isOpen = Boolean(snapshot.isOpen);
+    }
+    if (snapshot.startTime !== void 0) {
+      existingExam.startTime = snapshot.startTime;
+    }
+    if (snapshot.endTime !== void 0) {
+      existingExam.endTime = snapshot.endTime;
+    }
+    if (snapshot.randomQuestionCount !== void 0) {
+      existingExam.randomQuestionCount = snapshot.randomQuestionCount;
+    }
+    if (snapshot.maxViolationsBeforeLock !== void 0) {
+      existingExam.maxViolationsBeforeLock = snapshot.maxViolationsBeforeLock;
+    }
+    if (snapshot.showScoreAfterSubmit !== void 0) {
+      existingExam.showScoreAfterSubmit = snapshot.showScoreAfterSubmit;
+    }
+    if (snapshot.updatedAt) {
+      existingExam.updatedAt = snapshot.updatedAt;
+    }
+  }
+  if (!hasAnswerKeys) {
+    if (shouldSyncMeta) {
+      db.saveExam(existingExam);
+    }
+    return;
+  }
+  const existingHasAnswers = Array.isArray(existingExam.questions) && existingExam.questions.length > 0 && existingExam.questions.some((q) => q && getExpectedQuestionAnswer(q, existingExam.id) !== "");
+  if (!existingHasAnswers || shouldSyncMeta) {
+    db.saveExam({
+      ...existingExam,
+      ...snapshot,
+      maxAttempts: Number(snapshot.maxAttempts ?? existingExam.maxAttempts) > 0 ? Number(snapshot.maxAttempts ?? existingExam.maxAttempts) : 1
+    });
   }
 }
 function resolveStudentOriginalChoice(studentChoiceRaw, mapping, options) {
-  const displayChoice = normalizeOptionKey(studentChoiceRaw, options);
+  const displayChoice = normalizeOptionKey2(studentChoiceRaw, options);
   if (!displayChoice) return "";
-  if (mapping && typeof mapping === "object") {
+  if (Array.isArray(mapping) && mapping.length >= 4) {
+    const idx = ["A", "B", "C", "D"].indexOf(displayChoice);
+    if (idx !== -1 && mapping[idx]) {
+      const normMapped = normalizeOptionKey2(mapping[idx], options);
+      if (normMapped) return normMapped;
+    }
+  } else if (mapping && typeof mapping === "object") {
     const mapped = mapping[displayChoice] || mapping[displayChoice.toLowerCase()];
-    const normMapped = normalizeOptionKey(mapped, options);
+    const normMapped = normalizeOptionKey2(mapped, options);
     if (normMapped) return normMapped;
   }
   return displayChoice;
+}
+function getQuestionOptionMapping(optionOrder, qId) {
+  if (!optionOrder || typeof optionOrder !== "object") return void 0;
+  const safeKey = String(qId).replace(/[\/\.]/g, "_");
+  return optionOrder[qId] || optionOrder[safeKey];
 }
 function finalizeLockedSession(session, exam) {
   session.status = "submitted";
@@ -2611,21 +3234,21 @@ function finalizeLockedSession(session, exam) {
   let iCount = 0;
   let uCount = 0;
   if (exam && Array.isArray(exam.questions)) {
-    const sessionQuestions = session.questionOrder && session.questionOrder.length > 0 ? session.questionOrder.map((qId) => exam.questions.find((q) => q && q.id === qId)).filter(Boolean) : exam.questions;
+    const sessionQuestions = session.questionOrder && session.questionOrder.length > 0 ? session.questionOrder.map((qId) => exam.questions.find((q) => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, "_") === String(qId).replace(/[\/\.]/g, "_")))).filter(Boolean) : exam.questions;
     const questionsToGrade = sessionQuestions.length > 0 ? sessionQuestions : exam.questions;
     for (const q of questionsToGrade) {
       if (!q || !q.id) continue;
-      const studentChoice = session.answers ? session.answers[q.id] : void 0;
+      const studentChoice = getStudentRawAnswer(session.answers, q.id);
       const origChoice = resolveStudentOriginalChoice(
         studentChoice,
-        session.optionOrder ? session.optionOrder[q.id] : void 0,
+        getQuestionOptionMapping(session.optionOrder, q.id),
         q.options
       );
       if (!origChoice) {
         uCount++;
         continue;
       }
-      const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+      const expectedAnswer = getExpectedQuestionAnswer(q, exam.id);
       if (origChoice === expectedAnswer) {
         cCount++;
       } else {
@@ -2655,19 +3278,7 @@ app.post("/api/student/start", (req, res) => {
     if (!examCode || !studentName || !studentClass) {
       return res.status(400).json({ error: "Thi\u1EBFu th\xF4ng tin b\u1EAFt \u0111\u1EA7u b\xE0i thi: M\xE3 \u0111\u1EC1, H\u1ECD t\xEAn, L\u1EDBp" });
     }
-    const authHeader = req.headers.authorization;
-    let isTeacherReq = false;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.split(" ")[1];
-      try {
-        const decoded = Buffer.from(token, "base64").toString("utf-8");
-        const [user, secret] = decoded.split(":::");
-        if (user === TEACHER_USERNAME || user === TEACHER_EMAIL || user === "legialoi" || user === "legialoi@gmail.com" || user === "admin") {
-          isTeacherReq = true;
-        }
-      } catch (e) {
-      }
-    }
+    const isTeacherReq = isVerifiedTeacherRequest(req);
     const sClassNorm = String(studentClass).trim().toLowerCase();
     const isTestClass = isTeacherReq || sClassNorm.includes("thu") || sClassNorm.includes("th\u1EED") || sClassNorm.includes("test") || sClassNorm.includes("demo") || sClassNorm.includes("gv");
     const cleanExamCode = String(examCode || "").trim();
@@ -2702,9 +3313,12 @@ app.post("/api/student/start", (req, res) => {
         });
       }
     }
+    syncPreviousStudentSessions(req.body?.previousSessions, exam.id);
     const existingSessions = db.getSessions(exam.id) || [];
+    const normStartName = normalizeStudentName(studentName);
+    const normStartClass = normalizeClassName(studentClass);
     const studentPrevSessions = existingSessions.filter(
-      (s) => s && s.studentName && s.studentClass && String(s.studentName).trim().toLowerCase() === String(studentName).trim().toLowerCase() && String(s.studentClass).trim().toLowerCase() === String(studentClass).trim().toLowerCase()
+      (s) => s && s.studentName && s.studentClass && normalizeStudentName(s.studentName) === normStartName && normalizeClassName(s.studentClass) === normStartClass
     );
     const nowMs = Date.now();
     studentPrevSessions.forEach((s) => {
@@ -2729,6 +3343,8 @@ app.post("/api/student/start", (req, res) => {
       }
     });
     const submittedSessions = studentPrevSessions.filter((s) => s.status === "submitted");
+    const clientAttemptsMade = Number(req.body?.clientAttemptsMade) > 0 ? Number(req.body.clientAttemptsMade) : 0;
+    const effectiveAttemptsMade = Math.max(submittedSessions.length, clientAttemptsMade);
     const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
     const prevSession = studentPrevSessions.find((s) => s.status === "in_progress" || s.status === "locked");
     if (prevSession && !forceNew) {
@@ -2743,13 +3359,38 @@ app.post("/api/student/start", (req, res) => {
       if (nowMs >= expiresMs) {
         return autoSubmitSession(prevSession, exam, res);
       }
+      if (!prevSession.optionOrder || typeof prevSession.optionOrder !== "object") {
+        prevSession.optionOrder = {};
+      }
+      if (!Array.isArray(prevSession.questionOrder) || prevSession.questionOrder.length === 0) {
+        prevSession.questionOrder = (exam.questions || []).filter(Boolean).map((q) => q.id);
+      }
+      let sessionOrderUpdated = false;
       const studentQuestions2 = (prevSession.questionOrder || []).map((qId, idx) => {
-        const origQ = (exam.questions || []).find((q) => q && q.id === qId);
+        const origQ = (exam.questions || []).find((q) => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, "_") === String(qId).replace(/[\/\.]/g, "_")));
         if (!origQ) return null;
-        const optMap = prevSession.optionOrder && prevSession.optionOrder[qId] || { A: "A", B: "B", C: "C", D: "D" };
+        const normalizedOrigOptions = normalizeQuestionOptions(origQ.options);
+        let optMap = normalizeSingleQuestionOptionMap(getQuestionOptionMapping(prevSession.optionOrder, origQ.id) || getQuestionOptionMapping(prevSession.optionOrder, qId));
+        if (!optMap) {
+          let optIds = ["A", "B", "C", "D"];
+          if (exam.shuffleOptions !== false) {
+            optIds = shuffleArray(optIds);
+          }
+          optMap = {
+            A: optIds[0] || "A",
+            B: optIds[1] || "B",
+            C: optIds[2] || "C",
+            D: optIds[3] || "D"
+          };
+          prevSession.optionOrder[origQ.id] = optMap;
+          sessionOrderUpdated = true;
+        } else if (!prevSession.optionOrder[origQ.id]) {
+          prevSession.optionOrder[origQ.id] = optMap;
+          sessionOrderUpdated = true;
+        }
         const options = ["A", "B", "C", "D"].map((displayId, optIdx) => {
-          const origOptId = normalizeOptionKey(optMap[displayId]) || displayId;
-          const origOpt = (origQ.options || []).find((o) => o && normalizeOptionKey(o.id) === origOptId) || (origQ.options || [])[["A", "B", "C", "D"].indexOf(origOptId)] || (origQ.options || [])[optIdx];
+          const origOptId = normalizeOptionKey2(optMap[displayId]) || displayId;
+          const origOpt = normalizedOrigOptions.find((o) => o.id === origOptId) || normalizedOrigOptions[["A", "B", "C", "D"].indexOf(origOptId)] || normalizedOrigOptions[optIdx];
           return {
             id: displayId,
             text: origOpt ? origOpt.text : ""
@@ -2765,7 +3406,13 @@ app.post("/api/student/start", (req, res) => {
           options
         };
       }).filter(Boolean);
+      if (sessionOrderUpdated) {
+        db.saveSession(prevSession, false);
+      }
       const prevScores2 = submittedSessions.map((s) => s.score ?? 0);
+      if (req.body?.clientBestScore !== void 0 && !isNaN(Number(req.body.clientBestScore))) {
+        prevScores2.push(Number(req.body.clientBestScore));
+      }
       const bestSoFar = prevScores2.length > 0 ? Math.max(...prevScores2) : void 0;
       return res.json({
         sessionId: prevSession.id,
@@ -2773,29 +3420,32 @@ app.post("/api/student/start", (req, res) => {
         expiresAt: prevSession.expiresAt,
         questions: studentQuestions2,
         questionOrder: prevSession.questionOrder,
-        optionOrder: prevSession.optionOrder,
+        sealedOptionOrder: sealOptionOrder(prevSession.optionOrder || {}, prevSession.id),
         savedAnswers: prevSession.answers,
         flaggedQuestions: prevSession.flaggedQuestions || [],
         violationCount: prevSession.violationCount || 0,
-        attemptNumber: prevSession.attemptNumber || 1,
+        attemptNumber: prevSession.attemptNumber || effectiveAttemptsMade + 1,
         maxAttempts,
-        attemptsMade: submittedSessions.length,
-        attemptsRemaining: Math.max(0, maxAttempts - (prevSession.attemptNumber || 1)),
+        attemptsMade: effectiveAttemptsMade,
+        attemptsRemaining: Math.max(0, maxAttempts - (prevSession.attemptNumber || effectiveAttemptsMade + 1)),
         bestScoreSoFar: bestSoFar
       });
     }
-    if (submittedSessions.length >= maxAttempts && !studentPrevSessions.some((s) => s.retakeAllowed)) {
+    if (effectiveAttemptsMade >= maxAttempts && !studentPrevSessions.some((s) => s.retakeAllowed)) {
       const scores = submittedSessions.map((s) => s.score ?? 0);
+      if (req.body?.clientBestScore !== void 0 && !isNaN(Number(req.body.clientBestScore))) {
+        scores.push(Number(req.body.clientBestScore));
+      }
       const best = scores.length > 0 ? Math.max(...scores) : 0;
       return res.status(403).json({
-        error: `\u0110\xE3 qu\xE1 s\u1ED1 l\u1EA7n l\xE0m b\xE0i cho ph\xE9p (${submittedSessions.length}/${maxAttempts} l\u1EA7n). Gi\xE1o vi\xEAn ch\u1EC9 cho ph\xE9p l\xE0m t\u1ED1i \u0111a ${maxAttempts} l\u1EA7n. B\u1EA1n kh\xF4ng th\u1EC3 v\xE0o l\xE0m b\xE0i th\xEAm. H\u1EC7 th\u1ED1ng ghi nh\u1EADn \u0111i\u1EC3m cao nh\u1EA5t: ${best} \u0111i\u1EC3m.`,
+        error: `\u0110\xE3 qu\xE1 s\u1ED1 l\u1EA7n l\xE0m b\xE0i cho ph\xE9p (${effectiveAttemptsMade}/${maxAttempts} l\u1EA7n). Gi\xE1o vi\xEAn ch\u1EC9 cho ph\xE9p l\xE0m t\u1ED1i \u0111a ${maxAttempts} l\u1EA7n. B\u1EA1n kh\xF4ng th\u1EC3 v\xE0o l\xE0m b\xE0i th\xEAm. H\u1EC7 th\u1ED1ng ghi nh\u1EADn \u0111i\u1EC3m cao nh\u1EA5t: ${best} \u0111i\u1EC3m.`,
         hasCompletedAllAttempts: true,
         maxAttempts,
-        attemptsMade: submittedSessions.length,
+        attemptsMade: effectiveAttemptsMade,
         bestScore: best
       });
     }
-    const attemptNumber = submittedSessions.length + 1;
+    const attemptNumber = effectiveAttemptsMade + 1;
     const startDate = /* @__PURE__ */ new Date();
     const expiresDate = new Date(startDate.getTime() + (exam.durationMinutes || 15) * 60 * 1e3);
     const totalQuestionsInBank = exam.questions ? exam.questions.length : 0;
@@ -2804,7 +3454,8 @@ app.post("/api/student/start", (req, res) => {
     );
     const targetQuestionCount = isRandomSubset ? exam.randomQuestionCount : totalQuestionsInBank;
     const rawQuestions = Array.isArray(exam.questions) ? exam.questions.filter(Boolean) : [];
-    const shuffledBank = shuffleArray([...rawQuestions]);
+    const shouldShuffleQuestions = exam.shuffleQuestions !== false || isRandomSubset;
+    const shuffledBank = shouldShuffleQuestions ? shuffleArray([...rawQuestions]) : [...rawQuestions];
     const qList = shuffledBank.slice(0, targetQuestionCount).filter((q) => q && q.id);
     const questionOrder = qList.map((q) => q.id);
     const optionOrder = {};
@@ -2822,9 +3473,10 @@ app.post("/api/student/start", (req, res) => {
       if (origQ && origQ.id) {
         optionOrder[origQ.id] = mapping;
       }
+      const normalizedOrigOptions = normalizeQuestionOptions(origQ?.options);
       const mappedOptions = ["A", "B", "C", "D"].map((displayId, optIdx) => {
         const origOptId = mapping[displayId];
-        const origOpt = origQ && Array.isArray(origQ.options) ? origQ.options.find((o) => o && normalizeOptionKey(o.id) === origOptId) || origQ.options[["A", "B", "C", "D"].indexOf(origOptId)] || origQ.options[optIdx] : void 0;
+        const origOpt = normalizedOrigOptions.find((o) => o.id === origOptId) || normalizedOrigOptions[["A", "B", "C", "D"].indexOf(origOptId)] || normalizedOrigOptions[optIdx];
         return {
           id: displayId,
           text: origOpt ? origOpt.text || "" : ""
@@ -2860,6 +3512,9 @@ app.post("/api/student/start", (req, res) => {
     };
     db.saveSession(session);
     const prevScores = submittedSessions.map((s) => s.score ?? 0);
+    if (req.body?.clientBestScore !== void 0 && !isNaN(Number(req.body.clientBestScore))) {
+      prevScores.push(Number(req.body.clientBestScore));
+    }
     const bestScoreSoFar = prevScores.length > 0 ? Math.max(...prevScores) : void 0;
     res.json({
       sessionId: session.id,
@@ -2867,13 +3522,13 @@ app.post("/api/student/start", (req, res) => {
       expiresAt: session.expiresAt,
       questions: studentQuestions,
       questionOrder,
-      optionOrder,
+      sealedOptionOrder: sealOptionOrder(optionOrder, session.id),
       savedAnswers: session.answers,
       flaggedQuestions: [],
       violationCount: 0,
       attemptNumber,
       maxAttempts,
-      attemptsMade: submittedSessions.length,
+      attemptsMade: effectiveAttemptsMade,
       attemptsRemaining: Math.max(0, maxAttempts - attemptNumber),
       bestScoreSoFar
     });
@@ -2890,21 +3545,21 @@ function gradeAndSubmit(session, exam, res) {
   let incorrectCount = 0;
   let unansweredCount = 0;
   const examQuestions = Array.isArray(exam.questions) ? exam.questions : [];
-  const mappedSessionQuestions = session.questionOrder && session.questionOrder.length > 0 ? session.questionOrder.map((qId) => examQuestions.find((q) => q && q.id === qId)).filter(Boolean) : [];
+  const mappedSessionQuestions = session.questionOrder && session.questionOrder.length > 0 ? session.questionOrder.map((qId) => examQuestions.find((q) => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, "_") === String(qId).replace(/[\/\.]/g, "_")))).filter(Boolean) : [];
   const sessionQuestions = mappedSessionQuestions.length > 0 ? mappedSessionQuestions : examQuestions;
   for (const q of sessionQuestions) {
     if (!q || !q.id) continue;
-    const studentChoice = session.answers ? session.answers[q.id] : void 0;
+    const studentChoice = getStudentRawAnswer(session.answers, q.id);
     const originalOptionChosen = resolveStudentOriginalChoice(
       studentChoice,
-      session.optionOrder ? session.optionOrder[q.id] : void 0,
+      getQuestionOptionMapping(session.optionOrder, q.id),
       q.options
     );
     if (!originalOptionChosen) {
       unansweredCount++;
       continue;
     }
-    const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+    const expectedAnswer = getExpectedQuestionAnswer(q, exam.id);
     if (originalOptionChosen === expectedAnswer) {
       correctCount++;
     } else {
@@ -2922,13 +3577,15 @@ function gradeAndSubmit(session, exam, res) {
   session.incorrectCount = incorrectCount;
   session.unansweredCount = unansweredCount;
   db.saveSession(session);
+  const normSessionName = normalizeStudentName(session.studentName);
+  const normSessionClass = normalizeClassName(session.studentClass);
   const allStudentSubmitted = (db.getSessions(exam.id) || []).filter(
-    (s) => s && s.studentName && s.studentClass && String(s.studentName).trim().toLowerCase() === String(session.studentName).trim().toLowerCase() && String(s.studentClass).trim().toLowerCase() === String(session.studentClass).trim().toLowerCase() && s.status === "submitted"
+    (s) => s && s.studentName && s.studentClass && normalizeStudentName(s.studentName) === normSessionName && normalizeClassName(s.studentClass) === normSessionClass && s.status === "submitted"
   );
   const allScores = allStudentSubmitted.map((s) => s.score ?? 0);
   const bestScore = allScores.length > 0 ? Math.max(...allScores) : score;
   const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
-  const attemptsMade = allStudentSubmitted.length;
+  const attemptsMade = Math.max(allStudentSubmitted.length, Number(session.attemptNumber) || 1);
   const attemptsRemaining = Math.max(0, maxAttempts - attemptsMade);
   return res.json({
     success: true,
@@ -2938,7 +3595,7 @@ function gradeAndSubmit(session, exam, res) {
     studentBestScore: exam.showScoreAfterSubmit !== false ? bestScore : void 0,
     examId: exam.id,
     examCode: exam.code,
-    attemptNumber: session.attemptNumber || attemptsMade,
+    attemptNumber: Math.max(Number(session.attemptNumber) || 1, attemptsMade),
     attemptsMade,
     maxAttempts,
     attemptsRemaining,
@@ -2953,7 +3610,8 @@ function gradeAndSubmit(session, exam, res) {
   });
 }
 app.post("/api/student/answer", (req, res) => {
-  const { sessionId, questionId, optionId, flagged, examId, studentName, studentClass, sbd, questionOrder, optionOrder } = req.body;
+  const { sessionId, questionId, optionId, flagged, examId, studentName, studentClass, sbd, questionOrder, optionOrder, sealedOptionOrder } = req.body;
+  const resolvedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ""));
   let session = sessionId ? db.getSession(sessionId) : void 0;
   if (!session && sessionId && (examId || studentName)) {
     const exam = (examId ? db.getExam(examId) || db.getExamByCode(examId) : void 0) || db.getExams()[0];
@@ -2971,7 +3629,7 @@ app.post("/api/student/answer", (req, res) => {
         violationCount: 0,
         violations: [],
         questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0 ? questionOrder : exam.questions ? exam.questions.map((q) => q.id) : [],
-        optionOrder: optionOrder && typeof optionOrder === "object" ? optionOrder : {},
+        optionOrder: resolvedOptOrder && typeof resolvedOptOrder === "object" ? resolvedOptOrder : {},
         attemptNumber: 1,
         flaggedQuestions: [],
         lastHeartbeat: (/* @__PURE__ */ new Date()).toISOString()
@@ -2982,17 +3640,11 @@ app.post("/api/student/answer", (req, res) => {
   if (!session) {
     return res.json({ success: true, savedAnswers: {} });
   }
-  if (optionOrder && typeof optionOrder === "object" && Object.keys(optionOrder).length > 0) {
-    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-      session.optionOrder = optionOrder;
-    } else {
-      session.optionOrder = { ...optionOrder, ...session.optionOrder };
-    }
+  if (resolvedOptOrder && typeof resolvedOptOrder === "object" && Object.keys(resolvedOptOrder).length > 0) {
+    session.optionOrder = { ...session.optionOrder || {}, ...resolvedOptOrder };
   }
   if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-      session.questionOrder = questionOrder;
-    }
+    session.questionOrder = questionOrder;
   }
   if (session.status === "submitted") {
     return res.status(400).json({ error: "B\xE0i thi \u0111\xE3 \u0111\u01B0\u1EE3c n\u1ED9p" });
@@ -3019,7 +3671,8 @@ app.post("/api/student/answer", (req, res) => {
   res.json({ success: true });
 });
 app.post("/api/student/violation", (req, res) => {
-  const { sessionId, type, description, examId, studentName, studentClass, sbd, questionOrder, optionOrder } = req.body;
+  const { sessionId, type, description, examId, studentName, studentClass, sbd, questionOrder, optionOrder, sealedOptionOrder } = req.body;
+  const resolvedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ""));
   let session = sessionId ? db.getSession(sessionId) : void 0;
   if (!session && sessionId && (examId || studentName)) {
     const exam2 = (examId ? db.getExam(examId) || db.getExamByCode(examId) : void 0) || db.getExams()[0];
@@ -3037,7 +3690,7 @@ app.post("/api/student/violation", (req, res) => {
         violationCount: 0,
         violations: [],
         questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0 ? questionOrder : exam2.questions ? exam2.questions.map((q) => q.id) : [],
-        optionOrder: optionOrder && typeof optionOrder === "object" ? optionOrder : {},
+        optionOrder: resolvedOptOrder && typeof resolvedOptOrder === "object" ? resolvedOptOrder : {},
         attemptNumber: 1,
         flaggedQuestions: [],
         lastHeartbeat: (/* @__PURE__ */ new Date()).toISOString()
@@ -3048,17 +3701,11 @@ app.post("/api/student/violation", (req, res) => {
   if (!session) {
     return res.json({ recorded: true, violationCount: 1, isLocked: false, maxViolations: 3 });
   }
-  if (optionOrder && typeof optionOrder === "object" && Object.keys(optionOrder).length > 0) {
-    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-      session.optionOrder = optionOrder;
-    } else {
-      session.optionOrder = { ...optionOrder, ...session.optionOrder };
-    }
+  if (resolvedOptOrder && typeof resolvedOptOrder === "object" && Object.keys(resolvedOptOrder).length > 0) {
+    session.optionOrder = { ...session.optionOrder || {}, ...resolvedOptOrder };
   }
   if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-      session.questionOrder = questionOrder;
-    }
+    session.questionOrder = questionOrder;
   }
   if (session.status === "submitted") {
     return res.json({ recorded: false });
@@ -3084,20 +3731,20 @@ app.post("/api/student/violation", (req, res) => {
       let cCount = 0;
       let iCount = 0;
       let uCount = 0;
-      const mappedQs = session.questionOrder && session.questionOrder.length > 0 ? session.questionOrder.map((qId) => exam.questions.find((q) => q && q.id === qId)).filter(Boolean) : [];
+      const mappedQs = session.questionOrder && session.questionOrder.length > 0 ? session.questionOrder.map((qId) => exam.questions.find((q) => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, "_") === String(qId).replace(/[\/\.]/g, "_")))).filter(Boolean) : [];
       const questionsToGrade = mappedQs.length > 0 ? mappedQs : exam.questions;
       for (const q of questionsToGrade) {
-        const studentChoice = session.answers ? session.answers[q.id] : void 0;
+        const studentChoice = getStudentRawAnswer(session.answers, q.id);
         const origChoice = resolveStudentOriginalChoice(
           studentChoice,
-          session.optionOrder ? session.optionOrder[q.id] : void 0,
+          getQuestionOptionMapping(session.optionOrder, q.id),
           q.options
         );
         if (!origChoice) {
           uCount++;
           continue;
         }
-        const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+        const expectedAnswer = getExpectedQuestionAnswer(q, exam.id);
         if (origChoice === expectedAnswer) {
           cCount++;
         } else {
@@ -3120,8 +3767,9 @@ app.post("/api/student/violation", (req, res) => {
   });
 });
 app.post("/api/student/heartbeat", (req, res) => {
-  const { sessionId, examId, studentName, studentClass, sbd, violationCount, answers, status, attemptNumber, questionOrder, optionOrder } = req.body;
+  const { sessionId, examId, studentName, studentClass, sbd, violationCount, answers, status, attemptNumber, questionOrder, optionOrder, sealedOptionOrder } = req.body;
   if (!sessionId) return res.json({ success: true, isLocked: false, status: "in_progress" });
+  const resolvedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId));
   let session = db.getSession(sessionId);
   if (!session && (examId || studentName)) {
     const exam = (examId ? db.getExam(examId) || db.getExamByCode(examId) : void 0) || db.getExams()[0];
@@ -3139,7 +3787,7 @@ app.post("/api/student/heartbeat", (req, res) => {
         violationCount: violationCount || 0,
         violations: [],
         questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0 ? questionOrder : exam.questions ? exam.questions.map((q) => q.id) : [],
-        optionOrder: optionOrder && typeof optionOrder === "object" ? optionOrder : {},
+        optionOrder: resolvedOptOrder && typeof resolvedOptOrder === "object" ? resolvedOptOrder : {},
         attemptNumber: attemptNumber || 1,
         flaggedQuestions: [],
         lastHeartbeat: (/* @__PURE__ */ new Date()).toISOString()
@@ -3154,17 +3802,11 @@ app.post("/api/student/heartbeat", (req, res) => {
       status: "in_progress"
     });
   }
-  if (optionOrder && typeof optionOrder === "object" && Object.keys(optionOrder).length > 0) {
-    if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-      session.optionOrder = optionOrder;
-    } else {
-      session.optionOrder = { ...optionOrder, ...session.optionOrder };
-    }
+  if (resolvedOptOrder && typeof resolvedOptOrder === "object" && Object.keys(resolvedOptOrder).length > 0) {
+    session.optionOrder = { ...session.optionOrder || {}, ...resolvedOptOrder };
   }
   if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-    if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-      session.questionOrder = questionOrder;
-    }
+    session.questionOrder = questionOrder;
   }
   if (session.status === "submitted") {
     return res.json({
@@ -3189,12 +3831,73 @@ app.post("/api/student/heartbeat", (req, res) => {
   });
 });
 app.post("/api/student/lock-exit", (req, res) => {
-  const { sessionId } = req.body;
-  const session = db.getSession(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y phi\xEAn l\xE0m b\xE0i" });
+  const {
+    sessionId,
+    examId,
+    examCode,
+    studentName,
+    studentClass,
+    sbd,
+    answers,
+    questionOrder,
+    optionOrder,
+    sealedOptionOrder,
+    displayedQuestions,
+    violationCount,
+    attemptNumber,
+    examSnapshot,
+    previousSessions
+  } = req.body || {};
+  syncExamSnapshotIfValid(examSnapshot, examCode || examId);
+  let session = sessionId ? db.getSession(sessionId) : void 0;
+  let exam = session ? db.getExam(session.examId) || db.getExamByCode(session.examId) : examId ? db.getExam(examId) || db.getExamByCode(examId) : examCode ? db.getExamByCode(examCode) : void 0;
+  if (!exam && (examCode || examId)) {
+    exam = db.getExamByCode(examCode || examId) || db.getExam(examId || examCode);
   }
-  const exam = db.getExam(session.examId);
+  if (exam) {
+    syncPreviousStudentSessions(previousSessions, exam.id);
+  }
+  const reconstructedOptOrder = reconstructOptionOrderFromDisplayedQuestions(displayedQuestions, exam?.questions);
+  const unsealedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ""));
+  const resolvedOptOrder = {
+    ...reconstructedOptOrder,
+    ...unsealedOptOrder || {}
+  };
+  if (!session && sessionId && exam) {
+    session = {
+      id: sessionId,
+      examId: exam.id,
+      studentName: String(studentName || "H\u1ECDc sinh").trim(),
+      studentClass: String(studentClass || "").trim(),
+      sbd: sbd ? String(sbd).trim() : "",
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      expiresAt: (/* @__PURE__ */ new Date()).toISOString(),
+      answers: answers && typeof answers === "object" ? answers : {},
+      status: "locked",
+      violationCount: Number(violationCount) || 3,
+      violations: [],
+      questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0 ? questionOrder : exam.questions ? exam.questions.map((q) => q.id) : [],
+      optionOrder: resolvedOptOrder && typeof resolvedOptOrder === "object" ? resolvedOptOrder : {},
+      attemptNumber: Number(attemptNumber) || 1,
+      flaggedQuestions: [],
+      lastHeartbeat: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  if (!session) {
+    return res.json({
+      success: true,
+      message: "B\xE0i thi \u0111\xE3 b\u1ECB kh\xF3a do vi ph\u1EA1m v\xE0 t\xEDnh l\xE0 1 l\u1EA7n l\xE0m b\xE0i."
+    });
+  }
+  if (answers && typeof answers === "object") {
+    session.answers = { ...session.answers, ...answers };
+  }
+  if (resolvedOptOrder && typeof resolvedOptOrder === "object" && Object.keys(resolvedOptOrder).length > 0) {
+    session.optionOrder = { ...session.optionOrder || {}, ...resolvedOptOrder };
+  }
+  if (Array.isArray(questionOrder) && questionOrder.length > 0) {
+    session.questionOrder = questionOrder;
+  }
   if (exam) {
     finalizeLockedSession(session, exam);
   } else {
@@ -3202,9 +3905,21 @@ app.post("/api/student/lock-exit", (req, res) => {
     session.submittedAt = (/* @__PURE__ */ new Date()).toISOString();
     db.saveSession(session);
   }
+  const totalQuestions = Array.isArray(session.questionOrder) && session.questionOrder.length > 0 ? session.questionOrder.length : exam?.questions?.length || 10;
   res.json({
     success: true,
-    message: "B\xE0i thi \u0111\xE3 b\u1ECB kh\xF3a do vi ph\u1EA1m v\xE0 t\xEDnh l\xE0 1 l\u1EA7n l\xE0m b\xE0i."
+    message: "B\xE0i thi \u0111\xE3 b\u1ECB kh\xF3a do vi ph\u1EA1m v\xE0 t\xEDnh l\xE0 1 l\u1EA7n l\xE0m b\xE0i.",
+    sessionId: session.id,
+    examId: session.examId,
+    examCode: exam?.code || examCode || session.examId,
+    score: session.score ?? 0,
+    correctCount: session.correctCount ?? 0,
+    incorrectCount: session.incorrectCount ?? 0,
+    unansweredCount: session.unansweredCount ?? totalQuestions,
+    totalQuestions,
+    attemptNumber: session.attemptNumber || 1,
+    violationCount: session.violationCount || 3,
+    submittedAt: session.submittedAt || (/* @__PURE__ */ new Date()).toISOString()
   });
 });
 app.post("/api/student/submit", (req, res) => {
@@ -3218,6 +3933,8 @@ app.post("/api/student/submit", (req, res) => {
     answers,
     questionOrder,
     optionOrder,
+    sealedOptionOrder,
+    displayedQuestions,
     violationCount,
     startedAt,
     attemptNumber
@@ -3231,13 +3948,49 @@ app.post("/api/student/submit", (req, res) => {
   if (!exam) {
     return res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y b\xE0i thi" });
   }
+  syncPreviousStudentSessions(req.body.previousSessions, exam.id);
+  const effectiveStudentName = String(studentName || session?.studentName || "H\u1ECDc sinh").trim();
+  const effectiveStudentClass = String(studentClass || session?.studentClass || "").trim();
+  const normSubName = normalizeStudentName(effectiveStudentName);
+  const normSubClass = normalizeClassName(effectiveStudentClass);
+  const priorSubmittedCount = db.getSessions(exam.id).filter(
+    (s) => s.id !== sessionId && normalizeStudentName(s.studentName) === normSubName && normalizeClassName(s.studentClass) === normSubClass && s.status === "submitted"
+  ).length;
+  const maxAttempts = Number(exam.maxAttempts) > 0 ? Number(exam.maxAttempts) : 1;
+  const isTeacherReq = isVerifiedTeacherRequest(req);
+  if (!isTeacherReq && priorSubmittedCount >= maxAttempts) {
+    const prevSessions = db.getSessions(exam.id).filter(
+      (s) => normalizeStudentName(s.studentName) === normSubName && normalizeClassName(s.studentClass) === normSubClass && s.status === "submitted"
+    );
+    const bestScore = prevSessions.length > 0 ? Math.max(...prevSessions.map((s) => s.score ?? 0)) : 0;
+    return res.status(403).json({
+      error: `H\u1ECDc sinh ${effectiveStudentName} (L\u1EDBp ${effectiveStudentClass}) \u0111\xE3 ho\xE0n th\xE0nh t\u1ED1i \u0111a ${priorSubmittedCount}/${maxAttempts} l\u1EA7n l\xE0m b\xE0i cho ph\xE9p. H\u1EC7 th\u1ED1ng kh\xF4ng nh\u1EADn th\xEAm l\u01B0\u1EE3t l\xE0m b\xE0i m\u1EDBi. \u0110i\u1EC3m cao nh\u1EA5t \u0111\xE3 ghi nh\u1EADn: ${bestScore} \u0111i\u1EC3m.`,
+      hasCompletedAllAttempts: true,
+      maxAttempts,
+      attemptsMade: priorSubmittedCount,
+      bestScore
+    });
+  }
+  const clientAttemptsMade = Math.max(0, Number(req.body.clientAttemptsMade) || 0);
+  const resolvedAttemptNumber = Math.max(
+    Number(attemptNumber) || 1,
+    Number(session?.attemptNumber) || 1,
+    priorSubmittedCount + 1,
+    clientAttemptsMade
+  );
+  const reconstructedOptOrder = reconstructOptionOrderFromDisplayedQuestions(displayedQuestions, exam.questions);
+  const unsealedOptOrder = unsealOptionOrder(sealedOptionOrder || optionOrder, String(sessionId || ""));
+  const resolvedOptOrder = {
+    ...reconstructedOptOrder,
+    ...unsealedOptOrder || {}
+  };
   if (!session) {
     const sId = sessionId || `ses-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     session = {
       id: sId,
       examId: exam.id,
-      studentName: studentName || "H\u1ECDc sinh",
-      studentClass: studentClass || "",
+      studentName: effectiveStudentName,
+      studentClass: effectiveStudentClass,
       sbd: sbd || "",
       startedAt: startedAt || (/* @__PURE__ */ new Date()).toISOString(),
       expiresAt: new Date(Date.now() + (exam.durationMinutes || 45) * 60 * 1e3).toISOString(),
@@ -3246,8 +3999,8 @@ app.post("/api/student/submit", (req, res) => {
       violationCount: violationCount || 0,
       violations: [],
       questionOrder: Array.isArray(questionOrder) && questionOrder.length > 0 ? questionOrder : exam.questions ? exam.questions.map((q) => q.id) : [],
-      optionOrder: optionOrder || {},
-      attemptNumber: attemptNumber || 1,
+      optionOrder: resolvedOptOrder && typeof resolvedOptOrder === "object" ? resolvedOptOrder : {},
+      attemptNumber: resolvedAttemptNumber,
       flaggedQuestions: [],
       lastHeartbeat: (/* @__PURE__ */ new Date()).toISOString()
     };
@@ -3256,24 +4009,16 @@ app.post("/api/student/submit", (req, res) => {
     if (answers && typeof answers === "object") {
       session.answers = { ...session.answers, ...answers };
     }
-    if (optionOrder && typeof optionOrder === "object" && Object.keys(optionOrder).length > 0) {
-      if (!session.optionOrder || Object.keys(session.optionOrder).length === 0) {
-        session.optionOrder = optionOrder;
-      } else {
-        session.optionOrder = { ...optionOrder, ...session.optionOrder };
-      }
+    if (resolvedOptOrder && typeof resolvedOptOrder === "object" && Object.keys(resolvedOptOrder).length > 0) {
+      session.optionOrder = { ...session.optionOrder || {}, ...resolvedOptOrder };
     }
     if (Array.isArray(questionOrder) && questionOrder.length > 0) {
-      if (!session.questionOrder || session.questionOrder.length === 0 || session.questionOrder.length !== questionOrder.length) {
-        session.questionOrder = questionOrder;
-      }
+      session.questionOrder = questionOrder;
     }
     if (violationCount !== void 0) {
       session.violationCount = violationCount;
     }
-    if (attemptNumber && !session.attemptNumber) {
-      session.attemptNumber = Number(attemptNumber);
-    }
+    session.attemptNumber = resolvedAttemptNumber;
     if (sbd && !session.sbd) {
       session.sbd = sbd;
     }
@@ -3394,20 +4139,20 @@ app.get("/api/reports/:examId", requireTeacherAuth, (req, res) => {
       let right = 0;
       let wrong = 0;
       let unans = 0;
-      const mappedQs = s.questionOrder && s.questionOrder.length > 0 ? s.questionOrder.map((qId) => exam.questions.find((q) => q && q.id === qId)).filter(Boolean) : [];
+      const mappedQs = s.questionOrder && s.questionOrder.length > 0 ? s.questionOrder.map((qId) => exam.questions.find((q) => q && (q.id === qId || String(q.id).replace(/[\/\.]/g, "_") === String(qId).replace(/[\/\.]/g, "_")))).filter(Boolean) : [];
       const questionsToGrade = mappedQs.length > 0 ? mappedQs : exam.questions;
       for (const q of questionsToGrade) {
-        const studentChoice = s.answers ? s.answers[q.id] : void 0;
+        const studentChoice = getStudentRawAnswer(s.answers, q.id);
         const origChoice = resolveStudentOriginalChoice(
           studentChoice,
-          s.optionOrder ? s.optionOrder[q.id] : void 0,
+          getQuestionOptionMapping(s.optionOrder, q.id),
           q.options
         );
         if (!origChoice) {
           unans++;
           continue;
         }
-        const expectedAnswer = normalizeOptionKey(q.correctAnswer, q.options);
+        const expectedAnswer = getExpectedQuestionAnswer(q, exam.id);
         if (origChoice === expectedAnswer) {
           right++;
         } else {
@@ -3424,7 +4169,7 @@ app.get("/api/reports/:examId", requireTeacherAuth, (req, res) => {
   }
   const studentMap = /* @__PURE__ */ new Map();
   for (const s of sessions) {
-    const key = `${s.studentName.trim().toLowerCase()}:::${s.studentClass.trim().toLowerCase()}`;
+    const key = `${normalizeStudentName(s.studentName)}:::${normalizeClassName(s.studentClass)}`;
     if (!studentMap.has(key)) {
       studentMap.set(key, []);
     }
@@ -3502,25 +4247,39 @@ app.get("/api/reports/:examId", requireTeacherAuth, (req, res) => {
       lockedStudentsCount++;
     }
   }
+  const allStudentsForReport = db.getStudents() || [];
+  const targetClassesForReport = Array.isArray(exam.targetClasses) && exam.targetClasses.length > 0 ? exam.targetClasses.map((c) => normalizeClassName(c)).filter((c) => c && c !== "ALL" && c !== "T\u1EA4T C\u1EA2") : [];
+  const rosterStudentsForExam = allStudentsForReport.filter((st) => {
+    const stCls = normalizeClassName(st.class);
+    if (targetClassesForReport.length > 0) return targetClassesForReport.includes(stCls);
+    if (exam.grade) return stCls.startsWith(String(exam.grade));
+    return true;
+  });
+  const totalRosterCount = Math.max(rosterStudentsForExam.length, totalStudentsCount);
+  const notParticipatedCount = Math.max(0, totalRosterCount - totalStudentsCount);
   const distribution = [
-    { range: "0 - 1.9", count: studentScores.filter((s) => s < 2).length },
-    { range: "2.0 - 4.9", count: studentScores.filter((s) => s >= 2 && s < 5).length },
-    { range: "5.0 - 6.4", count: studentScores.filter((s) => s >= 5 && s < 6.5).length },
-    { range: "6.5 - 7.9", count: studentScores.filter((s) => s >= 6.5 && s < 8).length },
-    { range: "8.0 - 10", count: studentScores.filter((s) => s >= 8).length }
+    { range: "Ch\u01B0a l\xE0m", count: notParticipatedCount },
+    { range: "0 \u0111\u1EBFn 5", count: studentScores.filter((s) => s < 5).length },
+    { range: "5 \u0111\u1EBFn 6,5", count: studentScores.filter((s) => s >= 5 && s < 6.5).length },
+    { range: "6,5 \u0111\u1EBFn 8", count: studentScores.filter((s) => s >= 6.5 && s < 8).length },
+    { range: "8 \u0111\u1EBFn 10", count: studentScores.filter((s) => s >= 8).length }
   ];
   const questionAnalysis = exam.questions.map((q, idx) => {
     let wrong = 0;
     let right = 0;
+    const expectedAns = getExpectedQuestionAnswer(q, exam.id);
     for (const s of sessions) {
-      const studentChoice = s.answers ? s.answers[q.id] : void 0;
-      if (!studentChoice) {
+      const studentChoice = getStudentRawAnswer(s.answers, q.id);
+      const origChoice = resolveStudentOriginalChoice(
+        studentChoice,
+        getQuestionOptionMapping(s.optionOrder, q.id),
+        q.options
+      );
+      if (!origChoice) {
         wrong++;
         continue;
       }
-      const mapping = s.optionOrder ? s.optionOrder[q.id] : void 0;
-      const origChoice = mapping ? mapping[studentChoice] : studentChoice;
-      if (origChoice === q.correctAnswer) {
+      if (origChoice === expectedAns) {
         right++;
       } else {
         wrong++;
@@ -3849,16 +4608,39 @@ app.post("/api/sessions/sync", (req, res) => {
   }
   let count = 0;
   for (const incoming of sessions) {
-    if (!incoming || !incoming.id || !incoming.examId) continue;
-    const existing = db.getSession(incoming.id);
+    if (!incoming) continue;
+    const sId = String(incoming.id || incoming.sessionId || "").trim();
+    const eId = String(incoming.examId || incoming.examCode || "").trim();
+    if (!sId || !eId) continue;
+    const decodedOptOrder = unsealOptionOrder(incoming.sealedOptionOrder || incoming.optionOrder, sId);
+    const existing = db.getSession(sId);
     if (!existing) {
-      db.saveSession(incoming);
+      db.saveSession({
+        ...incoming,
+        id: sId,
+        examId: eId,
+        questionOrder: Array.isArray(incoming.questionOrder) ? incoming.questionOrder : [],
+        optionOrder: decodedOptOrder && typeof decodedOptOrder === "object" ? decodedOptOrder : {},
+        answers: incoming.answers && typeof incoming.answers === "object" ? incoming.answers : {}
+      });
       count++;
     } else {
       let changed = false;
       if (incoming.status === "submitted" && existing.status !== "submitted") {
         existing.status = "submitted";
         existing.submittedAt = incoming.submittedAt || (/* @__PURE__ */ new Date()).toISOString();
+        changed = true;
+      }
+      if (incoming.answers && typeof incoming.answers === "object" && Object.keys(incoming.answers).length > 0) {
+        existing.answers = { ...existing.answers || {}, ...incoming.answers };
+        changed = true;
+      }
+      if (Array.isArray(incoming.questionOrder) && incoming.questionOrder.length > 0) {
+        existing.questionOrder = incoming.questionOrder;
+        changed = true;
+      }
+      if (decodedOptOrder && typeof decodedOptOrder === "object" && Object.keys(decodedOptOrder).length > 0) {
+        existing.optionOrder = { ...existing.optionOrder || {}, ...decodedOptOrder };
         changed = true;
       }
       if (incoming.score !== void 0 && (existing.score === void 0 || incoming.score > existing.score)) {
@@ -3923,6 +4705,7 @@ if (!process.env.VERCEL) {
 }
 async function startServer() {
   const isProd = process.env.NODE_ENV === "production";
+  let viteLoaded = false;
   if (!isProd) {
     try {
       const viteModule = await Function("pkg", "return import(pkg)")("vite");
@@ -3932,13 +4715,16 @@ async function startServer() {
         appType: "spa"
       });
       app.use(vite.middlewares);
+      viteLoaded = true;
     } catch (e) {
-      console.warn("Vite dev middleware not loaded:", e);
+      console.warn("Vite dev middleware not loaded, falling back to static dist:", e);
     }
-  } else {
-    app.use(express.static(path2.resolve(safeDirname, "dist")));
+  }
+  if (isProd || !viteLoaded) {
+    const distPath = path2.resolve(safeDirname, "dist");
+    app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path2.resolve(safeDirname, "dist", "index.html"));
+      res.sendFile(path2.resolve(distPath, "index.html"));
     });
   }
   app.listen(PORT, "0.0.0.0", () => {
@@ -3946,10 +4732,7 @@ async function startServer() {
   });
 }
 var server_default = app;
-var isMainScript = Boolean(
-  process.argv[1] && (process.argv[1].endsWith("server.ts") || process.argv[1].endsWith("server.js"))
-);
-if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.NOW_BUILD && isMainScript) {
+if (!process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.NOW_BUILD) {
   startServer();
 }
 

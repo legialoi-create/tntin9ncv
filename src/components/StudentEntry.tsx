@@ -422,6 +422,7 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     try {
       const res = await api.validateStudentEntry({
         examCode: codeToValidate,
+        studentId: selectedStudentId || undefined,
         studentName: studentName.trim(),
         studentClass: studentClass.trim(),
         sbd: sbd.trim(),
@@ -622,8 +623,11 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
     setIsChangingPassword(true);
     try {
       const res = await api.changeStudentPassword({
-        studentId: verifiedInfo.student.id,
-        username: verifiedInfo.student.username,
+        studentId: selectedStudentId || verifiedInfo.student.id,
+        studentName: verifiedInfo.student.name || studentName.trim(),
+        studentClass: verifiedInfo.student.class || studentClass.trim(),
+        sbd: verifiedInfo.student.sbd || sbd.trim(),
+        username: verifiedInfo.student.username || computeUsername(studentName, studentClass, classStudents, selectedStudentId),
         currentPassword: currentPasswordInput.trim() || password.trim(),
         newPassword: newPasswordInput.trim(),
       });

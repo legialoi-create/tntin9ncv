@@ -23,7 +23,9 @@ import {
   getDeletedClassesFromFirestore,
   unmarkDeletedClassInFirestore,
   deleteSingleSubmissionFromFirestore,
-  sortStudentsByRosterOrder
+  sortStudentsByRosterOrder,
+  saveTeacherPasswordToFirestore,
+  getTeacherPasswordFromFirestore
 } from './firebase';
 import { parseExamLocally } from '../utils/localExamParser';
 import {
@@ -444,7 +446,38 @@ export const api = {
   login: async (username: string, password: string) => {
     const trimmedUser = String(username || '').trim().toLowerCase();
     const trimmedPass = String(password || '').trim();
+
+    const allowedUsers = ['legialoi', 'legialoi@gmail.com', 'admin', 'teacher', 'gv'];
+    const isValidUser = allowedUsers.includes(trimmedUser);
+    if (!isValidUser) {
+      throw new Error('Tên đăng nhập Giáo viên không chính xác');
+    }
+
+    // 1. Check Cloud Firestore & localStorage for custom changed Teacher password
     const localPassHash = localStorage.getItem('ncv_admin_password');
+    const cloudPassHash = await getTeacherPasswordFromFirestore();
+
+    if (localPassHash && !cloudPassHash) {
+      // Sync existing local custom password up to Cloud Firestore so it survives app updates/redeployments
+      saveTeacherPasswordToFirestore(localPassHash).catch(() => {});
+    }
+
+    const effectivePassHash = cloudPassHash || localPassHash;
+
+    // CRITICAL: If Teacher has changed their password, strictly verify against the new password FIRST
+    // and IMMEDIATELY REJECT the initial password in the code!
+    if (effectivePassHash) {
+      const matchesCustom =
+        verifyPasswordSync(trimmedPass, effectivePassHash) ||
+        verifyPasswordSync(trimmedPass.replace(/\s+/g, ' '), effectivePassHash) ||
+        verifyPasswordSync(trimmedPass.replace(/\s+/g, ''), effectivePassHash);
+
+      if (!matchesCustom) {
+        throw new Error(
+          'Mật khẩu Giáo viên không chính xác! Mật khẩu ban đầu đã bị vô hiệu hóa sau khi đổi mật khẩu.'
+        );
+      }
+    }
 
     let res: Response | null = null;
     try {
@@ -454,7 +487,7 @@ export const api = {
         body: JSON.stringify({
           username,
           password,
-          adminPasswordHash: localPassHash || undefined,
+          adminPasswordHash: effectivePassHash || undefined,
         }),
       });
     } catch {
@@ -464,27 +497,27 @@ export const api = {
     if (res && res.ok) {
       const data = await res.json();
       if (data && data.token) {
-        // If local browser has a custom changed password hash, verify input matches it
-        if (localPassHash && !verifyPasswordSync(trimmedPass, localPassHash)) {
-          throw new Error('Mật khẩu Giáo viên không chính xác (Mật khẩu đã được thay đổi)');
+        if (data.passwordHash && !effectivePassHash) {
+          try {
+            localStorage.setItem('ncv_admin_password', data.passwordHash);
+          } catch (e) {}
+          saveTeacherPasswordToFirestore(data.passwordHash).catch(() => {});
         }
         setAuthToken(data.token);
         return data;
       }
     }
 
-    if (res && res.status === 401) {
+    if (res && res.status === 401 && !effectivePassHash) {
       const errData = await res.json().catch(() => null);
       throw new Error(errData?.error || 'Tên đăng nhập hoặc mật khẩu Giáo viên không chính xác');
     }
 
-    // Client-side fallback / override strictly using one-way cryptographic hashes (no plain passwords in bundle)
-    const allowedUsers = ['legialoi', 'legialoi@gmail.com', 'admin', 'teacher', 'gv'];
-    const isValidUser = allowedUsers.includes(trimmedUser);
-
-    // CRITICAL: If teacher changed password (localPassHash exists), ONLY accept the new password and reject old default password
-    const isValidPass = localPassHash
-      ? verifyPasswordSync(trimmedPass, localPassHash)
+    // Client-side verification: if effectivePassHash exists, ONLY accept effectivePassHash; otherwise accept initial hash
+    const isValidPass = effectivePassHash
+      ? verifyPasswordSync(trimmedPass, effectivePassHash) ||
+        verifyPasswordSync(trimmedPass.replace(/\s+/g, ' '), effectivePassHash) ||
+        verifyPasswordSync(trimmedPass.replace(/\s+/g, ''), effectivePassHash)
       : verifyTeacherPasswordHash(trimmedPass);
 
     if (isValidUser && isValidPass) {
@@ -551,45 +584,53 @@ export const api = {
     const trimmedCurrent = String(currentPassword || '').trim();
     const trimmedNew = String(newPassword || '').trim();
     const localPassHash = localStorage.getItem('ncv_admin_password');
+    const cloudPassHash = await getTeacherPasswordFromFirestore();
+    const effectivePassHash = cloudPassHash || localPassHash;
 
-    // Verify current password locally first if custom password is set
-    const isCurrentValidLocal = localPassHash
-      ? verifyPasswordSync(trimmedCurrent, localPassHash)
+    // Strictly verify current password first: if password was already changed, old default password is NOT valid
+    const isCurrentValid = effectivePassHash
+      ? verifyPasswordSync(trimmedCurrent, effectivePassHash) ||
+        verifyPasswordSync(trimmedCurrent.replace(/\s+/g, ' '), effectivePassHash) ||
+        verifyPasswordSync(trimmedCurrent.replace(/\s+/g, ''), effectivePassHash)
       : verifyTeacherPasswordHash(trimmedCurrent);
 
-    let res: Response | null = null;
+    if (!isCurrentValid) {
+      throw new Error('Mật khẩu hiện tại của giáo viên không chính xác');
+    }
+
+    const hashedNew = hashPasswordSync(trimmedNew);
+
+    // 1. Save to localStorage immediately
     try {
-      res = await fetch('/api/auth/change-password', {
+      localStorage.setItem('ncv_admin_password', hashedNew);
+    } catch (e) {}
+
+    // 2. Save to Cloud Firestore so it permanently survives app updates, redeployments, and browser changes
+    await saveTeacherPasswordToFirestore(hashedNew);
+
+    // 3. Sync to backend server
+    let data: any = null;
+    try {
+      const res = await fetch('/api/auth/change-password', {
         method: 'POST',
         headers: getHeaders(true),
         body: JSON.stringify({
           currentPassword: trimmedCurrent,
           newPassword: trimmedNew,
-          adminPasswordHash: localPassHash || undefined,
+          adminPasswordHash: effectivePassHash || undefined,
+          newPasswordHash: hashedNew,
         }),
       });
+      if (res.ok) {
+        data = await res.json().catch(() => null);
+      }
     } catch {
       // Network/serverless fallback
     }
 
-    if (res && !res.ok && res.status === 400) {
-      const errData = await res.json().catch(() => null);
-      throw new Error(errData?.error || 'Mật khẩu hiện tại không chính xác');
-    }
-
-    if (!res?.ok && !isCurrentValidLocal) {
-      throw new Error('Mật khẩu hiện tại không chính xác');
-    }
-
-    const data = res && res.ok ? await res.json().catch(() => null) : null;
-    const hashedNew = data?.passwordHash || hashPasswordSync(trimmedNew);
-    try {
-      localStorage.setItem('ncv_admin_password', hashedNew);
-    } catch (e) {}
-
     return {
       success: true,
-      message: data?.message || 'Đã đổi mật khẩu Giáo viên thành công! Mật khẩu cũ đã bị vô hiệu hóa.',
+      message: data?.message || 'Đã đổi mật khẩu Giáo viên thành công! Mật khẩu cũ đã bị vô hiệu hóa hoàn toàn.',
     };
   },
 
@@ -1517,16 +1558,25 @@ export const api = {
       }
     });
 
-    // C. Local students are authoritative for classes that exist locally
+    // C. Local students are authoritative for classes that exist locally, while preserving any cloud password changes
     localStudents.forEach((s) => {
       if (s && s.id && s.name && s.class && !deletedStudentIdsSet.has(String(s.id).trim())) {
         const clsKey = s.class.trim().toUpperCase();
         const identKey = `${clsKey}:::${s.name.trim().toLowerCase()}`;
         const existingId = identityKeyMap.get(identKey);
+        const existingRecord = (existingId ? studentMap.get(existingId) : undefined) || studentMap.get(s.id);
         if (existingId && existingId !== s.id) {
           studentMap.delete(existingId);
         }
-        studentMap.set(s.id, { ...studentMap.get(s.id), ...s });
+        const mergedRecord: StudentInfo = {
+          ...existingRecord,
+          ...s,
+        };
+        if (existingRecord?.isPasswordChanged && !s.isPasswordChanged && existingRecord.password) {
+          mergedRecord.password = existingRecord.password;
+          mergedRecord.isPasswordChanged = true;
+        }
+        studentMap.set(s.id, mergedRecord);
         identityKeyMap.set(identKey, s.id);
       }
     });
@@ -1844,24 +1894,35 @@ export const api = {
       } catch (e) {}
     }
 
+    const resetTargets: StudentInfo[] = [];
     const updatedStudents = students.map((s) => {
       const isTarget = params.resetAll && params.className
         ? (s.class || '').trim().toLowerCase() === params.className.trim().toLowerCase()
         : s.id === params.studentId;
       if (isTarget) {
         const defaultPass = `${(s.class || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase()}123`;
-        if (s.username) {
-          try {
-            localStorage.removeItem(`ncv_student_pass_${s.username.toLowerCase()}`);
-          } catch (e) {}
-        }
-        return { ...s, password: defaultPass, isPasswordChanged: false };
+        try {
+          if (s.username) localStorage.removeItem(`ncv_student_pass_${s.username.toLowerCase()}`);
+          if (s.id) localStorage.removeItem(`ncv_student_pass_id_${s.id}`);
+          if (s.name && s.class) {
+            localStorage.removeItem(
+              `ncv_student_pass_name_${normalizeClassName(s.class)}_${normalizeStudentName(s.name)}`
+            );
+          }
+        } catch (e) {}
+        const resetSt = { ...s, password: defaultPass, isPasswordChanged: false };
+        resetTargets.push(resetSt);
+        return resetSt;
       }
       return s;
     });
 
     localStorage.setItem('ncv_students_data', JSON.stringify(updatedStudents));
-    saveStudentsToFirestore(updatedStudents).catch(() => {});
+    if (resetTargets.length > 0) {
+      await saveStudentsToFirestore(resetTargets).catch(() => {});
+    } else {
+      await saveStudentsToFirestore(updatedStudents).catch(() => {});
+    }
 
     try {
       const res = await fetch('/api/students/reset-password', {
@@ -1887,37 +1948,73 @@ export const api = {
 
   changeStudentPassword: async (params: {
     studentId?: string;
+    studentName?: string;
+    studentClass?: string;
+    sbd?: string;
     username?: string;
     currentPassword?: string;
     newPassword: string;
   }) => {
     const hashedNewPass = hashPasswordSync(params.newPassword.trim());
+    const normTargetName = normalizeStudentName(params.studentName);
+    const normTargetCls = normalizeClassName(params.studentClass);
+    const usernameLower = String(params.username || '').trim().toLowerCase();
 
-    const persistHashedPassLocallyAndCloud = () => {
-      if (params.username) {
-        try {
-          localStorage.setItem(`ncv_student_pass_${params.username.toLowerCase()}`, hashedNewPass);
-        } catch (e) {}
-      }
+    const persistHashedPassLocallyAndCloud = async () => {
+      try {
+        if (usernameLower) {
+          localStorage.setItem(`ncv_student_pass_${usernameLower}`, hashedNewPass);
+        }
+        if (params.studentId) {
+          localStorage.setItem(`ncv_student_pass_id_${params.studentId}`, hashedNewPass);
+        }
+        if (normTargetCls && normTargetName) {
+          localStorage.setItem(`ncv_student_pass_name_${normTargetCls}_${normTargetName}`, hashedNewPass);
+        }
+      } catch (e) {}
+
       try {
         const cached = localStorage.getItem('ncv_students_data');
-        if (cached) {
-          const all: StudentInfo[] = JSON.parse(cached) || [];
-          let updatedStudent: StudentInfo | null = null;
-          const nextAll = all.map((s) => {
-            if (
-              (params.studentId && s.id === params.studentId) ||
-              (params.username && s.username && s.username.toLowerCase() === params.username.trim().toLowerCase())
-            ) {
-              updatedStudent = { ...s, password: hashedNewPass, isPasswordChanged: true };
-              return updatedStudent;
-            }
-            return s;
-          });
-          if (updatedStudent) {
-            localStorage.setItem('ncv_students_data', JSON.stringify(nextAll));
-            saveStudentsToFirestore([updatedStudent]).catch(() => {});
+        const all: StudentInfo[] = cached ? JSON.parse(cached) || [] : [];
+        let updatedStudent: StudentInfo | null = null;
+        const nextAll = all.map((s) => {
+          const idMatches = Boolean(params.studentId && s.id === params.studentId);
+          const userMatches = Boolean(usernameLower && s.username && s.username.toLowerCase() === usernameLower);
+          const nameClsMatches = Boolean(
+            normTargetName &&
+              normTargetCls &&
+              normalizeStudentName(s.name) === normTargetName &&
+              normalizeClassName(s.class) === normTargetCls
+          );
+          if (idMatches || userMatches || nameClsMatches) {
+            updatedStudent = {
+              ...s,
+              username: s.username || params.username,
+              password: hashedNewPass,
+              isPasswordChanged: true,
+            };
+            return updatedStudent;
           }
+          return s;
+        });
+
+        if (!updatedStudent && (params.studentId || (params.studentName && params.studentClass))) {
+          const createdSt: StudentInfo = {
+            id: params.studentId || `st-${normTargetCls}-${Date.now()}`,
+            name: String(params.studentName || '').trim(),
+            class: String(params.studentClass || '').trim(),
+            sbd: params.sbd ? String(params.sbd).trim() : '',
+            username: params.username ? String(params.username).trim() : undefined,
+            password: hashedNewPass,
+            isPasswordChanged: true,
+          };
+          updatedStudent = createdSt;
+          nextAll.push(createdSt);
+        }
+
+        if (updatedStudent) {
+          localStorage.setItem('ncv_students_data', JSON.stringify(nextAll));
+          await saveStudentsToFirestore([updatedStudent]).catch(() => {});
         }
       } catch (e) {}
     };
@@ -1927,11 +2024,14 @@ export const api = {
       res = await fetch('/api/students/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({
+          ...params,
+          newPasswordHash: hashedNewPass,
+        }),
       });
       if (res.ok) {
         const data = await res.json();
-        persistHashedPassLocallyAndCloud();
+        await persistHashedPassLocallyAndCloud();
         return data;
       }
       if (res.status === 400) {
@@ -1945,7 +2045,7 @@ export const api = {
       // ignore network error
     }
 
-    persistHashedPassLocallyAndCloud();
+    await persistHashedPassLocallyAndCloud();
 
     return {
       success: true,
@@ -1956,6 +2056,7 @@ export const api = {
   // Student Examination API
   validateStudentEntry: async (params: {
     examCode: string;
+    studentId?: string;
     studentName?: string;
     studentClass?: string;
     sbd?: string;
@@ -1969,42 +2070,91 @@ export const api = {
     });
     const realExamSnapshot = history.exam ? sealExamQuestions(history.exam) : null;
 
-    // Look up student's current password status in localStorage / synced roster
+    // Look up student's current password status across localStorage AND Cloud Firestore
     const inputPass = String(params.password || '').trim();
     const studentClassNorm = String(params.studentClass || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     const defaultPass = `${studentClassNorm}123`;
     const usernameLower = String(params.username || '').trim().toLowerCase();
-    const storedCustomPass = usernameLower ? localStorage.getItem(`ncv_student_pass_${usernameLower}`) : null;
+    const normName = normalizeStudentName(params.studentName);
+    const normCls = normalizeClassName(params.studentClass);
+
+    const storedCustomPass =
+      (usernameLower ? localStorage.getItem(`ncv_student_pass_${usernameLower}`) : null) ||
+      (params.studentId ? localStorage.getItem(`ncv_student_pass_id_${params.studentId}`) : null) ||
+      (normCls && normName ? localStorage.getItem(`ncv_student_pass_name_${normCls}_${normName}`) : null);
 
     let rosterStoredPass: string | undefined;
     let rosterPassChanged = false;
+
+    const inspectStudentRecord = (s?: StudentInfo | null) => {
+      if (!s) return;
+      const isDefaultHash =
+        s.password &&
+        (s.password.toLowerCase() === defaultPass.toLowerCase() ||
+          verifyPasswordSync(defaultPass, s.password) ||
+          verifyPasswordSync(defaultPass.toLowerCase(), s.password));
+      if (s.isPasswordChanged && s.password && !isDefaultHash) {
+        rosterStoredPass = s.password;
+        rosterPassChanged = true;
+      } else if (!rosterStoredPass && s.password) {
+        rosterStoredPass = s.password;
+      }
+    };
+
     try {
-      const cachedSt = localStorage.getItem('ncv_students_data');
-      if (cachedSt) {
-        const list: StudentInfo[] = JSON.parse(cachedSt) || [];
-        const normName = normalizeStudentName(params.studentName);
-        const normCls = normalizeClassName(params.studentClass);
-        const foundSt = list.find(
-          (s) =>
+      // 1. Check fresh Firestore student record so password changes persist across app updates & devices
+      if (params.studentClass) {
+        const fbList = await getStudentsFromFirestore(params.studentClass, true);
+        const fbFound = fbList.find(
+          (s: any) =>
+            (params.studentId && s.id === params.studentId) ||
             (usernameLower && s.username && s.username.toLowerCase() === usernameLower) ||
             (normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls)
         );
-        if (foundSt) {
-          if (foundSt.password) rosterStoredPass = foundSt.password;
-          if (
-            foundSt.isPasswordChanged ||
-            (foundSt.password &&
-              foundSt.password.toLowerCase() !== defaultPass.toLowerCase() &&
-              foundSt.password.startsWith('ncv_pw$'))
-          ) {
-            rosterPassChanged = true;
-          }
-        }
+        inspectStudentRecord(fbFound);
+      }
+    } catch (e) {}
+
+    try {
+      // 2. Also check localStorage student roster
+      const cachedSt = localStorage.getItem('ncv_students_data');
+      if (cachedSt) {
+        const list: StudentInfo[] = JSON.parse(cachedSt) || [];
+        const localFound = list.find(
+          (s) =>
+            (params.studentId && s.id === params.studentId) ||
+            (usernameLower && s.username && s.username.toLowerCase() === usernameLower) ||
+            (normName && normCls && normalizeStudentName(s.name) === normName && normalizeClassName(s.class) === normCls)
+        );
+        inspectStudentRecord(localFound);
       }
     } catch (e) {}
 
     const effectiveCustomPassHash = storedCustomPass || (rosterPassChanged ? rosterStoredPass : undefined);
     const isStudentPasswordChanged = Boolean(storedCustomPass || rosterPassChanged);
+
+    // CRITICAL GATE: Verify student password BEFORE calling server so old default password in server seed data can NEVER bypass a changed password
+    if (isStudentPasswordChanged && effectiveCustomPassHash) {
+      const matchesCustom =
+        (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||
+        (rosterStoredPass && rosterPassChanged && verifyPasswordSync(inputPass, rosterStoredPass));
+      if (!matchesCustom) {
+        throw new Error(
+          `Mật khẩu đăng nhập không chính xác! Tài khoản của em đã đổi sang mật khẩu riêng (mật khẩu mặc định ${defaultPass} không còn hiệu lực). Nếu quên mật khẩu mới, em hãy nhờ thầy Lê Gia Lợi bấm Reset mật khẩu nhé!`
+        );
+      }
+    } else {
+      const inputPassNoSpace = inputPass.replace(/\s+/g, '').toLowerCase();
+      const defaultPassNoSpace = defaultPass.toLowerCase();
+      const matchesDefault =
+        inputPassNoSpace === defaultPassNoSpace ||
+        Boolean(rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass));
+      if (!matchesDefault) {
+        throw new Error(
+          `Mật khẩu đăng nhập không chính xác! Mật khẩu mặc định là tên lớp thêm 123 (Ví dụ: ${defaultPass}). Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!`
+        );
+      }
+    }
 
     let res: Response | null = null;
     try {
@@ -2023,18 +2173,6 @@ export const api = {
       });
 
       if (res.ok) {
-        // Also enforce locally if student has changed password on this client/cloud
-        if (isStudentPasswordChanged && effectiveCustomPassHash) {
-          const matchesCustom =
-            (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||
-            (rosterStoredPass && verifyPasswordSync(inputPass, rosterStoredPass));
-          if (!matchesCustom) {
-            throw new Error(
-              'Mật khẩu đăng nhập không chính xác! Em đã đổi mật khẩu riêng nên mật khẩu mặc định cũ không còn hiệu lực. Nếu quên mật khẩu, em hãy nhờ thầy Lê Gia Lợi cấp lại nhé!'
-            );
-          }
-        }
-
         const serverData: any = await safeJson(res, 'Không thể xác thực thông tin vào thi');
         const effectiveMaxAttempts = Math.max(
           1,
@@ -2066,6 +2204,12 @@ export const api = {
 
         return {
           ...serverData,
+          student: {
+            ...serverData?.student,
+            id: params.studentId || serverData?.student?.id,
+            username: params.username || serverData?.student?.username,
+            isPasswordChanged: isStudentPasswordChanged || Boolean(serverData?.student?.isPasswordChanged),
+          },
           exam: {
             ...serverData?.exam,
             maxAttempts: effectiveMaxAttempts,
@@ -2113,7 +2257,6 @@ export const api = {
     const inputPassNoSpace = inputPass.replace(/\s+/g, '').toLowerCase();
     const defaultPassNoSpace = defaultPass.toLowerCase();
 
-    // CRITICAL: If student has changed their password, strictly verify against new password ONLY and reject old default password
     const isPassValid = isStudentPasswordChanged
       ? Boolean(
           (storedCustomPass && verifyPasswordSync(inputPass, storedCustomPass)) ||

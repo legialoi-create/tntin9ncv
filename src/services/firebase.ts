@@ -6,6 +6,7 @@ import {
   collection,
   doc,
   setDoc,
+  getDoc,
   getDocs,
   deleteDoc,
   query,
@@ -921,3 +922,45 @@ export async function unmarkDeletedClassInFirestore(className: string): Promise<
     console.warn('[Firebase] unmarkDeletedClassInFirestore error:', err);
   }
 }
+
+// 19. Save Teacher (Admin) changed password hash to Firestore so it persists permanently across app updates and redeployments
+export async function saveTeacherPasswordToFirestore(passwordHash: string): Promise<boolean> {
+  if (!passwordHash) return false;
+  try {
+    await setDoc(
+      doc(firestore, 'classes', '__teacher_admin_auth__'),
+      {
+        role: 'teacher_admin',
+        passwordHash: String(passwordHash).trim(),
+        isPasswordChanged: true,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    return true;
+  } catch (err) {
+    console.warn('[Firebase] saveTeacherPasswordToFirestore error:', err);
+    return false;
+  }
+}
+
+// 20. Get Teacher (Admin) changed password hash from Firestore
+export async function getTeacherPasswordFromFirestore(): Promise<string | null> {
+  try {
+    const snap = await getDoc(doc(firestore, 'classes', '__teacher_admin_auth__'));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data && data.isPasswordChanged && data.passwordHash) {
+        const hash = String(data.passwordHash).trim();
+        try {
+          localStorage.setItem('ncv_admin_password', hash);
+        } catch (e) {}
+        return hash;
+      }
+    }
+  } catch (err) {
+    console.warn('[Firebase] getTeacherPasswordFromFirestore error:', err);
+  }
+  return null;
+}
+
