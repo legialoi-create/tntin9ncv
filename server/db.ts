@@ -7,6 +7,7 @@ import {
   hashPasswordSync,
   verifyPasswordSync,
   isHashedPassword,
+  isCorruptedPasswordHash,
   normalizeStudentName,
   normalizeClassName,
   sealExamQuestions,
@@ -40,12 +41,12 @@ export function hashPassword(plainText: string): string {
 }
 
 export function verifyPassword(inputPassword: string, storedPasswordOrHash: string): boolean {
-  if (!storedPasswordOrHash || !inputPassword) return false;
+  if (!storedPasswordOrHash || !inputPassword || isCorruptedPasswordHash(storedPasswordOrHash)) return false;
   const trimmedInput = inputPassword.trim();
   const collapsedInput = trimmedInput.replace(/\s+/g, ' ');
   const noSpaceInput = trimmedInput.replace(/\s+/g, '');
 
-  if (storedPasswordOrHash.startsWith('ncv_pw$v2$')) {
+  if (storedPasswordOrHash.startsWith('ncv_pw$v3$') || storedPasswordOrHash.startsWith('ncv_pw$v2$')) {
     return (
       verifyPasswordSync(trimmedInput, storedPasswordOrHash) ||
       verifyPasswordSync(collapsedInput, storedPasswordOrHash) ||
@@ -404,11 +405,12 @@ class DatabaseManager {
             if (st && st.id) {
               const clsUpper = (st.class || '').trim().toUpperCase();
               if (!deletedStudentIdsSet.has(st.id) && !deletedClassNamesSet.has(clsUpper)) {
+                const corruptedPass = isCorruptedPasswordHash(st.password);
                 studentMap.set(st.id, {
                   ...st,
                   username: st.username || generateStudentUsername(st.name, st.class),
-                  password: st.password || getDefaultStudentPassword(st.class),
-                  isPasswordChanged: !!st.isPasswordChanged
+                  password: (!corruptedPass && st.password) ? st.password : getDefaultStudentPassword(st.class),
+                  isPasswordChanged: corruptedPass ? false : !!st.isPasswordChanged
                 });
               }
             }
@@ -429,9 +431,20 @@ class DatabaseManager {
         deletedStudentIds: Array.from(deletedStudentIdsSet),
         adminToken: parsedList.find(p => p.adminToken)?.adminToken || 'legialoi-ncv-session-secret',
         adminPassword:
-          parsedList.find(p => p.adminPassword && isHashedPassword(p.adminPassword) && !verifyPassword('101   101!@#', p.adminPassword))?.adminPassword ||
-          parsedList.find(p => p.adminPassword && p.adminPassword !== '101   101!@#')?.adminPassword ||
-          parsedList.find(p => p.adminPassword)?.adminPassword ||
+          parsedList.find(
+            p =>
+              p.adminPassword &&
+              !isCorruptedPasswordHash(p.adminPassword) &&
+              isHashedPassword(p.adminPassword) &&
+              !verifyPassword('101   101!@#', p.adminPassword)
+          )?.adminPassword ||
+          parsedList.find(
+            p =>
+              p.adminPassword &&
+              !isCorruptedPasswordHash(p.adminPassword) &&
+              p.adminPassword !== '101   101!@#'
+          )?.adminPassword ||
+          parsedList.find(p => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword))?.adminPassword ||
           '101   101!@#'
       };
 
@@ -891,13 +904,14 @@ class DatabaseManager {
     const storedAdminPass = this.data.adminPassword;
     const isCustomAdminPassword =
       Boolean(storedAdminPass) &&
+      !isCorruptedPasswordHash(storedAdminPass) &&
       storedAdminPass !== '101   101!@#' &&
       !verifyPassword('101   101!@#', storedAdminPass!) &&
       !verifyPassword('GiaLoi@2026', storedAdminPass!);
 
     if (isCustomAdminPassword) {
       // Strictly verify against the custom hashed password ONLY! Old default passwords must NOT work!
-      return verifyPassword(cleanInput, currentPass);
+      return verifyPassword(cleanInput, storedAdminPass!);
     }
 
     // 1. Direct verify (hashed PBKDF2 or exact string)

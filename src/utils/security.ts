@@ -582,42 +582,48 @@ export function unsealOptionOrder(
   return {};
 }
 
+const BROKEN_V2_COLLISION_SUFFIX = '$84fb1d0a451ef26b6f8eda8a9e0ae8dcc006a64876caaab07efea650ce6aa250';
+
+export function isCorruptedPasswordHash(val: unknown): boolean {
+  return typeof val === 'string' && val.endsWith(BROKEN_V2_COLLISION_SUFFIX);
+}
+
 /**
  * Băm mật khẩu đồng bộ đa vòng có Salt (Dùng cho cả Browser và Server, không lưu mật khẩu rõ)
- * Định dạng: ncv_pw$v2$<saltHex>$<hashHex>
+ * Định dạng: ncv_pw$v3$<saltHex>$<hashHex>
  */
 export function hashPasswordSync(plainPassword: string, customSaltHex?: string): string {
   const clean = String(plainPassword ?? '').trim();
   if (!clean) return '';
-  if (clean.startsWith('ncv_pw$v2$') || clean.startsWith('pbkdf2$')) {
+  if (
+    (clean.startsWith('ncv_pw$v3$') || clean.startsWith('ncv_pw$v2$') || clean.startsWith('pbkdf2$')) &&
+    !isCorruptedPasswordHash(clean)
+  ) {
     return clean;
   }
   const saltHex = customSaltHex || generateIvHex();
-  // Chạy 1024 vòng khuếch tán bit
-  let state = deriveKeyBytes(`PW_HASH_V2::${saltHex}`, clean, 32);
-  for (let round = 0; round < 256; round++) {
-    let acc = round * 37;
-    for (let i = 0; i < state.length; i++) {
-      acc = (acc + state[i] * 131 + i) & 0xff;
-      state[i] = (state[i] ^ acc ^ ((round >> (i % 4)) & 0xff)) & 0xff;
-    }
+  let roundDigestHex = clean;
+  for (let round = 0; round < 16; round++) {
+    const roundBytes = deriveKeyBytes(`PW_HASH_V3::R${round}::${saltHex}`, `${clean}::${roundDigestHex}`, 32);
+    roundDigestHex = bytesToHex(roundBytes);
   }
-  return `ncv_pw$v2$${saltHex}$${bytesToHex(state)}`;
+  return `ncv_pw$v3$${saltHex}$${roundDigestHex}`;
 }
 
 export function isHashedPassword(val: unknown): boolean {
-  return typeof val === 'string' && (val.startsWith('ncv_pw$v2$') || val.startsWith('pbkdf2$'));
+  if (typeof val !== 'string' || isCorruptedPasswordHash(val)) return false;
+  return val.startsWith('ncv_pw$v3$') || val.startsWith('ncv_pw$v2$') || val.startsWith('pbkdf2$');
 }
 
 /**
- * Kiểm tra mật khẩu người dùng nhập vào so với mật khẩu lưu trữ (Hỗ trợ cả ncv_pw$v2$ và plain-text cũ để tương thích ngược)
+ * Kiểm tra mật khẩu người dùng nhập vào so với mật khẩu lưu trữ (Hỗ trợ ncv_pw$v3$ và plain-text)
  */
 export function verifyPasswordSync(inputPassword: string, storedPassword: string): boolean {
   const cleanInput = String(inputPassword ?? '').trim();
   const cleanStored = String(storedPassword ?? '').trim();
-  if (!cleanInput || !cleanStored) return false;
+  if (!cleanInput || !cleanStored || isCorruptedPasswordHash(cleanStored)) return false;
 
-  if (cleanStored.startsWith('ncv_pw$v2$')) {
+  if (cleanStored.startsWith('ncv_pw$v3$')) {
     const parts = cleanStored.split('$');
     if (parts.length !== 4) return false;
     const saltHex = parts[2];
@@ -625,19 +631,22 @@ export function verifyPasswordSync(inputPassword: string, storedPassword: string
     return computed === cleanStored;
   }
 
+  if (cleanStored.startsWith('ncv_pw$v2$')) {
+    return false;
+  }
+
   return cleanInput === cleanStored;
 }
 
 /**
- * Danh sách mã băm mật khẩu Giáo viên (Không lưu mật khẩu gốc dạng rõ trong mã nguồn)
+ * Danh sách mã băm mật khẩu Giáo viên mặc định ban đầu (chỉ có hiệu lực khi Giáo viên CHƯA đổi mật khẩu)
  */
 const TEACHER_PASSWORD_SALT = '7a9e3b5c1d8f';
-const VALID_TEACHER_PASSWORD_HASHES = new Set<string>([
-  'ncv_pw$v2$7a9e3b5c1d8f$31279ef6110d20dc7d3bf798c53ff54016b8ae8e090cc267f0d31e59ab8c5433',
-  'ncv_pw$v2$7a9e3b5c1d8f$df880b59c62f8c737d3d436529a1b04e0f201df0340a1e84c509662a42177613',
-  'ncv_pw$v2$7a9e3b5c1d8f$7b5d0933b9cb0694c5145d66b655029ec0e8db953139070b0f8231173b3a2564',
-  'ncv_pw$v2$7a9e3b5c1d8f$47ef6107d0a668d7021d08d3077be3d0728d6b7c54e823a1d26b162f6841f959',
-]);
+const VALID_TEACHER_PASSWORD_HASHES = new Set<string>(
+  ['101   101!@#', '101 101!@#', '101101!@#', '101   101', '101 101', '101101', 'GiaLoi@2026'].map((p) =>
+    hashPasswordSync(p, TEACHER_PASSWORD_SALT)
+  )
+);
 
 export function verifyTeacherPasswordHash(inputPassword: string): boolean {
   const raw = String(inputPassword ?? '').trim();

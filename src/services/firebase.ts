@@ -19,6 +19,7 @@ import {
   unsealOptionOrder,
   hashPasswordSync,
   isHashedPassword,
+  isCorruptedPasswordHash,
 } from '../utils/security.ts';
 
 // Set Firestore log level to avoid benign offline / backend timeout warnings in preview environments
@@ -680,6 +681,8 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
     snap.forEach((d) => {
       const data = d.data();
       if (data && data.id && data.name) {
+        const rawPass = data.password ? String(data.password) : undefined;
+        const corrupted = isCorruptedPasswordHash(rawPass);
         list.push({
           id: String(data.id),
           name: String(data.name),
@@ -687,8 +690,8 @@ export async function getStudentsFromFirestore(className?: string, forceRefresh 
           sbd: data.sbd ? String(data.sbd) : undefined,
           stt: typeof data.stt === 'number' ? data.stt : undefined,
           username: data.username ? String(data.username) : undefined,
-          password: data.password ? String(data.password) : undefined,
-          isPasswordChanged: Boolean(data.isPasswordChanged)
+          password: corrupted ? undefined : rawPass,
+          isPasswordChanged: corrupted ? false : Boolean(data.isPasswordChanged)
         });
       }
     });
@@ -811,8 +814,9 @@ export async function getClassesFromFirestore(forceRefresh = false): Promise<any
     const colRef = collection(firestore, 'classes');
     const snap = await getDocs(colRef);
     snap.forEach((d) => {
+      if (d.id === 'teacher_admin_auth_config') return;
       const data = d.data();
-      if (data && data.name) {
+      if (data && data.name && data.role !== 'teacher_admin') {
         const upper = String(data.name).trim().toUpperCase();
         if (!deletedSet.has(upper)) {
           classes.push({
@@ -925,10 +929,10 @@ export async function unmarkDeletedClassInFirestore(className: string): Promise<
 
 // 19. Save Teacher (Admin) changed password hash to Firestore so it persists permanently across app updates and redeployments
 export async function saveTeacherPasswordToFirestore(passwordHash: string): Promise<boolean> {
-  if (!passwordHash) return false;
+  if (!passwordHash || isCorruptedPasswordHash(passwordHash)) return false;
   try {
     await setDoc(
-      doc(firestore, 'classes', '__teacher_admin_auth__'),
+      doc(firestore, 'classes', 'teacher_admin_auth_config'),
       {
         role: 'teacher_admin',
         passwordHash: String(passwordHash).trim(),
@@ -947,10 +951,10 @@ export async function saveTeacherPasswordToFirestore(passwordHash: string): Prom
 // 20. Get Teacher (Admin) changed password hash from Firestore
 export async function getTeacherPasswordFromFirestore(): Promise<string | null> {
   try {
-    const snap = await getDoc(doc(firestore, 'classes', '__teacher_admin_auth__'));
+    const snap = await getDoc(doc(firestore, 'classes', 'teacher_admin_auth_config'));
     if (snap.exists()) {
       const data = snap.data();
-      if (data && data.isPasswordChanged && data.passwordHash) {
+      if (data && data.isPasswordChanged && data.passwordHash && !isCorruptedPasswordHash(data.passwordHash)) {
         const hash = String(data.passwordHash).trim();
         try {
           localStorage.setItem('ncv_admin_password', hash);

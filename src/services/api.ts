@@ -44,6 +44,7 @@ import {
   verifyPasswordSync,
   verifyTeacherPasswordHash,
   isHashedPassword,
+  isCorruptedPasswordHash,
   normalizeStudentName,
   normalizeClassName,
   getStudentRawAnswer,
@@ -454,7 +455,14 @@ export const api = {
     }
 
     // 1. Check Cloud Firestore & localStorage for custom changed Teacher password
-    const localPassHash = localStorage.getItem('ncv_admin_password');
+    const rawLocalPassHash = localStorage.getItem('ncv_admin_password');
+    if (rawLocalPassHash && isCorruptedPasswordHash(rawLocalPassHash)) {
+      try {
+        localStorage.removeItem('ncv_admin_password');
+      } catch (e) {}
+    }
+    const localPassHash =
+      rawLocalPassHash && !isCorruptedPasswordHash(rawLocalPassHash) ? rawLocalPassHash : null;
     const cloudPassHash = await getTeacherPasswordFromFirestore();
 
     if (localPassHash && !cloudPassHash) {
@@ -465,7 +473,7 @@ export const api = {
     const effectivePassHash = cloudPassHash || localPassHash;
 
     // CRITICAL: If Teacher has changed their password, strictly verify against the new password FIRST
-    // and IMMEDIATELY REJECT the initial password in the code!
+    // and IMMEDIATELY REJECT any old/initial password!
     if (effectivePassHash) {
       const matchesCustom =
         verifyPasswordSync(trimmedPass, effectivePassHash) ||
@@ -474,7 +482,7 @@ export const api = {
 
       if (!matchesCustom) {
         throw new Error(
-          'Mật khẩu Giáo viên không chính xác! Mật khẩu ban đầu đã bị vô hiệu hóa sau khi đổi mật khẩu.'
+          'Mật khẩu Giáo viên không chính xác! Mật khẩu cũ đã bị xóa và không còn hiệu lực.'
         );
       }
     }
@@ -497,7 +505,7 @@ export const api = {
     if (res && res.ok) {
       const data = await res.json();
       if (data && data.token) {
-        if (data.passwordHash && !effectivePassHash) {
+        if (data.passwordHash && !isCorruptedPasswordHash(data.passwordHash) && !effectivePassHash) {
           try {
             localStorage.setItem('ncv_admin_password', data.passwordHash);
           } catch (e) {}
@@ -583,7 +591,14 @@ export const api = {
   changeTeacherPassword: async (currentPassword: string, newPassword: string) => {
     const trimmedCurrent = String(currentPassword || '').trim();
     const trimmedNew = String(newPassword || '').trim();
-    const localPassHash = localStorage.getItem('ncv_admin_password');
+    const rawLocalPassHash = localStorage.getItem('ncv_admin_password');
+    if (rawLocalPassHash && isCorruptedPasswordHash(rawLocalPassHash)) {
+      try {
+        localStorage.removeItem('ncv_admin_password');
+      } catch (e) {}
+    }
+    const localPassHash =
+      rawLocalPassHash && !isCorruptedPasswordHash(rawLocalPassHash) ? rawLocalPassHash : null;
     const cloudPassHash = await getTeacherPasswordFromFirestore();
     const effectivePassHash = cloudPassHash || localPassHash;
 
@@ -2078,16 +2093,27 @@ export const api = {
     const normName = normalizeStudentName(params.studentName);
     const normCls = normalizeClassName(params.studentClass);
 
-    const storedCustomPass =
+    const rawStoredCustomPass =
       (usernameLower ? localStorage.getItem(`ncv_student_pass_${usernameLower}`) : null) ||
       (params.studentId ? localStorage.getItem(`ncv_student_pass_id_${params.studentId}`) : null) ||
       (normCls && normName ? localStorage.getItem(`ncv_student_pass_name_${normCls}_${normName}`) : null);
+
+    if (rawStoredCustomPass && isCorruptedPasswordHash(rawStoredCustomPass)) {
+      try {
+        if (usernameLower) localStorage.removeItem(`ncv_student_pass_${usernameLower}`);
+        if (params.studentId) localStorage.removeItem(`ncv_student_pass_id_${params.studentId}`);
+        if (normCls && normName) localStorage.removeItem(`ncv_student_pass_name_${normCls}_${normName}`);
+      } catch (e) {}
+    }
+
+    const storedCustomPass =
+      rawStoredCustomPass && !isCorruptedPasswordHash(rawStoredCustomPass) ? rawStoredCustomPass : null;
 
     let rosterStoredPass: string | undefined;
     let rosterPassChanged = false;
 
     const inspectStudentRecord = (s?: StudentInfo | null) => {
-      if (!s) return;
+      if (!s || isCorruptedPasswordHash(s.password)) return;
       const isDefaultHash =
         s.password &&
         (s.password.toLowerCase() === defaultPass.toLowerCase() ||

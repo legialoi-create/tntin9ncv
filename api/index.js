@@ -700,39 +700,50 @@ function unsealOptionOrder(sealedOrRaw, sessionId) {
   }
   return {};
 }
+var BROKEN_V2_COLLISION_SUFFIX = "$84fb1d0a451ef26b6f8eda8a9e0ae8dcc006a64876caaab07efea650ce6aa250";
+function isCorruptedPasswordHash(val) {
+  return typeof val === "string" && val.endsWith(BROKEN_V2_COLLISION_SUFFIX);
+}
 function hashPasswordSync(plainPassword, customSaltHex) {
   const clean = String(plainPassword ?? "").trim();
   if (!clean) return "";
-  if (clean.startsWith("ncv_pw$v2$") || clean.startsWith("pbkdf2$")) {
+  if ((clean.startsWith("ncv_pw$v3$") || clean.startsWith("ncv_pw$v2$") || clean.startsWith("pbkdf2$")) && !isCorruptedPasswordHash(clean)) {
     return clean;
   }
   const saltHex = customSaltHex || generateIvHex();
-  let state = deriveKeyBytes(`PW_HASH_V2::${saltHex}`, clean, 32);
-  for (let round = 0; round < 256; round++) {
-    let acc = round * 37;
-    for (let i = 0; i < state.length; i++) {
-      acc = acc + state[i] * 131 + i & 255;
-      state[i] = (state[i] ^ acc ^ round >> i % 4 & 255) & 255;
-    }
+  let roundDigestHex = clean;
+  for (let round = 0; round < 16; round++) {
+    const roundBytes = deriveKeyBytes(`PW_HASH_V3::R${round}::${saltHex}`, `${clean}::${roundDigestHex}`, 32);
+    roundDigestHex = bytesToHex(roundBytes);
   }
-  return `ncv_pw$v2$${saltHex}$${bytesToHex(state)}`;
+  return `ncv_pw$v3$${saltHex}$${roundDigestHex}`;
 }
 function isHashedPassword(val) {
-  return typeof val === "string" && (val.startsWith("ncv_pw$v2$") || val.startsWith("pbkdf2$"));
+  if (typeof val !== "string" || isCorruptedPasswordHash(val)) return false;
+  return val.startsWith("ncv_pw$v3$") || val.startsWith("ncv_pw$v2$") || val.startsWith("pbkdf2$");
 }
 function verifyPasswordSync(inputPassword, storedPassword) {
   const cleanInput = String(inputPassword ?? "").trim();
   const cleanStored = String(storedPassword ?? "").trim();
-  if (!cleanInput || !cleanStored) return false;
-  if (cleanStored.startsWith("ncv_pw$v2$")) {
+  if (!cleanInput || !cleanStored || isCorruptedPasswordHash(cleanStored)) return false;
+  if (cleanStored.startsWith("ncv_pw$v3$")) {
     const parts = cleanStored.split("$");
     if (parts.length !== 4) return false;
     const saltHex = parts[2];
     const computed = hashPasswordSync(cleanInput, saltHex);
     return computed === cleanStored;
   }
+  if (cleanStored.startsWith("ncv_pw$v2$")) {
+    return false;
+  }
   return cleanInput === cleanStored;
 }
+var TEACHER_PASSWORD_SALT = "7a9e3b5c1d8f";
+var VALID_TEACHER_PASSWORD_HASHES = new Set(
+  ["101   101!@#", "101 101!@#", "101101!@#", "101   101", "101 101", "101101", "GiaLoi@2026"].map(
+    (p) => hashPasswordSync(p, TEACHER_PASSWORD_SALT)
+  )
+);
 function getStudentRawAnswer(answers, questionId) {
   if (!answers || !questionId) return "";
   if (answers[questionId] !== void 0 && answers[questionId] !== null) {
@@ -756,11 +767,11 @@ function hashPassword(plainText) {
   return hashPasswordSync(plainText.trim());
 }
 function verifyPassword(inputPassword, storedPasswordOrHash) {
-  if (!storedPasswordOrHash || !inputPassword) return false;
+  if (!storedPasswordOrHash || !inputPassword || isCorruptedPasswordHash(storedPasswordOrHash)) return false;
   const trimmedInput = inputPassword.trim();
   const collapsedInput = trimmedInput.replace(/\s+/g, " ");
   const noSpaceInput = trimmedInput.replace(/\s+/g, "");
-  if (storedPasswordOrHash.startsWith("ncv_pw$v2$")) {
+  if (storedPasswordOrHash.startsWith("ncv_pw$v3$") || storedPasswordOrHash.startsWith("ncv_pw$v2$")) {
     return verifyPasswordSync(trimmedInput, storedPasswordOrHash) || verifyPasswordSync(collapsedInput, storedPasswordOrHash) || verifyPasswordSync(noSpaceInput, storedPasswordOrHash);
   }
   if (storedPasswordOrHash.startsWith("pbkdf2$")) {
@@ -1043,11 +1054,12 @@ var DatabaseManager = class {
             if (st && st.id) {
               const clsUpper = (st.class || "").trim().toUpperCase();
               if (!deletedStudentIdsSet.has(st.id) && !deletedClassNamesSet.has(clsUpper)) {
+                const corruptedPass = isCorruptedPasswordHash(st.password);
                 studentMap.set(st.id, {
                   ...st,
                   username: st.username || generateStudentUsername(st.name, st.class),
-                  password: st.password || getDefaultStudentPassword(st.class),
-                  isPasswordChanged: !!st.isPasswordChanged
+                  password: !corruptedPass && st.password ? st.password : getDefaultStudentPassword(st.class),
+                  isPasswordChanged: corruptedPass ? false : !!st.isPasswordChanged
                 });
               }
             }
@@ -1064,7 +1076,11 @@ var DatabaseManager = class {
         deletedClassNames: Array.from(deletedClassNamesSet),
         deletedStudentIds: Array.from(deletedStudentIdsSet),
         adminToken: parsedList.find((p) => p.adminToken)?.adminToken || "legialoi-ncv-session-secret",
-        adminPassword: parsedList.find((p) => p.adminPassword && isHashedPassword(p.adminPassword) && !verifyPassword("101   101!@#", p.adminPassword))?.adminPassword || parsedList.find((p) => p.adminPassword && p.adminPassword !== "101   101!@#")?.adminPassword || parsedList.find((p) => p.adminPassword)?.adminPassword || "101   101!@#"
+        adminPassword: parsedList.find(
+          (p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && isHashedPassword(p.adminPassword) && !verifyPassword("101   101!@#", p.adminPassword)
+        )?.adminPassword || parsedList.find(
+          (p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword) && p.adminPassword !== "101   101!@#"
+        )?.adminPassword || parsedList.find((p) => p.adminPassword && !isCorruptedPasswordHash(p.adminPassword))?.adminPassword || "101   101!@#"
       };
       this.saveData(mergedData);
       return mergedData;
@@ -1452,9 +1468,9 @@ var DatabaseManager = class {
     const cleanInput = inputPass.trim();
     const currentPass = this.getAdminPassword();
     const storedAdminPass = this.data.adminPassword;
-    const isCustomAdminPassword = Boolean(storedAdminPass) && storedAdminPass !== "101   101!@#" && !verifyPassword("101   101!@#", storedAdminPass) && !verifyPassword("GiaLoi@2026", storedAdminPass);
+    const isCustomAdminPassword = Boolean(storedAdminPass) && !isCorruptedPasswordHash(storedAdminPass) && storedAdminPass !== "101   101!@#" && !verifyPassword("101   101!@#", storedAdminPass) && !verifyPassword("GiaLoi@2026", storedAdminPass);
     if (isCustomAdminPassword) {
-      return verifyPassword(cleanInput, currentPass);
+      return verifyPassword(cleanInput, storedAdminPass);
     }
     if (verifyPassword(cleanInput, currentPass)) {
       return true;
@@ -2398,17 +2414,17 @@ app.post("/api/auth/login", (req, res) => {
   const teacherUserLower = (TEACHER_USERNAME || "legialoi").toLowerCase();
   const teacherEmailLower = (TEACHER_EMAIL || "legialoi@gmail.com").toLowerCase();
   const isValidUser = trimmedUser === teacherUserLower || trimmedUser === teacherEmailLower || trimmedUser === "legialoi" || trimmedUser === "legialoi@gmail.com" || trimmedUser === "admin" || trimmedUser === "teacher" || trimmedUser === "gv";
-  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === "string" && req.body.adminPasswordHash.startsWith("ncv_pw$")) {
+  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === "string" && req.body.adminPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(req.body.adminPasswordHash)) {
     db.setAdminPassword(req.body.adminPasswordHash);
   }
   const isValidPass = db.verifyAdminPassword(trimmedPass);
   if (isValidUser && isValidPass) {
-    const token = Buffer.from(`legialoi_verified_v3:::${AUTH_SECRET}:::${Date.now()}`).toString("base64");
+    const token = Buffer.from(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`).toString("base64");
     const curAdminPass = db.getAdminPassword();
     return res.json({
       success: true,
       token,
-      passwordHash: curAdminPass && curAdminPass.startsWith("ncv_pw$") ? curAdminPass : void 0,
+      passwordHash: curAdminPass && curAdminPass.startsWith("ncv_pw$") && !isCorruptedPasswordHash(curAdminPass) ? curAdminPass : void 0,
       user: {
         username: TEACHER_USERNAME,
         fullName: "Th\u1EA7y L\xEA Gia L\u1EE3i",
@@ -2434,13 +2450,13 @@ app.post("/api/auth/change-password", requireTeacherAuth, (req, res) => {
   if (!newPassword || String(newPassword).trim().length < 6) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi c\u1EE7a gi\xE1o vi\xEAn ph\u1EA3i c\xF3 \xEDt nh\u1EA5t 6 k\xFD t\u1EF1 \u0111\u1EC3 \u0111\u1EA3m b\u1EA3o an to\xE0n" });
   }
-  if (adminPasswordHash && typeof adminPasswordHash === "string" && adminPasswordHash.startsWith("ncv_pw$")) {
+  if (adminPasswordHash && typeof adminPasswordHash === "string" && adminPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(adminPasswordHash)) {
     db.setAdminPassword(adminPasswordHash);
   }
   if (currentPassword && !db.verifyAdminPassword(String(currentPassword).trim())) {
     return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i c\u1EE7a gi\xE1o vi\xEAn kh\xF4ng ch\xEDnh x\xE1c" });
   }
-  if (newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$")) {
+  if (newPasswordHash && typeof newPasswordHash === "string" && newPasswordHash.startsWith("ncv_pw$") && !isCorruptedPasswordHash(newPasswordHash)) {
     db.setAdminPassword(newPasswordHash);
   } else {
     db.setAdminPassword(String(newPassword).trim());
@@ -2922,7 +2938,7 @@ var handleValidateEntry = (req, res) => {
         });
       }
     }
-    if (req.body.studentPasswordHash) {
+    if (req.body.studentPasswordHash && !isCorruptedPasswordHash(req.body.studentPasswordHash)) {
       if (matchedStudent) {
         matchedStudent.password = String(req.body.studentPasswordHash);
         matchedStudent.isPasswordChanged = Boolean(req.body.studentIsPasswordChanged);

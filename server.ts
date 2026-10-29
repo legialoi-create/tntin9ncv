@@ -50,6 +50,7 @@ import {
   normalizeStudentName,
   normalizeClassName,
   getStudentRawAnswer,
+  isCorruptedPasswordHash,
 } from './src/utils/security.ts';
 
 dotenv.config();
@@ -169,19 +170,27 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     trimmedUser === 'teacher' ||
     trimmedUser === 'gv';
 
-  if (req.body.adminPasswordHash && typeof req.body.adminPasswordHash === 'string' && req.body.adminPasswordHash.startsWith('ncv_pw$')) {
+  if (
+    req.body.adminPasswordHash &&
+    typeof req.body.adminPasswordHash === 'string' &&
+    req.body.adminPasswordHash.startsWith('ncv_pw$') &&
+    !isCorruptedPasswordHash(req.body.adminPasswordHash)
+  ) {
     db.setAdminPassword(req.body.adminPasswordHash);
   }
 
   const isValidPass = db.verifyAdminPassword(trimmedPass);
 
   if (isValidUser && isValidPass) {
-    const token = Buffer.from(`legialoi_verified_v3:::${AUTH_SECRET}:::${Date.now()}`).toString('base64');
+    const token = Buffer.from(`legialoi_verified_v3:::ncv-tin-hoc-legialoi-token-2026:::${Date.now()}`).toString('base64');
     const curAdminPass = db.getAdminPassword();
     return res.json({
       success: true,
       token,
-      passwordHash: curAdminPass && curAdminPass.startsWith('ncv_pw$') ? curAdminPass : undefined,
+      passwordHash:
+        curAdminPass && curAdminPass.startsWith('ncv_pw$') && !isCorruptedPasswordHash(curAdminPass)
+          ? curAdminPass
+          : undefined,
       user: {
         username: TEACHER_USERNAME,
         fullName: 'Thầy Lê Gia Lợi',
@@ -211,7 +220,12 @@ app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Re
     return res.status(400).json({ error: 'Mật khẩu mới của giáo viên phải có ít nhất 6 ký tự để đảm bảo an toàn' });
   }
 
-  if (adminPasswordHash && typeof adminPasswordHash === 'string' && adminPasswordHash.startsWith('ncv_pw$')) {
+  if (
+    adminPasswordHash &&
+    typeof adminPasswordHash === 'string' &&
+    adminPasswordHash.startsWith('ncv_pw$') &&
+    !isCorruptedPasswordHash(adminPasswordHash)
+  ) {
     db.setAdminPassword(adminPasswordHash);
   }
 
@@ -219,7 +233,12 @@ app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Re
     return res.status(400).json({ error: 'Mật khẩu hiện tại của giáo viên không chính xác' });
   }
 
-  if (newPasswordHash && typeof newPasswordHash === 'string' && newPasswordHash.startsWith('ncv_pw$')) {
+  if (
+    newPasswordHash &&
+    typeof newPasswordHash === 'string' &&
+    newPasswordHash.startsWith('ncv_pw$') &&
+    !isCorruptedPasswordHash(newPasswordHash)
+  ) {
     db.setAdminPassword(newPasswordHash);
   } else {
     db.setAdminPassword(String(newPassword).trim());
@@ -795,7 +814,7 @@ const handleValidateEntry = (req: Request, res: Response) => {
     }
 
     // Sync custom student password hash if passed from client/Firestore
-    if (req.body.studentPasswordHash) {
+    if (req.body.studentPasswordHash && !isCorruptedPasswordHash(req.body.studentPasswordHash)) {
       if (matchedStudent) {
         matchedStudent.password = String(req.body.studentPasswordHash);
         matchedStudent.isPasswordChanged = Boolean(req.body.studentIsPasswordChanged);
