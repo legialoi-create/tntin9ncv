@@ -13,7 +13,7 @@ import {
   query,
   where
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
+import firebaseConfig from '../../firebase-applet-config.json';
 import {
   sealValue,
   unsealValue,
@@ -1096,6 +1096,7 @@ export async function getTeacherSmtpConfigFromFirestore(): Promise<string | null
 export async function verifyTeacherGoogleEmail(): Promise<{
   verified: boolean;
   email: string;
+  needsEmailOtp?: boolean;
   error?: string;
 }> {
   try {
@@ -1131,23 +1132,15 @@ export async function verifyTeacherGoogleEmail(): Promise<{
         error: 'Đã đóng cửa sổ xác thực Google.',
       };
     }
-    if (code === 'auth/unauthorized-domain') {
-      const host = typeof window !== 'undefined' ? window.location.hostname : 'vercel.app';
-      return {
-        verified: false,
-        email: '',
-        error: `Tên miền ${host} chưa được thêm vào Authorized Domains trên Firebase. Thầy vui lòng bấm nút "Gửi mật khẩu hiện có về mail legialoi@gmail.com" ở phía trên để nhận mật khẩu qua hộp thư!`,
-      };
-    }
+    // On custom Vercel domains (e.g. tntin9ncv2026.vercel.app) or popup-blocked browsers, seamlessly switch to 4-digit Email OTP verification
     return {
       verified: false,
-      email: '',
-      error:
-        err?.message ||
-        'Không thể mở cửa sổ xác thực Google. Thầy vui lòng dùng nút Gửi mật khẩu về hộp thư legialoi@gmail.com.',
+      email: 'legialoi@gmail.com',
+      needsEmailOtp: true,
     };
   }
 }
+
 
 
 

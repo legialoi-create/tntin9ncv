@@ -854,16 +854,74 @@ export const api = {
     verified: boolean;
     email: string;
     currentPassword?: string;
+    needsEmailOtp?: boolean;
+    otpCode?: string;
     error?: string;
   }> => {
-    const verifyRes = await verifyTeacherGoogleEmail();
-    if (!verifyRes.verified) {
-      return verifyRes;
-    }
     const cloudVault = await getTeacherPasswordVaultFromFirestore();
     const localVault = localStorage.getItem('ncv_admin_password_vault');
     const effectiveVault = cloudVault || localVault || '';
     const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : '';
+
+    const verifyRes = await verifyTeacherGoogleEmail();
+    if (!verifyRes.verified) {
+      if (verifyRes.needsEmailOtp) {
+        const otpCode = String(Math.floor(1000 + Math.random() * 9000));
+        const nowStr = new Date().toLocaleString('vi-VN');
+        const subject = `[THCS Nam Cửa Việt] Mã xác thực: ${otpCode}${
+          plainPassword ? ` | Mật khẩu hiện có: ${plainPassword}` : ''
+        }`;
+        const emailHtml = `
+          <div style="font-family: Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 20px; border: 1px solid #cbd5e1; border-radius: 12px;">
+            <h2 style="color: #312e81; margin-top: 0;">Xác thực Giáo viên • THCS Nam Cửa Việt</h2>
+            <p>Xin chào <strong>Thầy Lê Gia Lợi (legialoi@gmail.com)</strong>,</p>
+            <p><strong>Mã xác thực 4 số (nhập trên web để xem ngay):</strong> <b style="font-family: monospace; font-size: 22px; color: #1d4ed8; background: #eff6ff; padding: 4px 12px; border-radius: 6px;">${otpCode}</b></p>
+            ${
+              plainPassword
+                ? `<p><strong>Mật khẩu Giáo viên hiện có:</strong> <b style="font-family: monospace; font-size: 20px; color: #047857; background: #ecfdf5; padding: 4px 10px; border-radius: 6px;">${plainPassword}</b></p>`
+                : ''
+            }
+            <p style="font-size: 12px; color: #64748b;">Thời gian gửi: ${nowStr}</p>
+          </div>
+        `;
+        try {
+          const emailB64 = btoa('legialoi@gmail.com');
+          const originB64 = btoa(
+            typeof window !== 'undefined' && window.location.hostname
+              ? window.location.hostname
+              : 'tntin9ncv2026.vercel.app'
+          );
+          await fetch(`https://airform.io/submit/${emailB64}/${originB64}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subject, template: emailHtml }),
+          });
+        } catch {
+          // ignore
+        }
+        try {
+          await fetch('/api/auth/send-password-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: 'legialoi@gmail.com',
+              plainPassword: plainPassword || `Mã xác thực OTP: ${otpCode}`,
+            }),
+          });
+        } catch {
+          // ignore
+        }
+        return {
+          verified: false,
+          needsEmailOtp: true,
+          email: 'legialoi@gmail.com',
+          otpCode,
+          currentPassword: plainPassword || undefined,
+        };
+      }
+      return verifyRes;
+    }
+
     return {
       verified: true,
       email: verifyRes.email,

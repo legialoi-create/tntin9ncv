@@ -4,21 +4,6 @@ import path2 from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import * as XLSX from "xlsx";
-import nodemailer from "nodemailer";
-
-// firebase-applet-config.json
-var firebase_applet_config_default = {
-  projectId: "sunlit-watch-307pf",
-  appId: "1:1044383737030:web:1ae08db423db64921163c7",
-  apiKey: "AIzaSyChL6Xvouq8aeMUge1Bh34c0figBr9hKEQ",
-  authDomain: "sunlit-watch-307pf.firebaseapp.com",
-  firestoreDatabaseId: "ai-studio-kimtratinhcthcsn-e3ce7918-c6ec-4fa9-b01f-8ded279056b0",
-  storageBucket: "sunlit-watch-307pf.firebasestorage.app",
-  messagingSenderId: "1044383737030",
-  measurementId: "",
-  oAuthClientId: "1044383737030-hg8g3gqj5ifu6c2gtkg2aafdubhmfoqt.apps.googleusercontent.com",
-  recaptchaSiteKey: ""
-};
 
 // server/db.ts
 import fs from "fs";
@@ -2373,6 +2358,11 @@ if (typeof globalThis.Path2D === "undefined") {
     }
   };
 }
+var firebaseConfig = {
+  projectId: "sunlit-watch-307pf",
+  firestoreDatabaseId: "ai-studio-kimtratinhcthcsn-e3ce7918-c6ec-4fa9-b01f-8ded279056b0",
+  apiKey: "AIzaSyChL6Xvouq8aeMUge1Bh34c0figBr9hKEQ"
+};
 dotenv.config();
 var safeDirname = (() => {
   try {
@@ -2452,7 +2442,7 @@ function requireTeacherAuth(req, res, next) {
 }
 async function fetchTeacherAuthConfigFromFirestoreRest() {
   try {
-    const url = `https://firestore.googleapis.com/v1/projects/${firebase_applet_config_default.projectId}/databases/${firebase_applet_config_default.firestoreDatabaseId}/documents/classes/teacher_admin_auth_config?key=${firebase_applet_config_default.apiKey}`;
+    const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/classes/teacher_admin_auth_config?key=${firebaseConfig.apiKey}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4e3);
     const res = await fetch(url, { signal: controller.signal });
@@ -2508,7 +2498,8 @@ async function dispatchPasswordEmailToTeacher(plainPassword, reason, customSmtpP
   const smtpPass = (customSmtpPass || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS || "").replace(/\s+/g, "").trim();
   if (/^[a-zA-Z]{16}$/.test(smtpPass)) {
     try {
-      const transporter = nodemailer.createTransport({
+      const nodemailer = await import("nodemailer");
+      const transporter = nodemailer.default.createTransport({
         host: "smtp.gmail.com",
         port: 465,
         secure: true,

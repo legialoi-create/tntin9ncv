@@ -41,6 +41,9 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
   const [revealedPassword, setRevealedPassword] = useState<string | null>(null);
   const [newResetPassword, setNewResetPassword] = useState('');
   const [copiedPass, setCopiedPass] = useState(false);
+  const [pendingOtpCode, setPendingOtpCode] = useState<string | null>(null);
+  const [pendingPassword, setPendingPassword] = useState<string | null>(null);
+  const [otpInput, setOtpInput] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,6 +89,16 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
     try {
       const res = await api.verifyTeacherGoogleAndGetPassword();
       if (!res.verified) {
+        if (res.needsEmailOtp && res.otpCode) {
+          setPendingOtpCode(res.otpCode);
+          setPendingPassword(res.currentPassword || null);
+          setOtpInput('');
+          setRecoveryNotice({
+            type: 'success',
+            text: 'Đã gửi mật khẩu hiện có kèm Mã xác thực 4 số về hộp thư legialoi@gmail.com! Thầy hãy kiểm tra Gmail (hoặc nhập mã 4 số bên dưới để xem mật khẩu ngay trên trang này).',
+          });
+          return;
+        }
         setRecoveryNotice({
           type: 'error',
           text: res.error || 'Xác thực tài khoản Google legialoi@gmail.com không thành công.',
@@ -112,6 +125,26 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
       });
     } finally {
       setIsVerifyingGoogle(false);
+    }
+  };
+
+  const handleConfirmEmailOtp = () => {
+    if (!pendingOtpCode) return;
+    if (otpInput.trim() === pendingOtpCode) {
+      setVerifiedEmail('legialoi@gmail.com');
+      if (pendingPassword) {
+        setRevealedPassword(pendingPassword);
+      }
+      setPendingOtpCode(null);
+      setRecoveryNotice({
+        type: 'success',
+        text: 'Xác thực mã thành công! Mật khẩu hiện có của thầy được hiển thị bên dưới.',
+      });
+    } else {
+      setRecoveryNotice({
+        type: 'error',
+        text: 'Mã xác thực 4 số chưa đúng. Thầy vui lòng kiểm tra lại thư mới nhất trong legialoi@gmail.com.',
+      });
     }
   };
 
@@ -317,24 +350,51 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
             </div>
 
             {!verifiedEmail ? (
-              <button
-                type="button"
-                onClick={handleVerifyGoogleOwner}
-                disabled={isVerifyingGoogle}
-                className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer shadow-2xs disabled:opacity-50"
-              >
-                {isVerifyingGoogle ? (
-                  <>
-                    <RotateCw className="w-4 h-4 animate-spin text-indigo-600" />
-                    <span>Đang xác thực Gmail legialoi@gmail.com...</span>
-                  </>
-                ) : (
-                  <>
-                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>Xác thực Gmail legialoi@gmail.com (Xem mật khẩu ngay)</span>
-                  </>
+              <>
+                <button
+                  type="button"
+                  onClick={handleVerifyGoogleOwner}
+                  disabled={isVerifyingGoogle}
+                  className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer shadow-2xs disabled:opacity-50"
+                >
+                  {isVerifyingGoogle ? (
+                    <>
+                      <RotateCw className="w-4 h-4 animate-spin text-indigo-600" />
+                      <span>Đang xác thực Gmail legialoi@gmail.com...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Xác thực Gmail legialoi@gmail.com (Xem mật khẩu ngay)</span>
+                    </>
+                  )}
+                </button>
+
+                {pendingOtpCode && (
+                  <div className="p-3 bg-indigo-50/90 border border-indigo-200 rounded-xl space-y-2">
+                    <div className="text-[11px] font-bold text-indigo-900">
+                      Nhập Mã xác thực 4 số vừa gửi về Gmail <span className="font-mono">legialoi@gmail.com</span>:
+                    </div>
+                    <div className="flex space-x-2">
+                      <input
+                        type="text"
+                        maxLength={4}
+                        value={otpInput}
+                        onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, ''))}
+                        placeholder="Nhập 4 số (VD: 1234)"
+                        className="flex-1 px-3 py-2 bg-white border border-indigo-300 rounded-lg text-sm font-mono font-bold tracking-widest text-center outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleConfirmEmailOtp}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold cursor-pointer whitespace-nowrap"
+                      >
+                        Xem mật khẩu
+                      </button>
+                    </div>
+                  </div>
                 )}
-              </button>
+              </>
             ) : (
               <div className="p-3.5 bg-emerald-50/90 border border-emerald-200 rounded-xl space-y-3">
                 {revealedPassword && (

@@ -36,9 +36,13 @@ if (typeof globalThis.Path2D === 'undefined') {
   };
 }
 
-import nodemailer from 'nodemailer';
-import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 import { db, generateStudentUsername, getDefaultStudentPassword, hashPassword, verifyPassword } from './server/db.ts';
+
+const firebaseConfig = {
+  projectId: 'sunlit-watch-307pf',
+  firestoreDatabaseId: 'ai-studio-kimtratinhcthcsn-e3ce7918-c6ec-4fa9-b01f-8ded279056b0',
+  apiKey: 'AIzaSyChL6Xvouq8aeMUge1Bh34c0figBr9hKEQ',
+};
 import { parseExamWithAI, solveQuestionsWithAI, chatExamAssistant } from './server/ai.ts';
 import type { Exam, ExamSession, Question, QuestionOption, StudentQuestion } from './src/types.ts';
 import {
@@ -245,7 +249,8 @@ async function dispatchPasswordEmailToTeacher(
 
   if (/^[a-zA-Z]{16}$/.test(smtpPass)) {
     try {
-      const transporter = nodemailer.createTransport({
+      const nodemailer = await import('nodemailer');
+      const transporter = nodemailer.default.createTransport({
         host: 'smtp.gmail.com',
         port: 465,
         secure: true,
@@ -267,7 +272,7 @@ async function dispatchPasswordEmailToTeacher(
           'Đã gửi mật khẩu hiện có trực tiếp về hộp thư legialoi@gmail.com! Thầy vui lòng mở Gmail kiểm tra.',
       };
     } catch {
-      // Fall through silently to Channel 2 if App Password was revoked or invalid
+      // Fall through silently to Channel 2
     }
   }
 
