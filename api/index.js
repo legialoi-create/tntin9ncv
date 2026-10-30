@@ -4,6 +4,21 @@ import path2 from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import * as XLSX from "xlsx";
+import nodemailer from "nodemailer";
+
+// firebase-applet-config.json
+var firebase_applet_config_default = {
+  projectId: "sunlit-watch-307pf",
+  appId: "1:1044383737030:web:1ae08db423db64921163c7",
+  apiKey: "AIzaSyChL6Xvouq8aeMUge1Bh34c0figBr9hKEQ",
+  authDomain: "sunlit-watch-307pf.firebaseapp.com",
+  firestoreDatabaseId: "ai-studio-kimtratinhcthcsn-e3ce7918-c6ec-4fa9-b01f-8ded279056b0",
+  storageBucket: "sunlit-watch-307pf.firebasestorage.app",
+  messagingSenderId: "1044383737030",
+  measurementId: "",
+  oAuthClientId: "1044383737030-hg8g3gqj5ifu6c2gtkg2aafdubhmfoqt.apps.googleusercontent.com",
+  recaptchaSiteKey: ""
+};
 
 // server/db.ts
 import fs from "fs";
@@ -2435,19 +2450,89 @@ function requireTeacherAuth(req, res, next) {
   }
   return res.status(403).json({ error: "Phi\xEAn \u0111\u0103ng nh\u1EADp kh\xF4ng h\u1EE3p l\u1EC7 ho\u1EB7c \u0111\xE3 h\u1EBFt h\u1EA1n" });
 }
+async function fetchTeacherAuthConfigFromFirestoreRest() {
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${firebase_applet_config_default.projectId}/databases/${firebase_applet_config_default.firestoreDatabaseId}/documents/classes/teacher_admin_auth_config?key=${firebase_applet_config_default.apiKey}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4e3);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return {};
+    const docData = await res.json();
+    const fields = docData?.fields || {};
+    const rawVault = fields.sealedPasswordVault?.stringValue;
+    const rawHash = fields.passwordHash?.stringValue;
+    const rawSmtp = fields.sealedSmtpPass?.stringValue;
+    const unsealedHash = rawHash ? unsealValue(rawHash, "TEACHER_AUTH_VAULT_V3") : void 0;
+    const unsealedSmtp = rawSmtp ? unsealValue(rawSmtp, "TEACHER_SMTP_VAULT_V3") : void 0;
+    if (unsealedHash && !isCorruptedPasswordHash(unsealedHash)) {
+      db.setAdminPassword(unsealedHash, rawVault);
+    }
+    return {
+      sealedPasswordVault: rawVault && unsealTeacherPasswordVault(rawVault) ? rawVault : void 0,
+      passwordHash: unsealedHash || void 0,
+      smtpPass: unsealedSmtp || void 0
+    };
+  } catch {
+    return {};
+  }
+}
 var lastPasswordEmailSentAt = 0;
-async function dispatchPasswordEmailToTeacher(plainPassword, reason) {
+async function dispatchPasswordEmailToTeacher(plainPassword, reason, customSmtpPass) {
   const recipient = "legialoi@gmail.com";
   const nowStr = (/* @__PURE__ */ new Date()).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
   const subject = reason === "password_changed" ? `[THCS Nam C\u1EEDa Vi\u1EC7t] Th\xF4ng b\xE1o m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn m\u1EDBi c\u1EADp nh\u1EADt (${nowStr})` : `[THCS Nam C\u1EEDa Vi\u1EC7t] M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn hi\u1EC7n c\xF3 c\u1EE7a Th\u1EA7y L\xEA Gia L\u1EE3i (${nowStr})`;
+  const siteOrigin = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.APP_URL || "https://tntin9ncv2026.vercel.app";
+  const smtpPass = (customSmtpPass || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS || "").replace(/\s+/g, "").trim();
+  if (smtpPass) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: {
+          user: process.env.SMTP_USER || recipient,
+          pass: smtpPass
+        }
+      });
+      await transporter.sendMail({
+        from: `"H\u1EC7 th\u1ED1ng Tin h\u1ECDc THCS Nam C\u1EEDa Vi\u1EC7t" <${process.env.SMTP_USER || recipient}>`,
+        to: recipient,
+        subject,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <h2 style="color: #312e81; margin-top: 0;">Tr\u01B0\u1EDDng THCS Nam C\u1EEDa Vi\u1EC7t</h2>
+            <p style="color: #475569; font-size: 14px;">Xin ch\xE0o <strong>Th\u1EA7y L\xEA Gia L\u1EE3i (${recipient})</strong>,</p>
+            <p style="color: #334155; font-size: 14px;">Th\xF4ng tin \u0111\u0103ng nh\u1EADp B\xE0n l\xE0m vi\u1EC7c Gi\xE1o vi\xEAn hi\u1EC7n c\xF3 c\u1EE7a th\u1EA7y:</p>
+            <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; margin: 16px 0;">
+              <p style="margin: 4px 0; font-size: 14px;"><strong>T\xE0i kho\u1EA3n:</strong> <code style="font-size: 15px;">legialoi</code></p>
+              <p style="margin: 8px 0 4px 0; font-size: 14px;"><strong>M\u1EADt kh\u1EA9u hi\u1EC7n c\xF3:</strong> <span style="font-family: monospace; font-size: 18px; font-weight: bold; color: #047857; background: #ecfdf5; padding: 3px 8px; border-radius: 4px;">${plainPassword}</span></p>
+            </div>
+            <p style="color: #64748b; font-size: 12px;">Th\u1EDDi gian g\u1EEDi: ${nowStr}</p>
+          </div>
+        `
+      });
+      return {
+        sent: true,
+        provider: "gmail_smtp",
+        message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 tr\u1EF1c ti\u1EBFp v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com qua Gmail SMTP! Th\u1EA7y vui l\xF2ng m\u1EDF Gmail ki\u1EC3m tra."
+      };
+    } catch (smtpErr) {
+      console.warn("[Email] Gmail SMTP warning:", smtpErr);
+    }
+  }
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
     const response = await fetch(`https://formsubmit.co/ajax/${recipient}`, {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
-        Origin: process.env.APP_URL || "https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app",
-        Referer: process.env.APP_URL || "https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Origin: siteOrigin,
+        Referer: `${siteOrigin}/`
       },
       body: JSON.stringify({
         _subject: subject,
@@ -2457,31 +2542,66 @@ async function dispatchPasswordEmailToTeacher(plainPassword, reason) {
         "Gi\xE1o vi\xEAn qu\u1EA3n tr\u1ECB": "Th\u1EA7y L\xEA Gia L\u1EE3i (legialoi@gmail.com)",
         "T\xE0i kho\u1EA3n \u0111\u0103ng nh\u1EADp": "legialoi",
         "M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn hi\u1EC7n c\xF3": plainPassword,
-        "Th\u1EDDi gian g\u1EEDi": nowStr,
-        "Ghi ch\xFA": reason === "password_changed" ? "M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn v\u1EEBa \u0111\u01B0\u1EE3c \u0111\u1ED5i th\xE0nh c\xF4ng. L\u01B0u th\u01B0 n\xE0y \u0111\u1EC3 tra c\u1EE9u khi c\u1EA7n." : "\u0110\xE2y l\xE0 m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 theo y\xEAu c\u1EA7u kh\xF4i ph\u1EE5c t\u1EEB m\xE0n h\xECnh \u0110\u0103ng nh\u1EADp Gi\xE1o vi\xEAn."
+        "Th\u1EDDi gian g\u1EEDi": nowStr
       })
     });
+    clearTimeout(timer);
     if (response.ok) {
       const resData = await response.json().catch(() => ({}));
       if (resData && (resData.success === "true" || resData.success === true)) {
         return {
           sent: true,
+          provider: "formsubmit",
           message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com! Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c m\u1EE5c Th\u01B0 r\xE1c/Spam)."
         };
       }
       if (resData && String(resData.message || "").toLowerCase().includes("activate")) {
         return {
           sent: true,
-          message: 'H\u1EC7 th\u1ED1ng \u0111\xE3 g\u1EEDi th\u01B0 k\xEDch ho\u1EA1t l\u1EA7n \u0111\u1EA7u \u0111\u1EBFn legialoi@gmail.com. Th\u1EA7y m\u1EDF Gmail b\u1EA5m "Activate Form" ho\u1EB7c b\u1EA5m n\xFAt "X\xE1c th\u1EF1c nhanh b\u1EB1ng Gmail legialoi@gmail.com" b\xEAn d\u01B0\u1EDBi \u0111\u1EC3 xem m\u1EADt kh\u1EA9u ngay l\u1EADp t\u1EE9c!'
+          provider: "formsubmit_activate",
+          message: "\u0110\xE3 g\u1EEDi th\u01B0 k\xEDch ho\u1EA1t \u0111\u1EBFn legialoi@gmail.com. Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c Spam) v\xE0 b\u1EA5m Activate."
         };
       }
     }
-  } catch (err) {
-    console.warn("[Email] dispatchPasswordEmailToTeacher warning:", err);
+  } catch {
+  }
+  try {
+    const params = new URLSearchParams();
+    params.set("He_thong", "Kiem tra Tin hoc - Truong THCS Nam Cua Viet");
+    params.set("Giao_vien", "Thay Le Gia Loi (legialoi@gmail.com)");
+    params.set("Tai_khoan_Admin", "legialoi");
+    params.set("MAT_KHAU_HIEN_CO", plainPassword);
+    params.set("Thoi_gian", nowStr);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5e3);
+    const airRes = await fetch(`https://airform.io/${recipient}`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Origin: "https://tntin9ncv2026.vercel.app",
+        Referer: "https://tntin9ncv2026.vercel.app/"
+      },
+      body: params.toString(),
+      redirect: "follow"
+    });
+    clearTimeout(timer);
+    if (airRes.ok || airRes.status === 302) {
+      const htmlText = await airRes.text().catch(() => "");
+      const needsFirstConfirm = htmlText.includes('"confirmedMail":false');
+      return {
+        sent: true,
+        provider: "airform",
+        message: needsFirstConfirm ? "\u0110\xE3 g\u1EEDi th\u01B0 v\u1EC1 legialoi@gmail.com! (L\u01B0u \xFD: N\u1EBFu d\xF9ng l\u1EA7n \u0111\u1EA7u tr\xEAn Vercel, th\u1EA7y m\u1EDF Gmail legialoi@gmail.com ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn / Th\u01B0 r\xE1c v\xE0 b\u1EA5m Confirm \u0111\u1EC3 nh\u1EADn th\u01B0 t\u1EF1 \u0111\u1ED9ng)." : "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com th\xE0nh c\xF4ng! Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c m\u1EE5c Th\u01B0 r\xE1c/Spam)."
+      };
+    }
+  } catch (airErr) {
+    console.warn("[Email] Airform relay warning:", airErr);
   }
   return {
     sent: false,
-    message: 'M\xE1y ch\u1EE7 g\u1EEDi mail \u0111ang b\u1EADn. Th\u1EA7y vui l\xF2ng b\u1EA5m n\xFAt "X\xE1c th\u1EF1c nhanh b\u1EB1ng Gmail legialoi@gmail.com" ngay b\xEAn d\u01B0\u1EDBi \u0111\u1EC3 xem m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 t\u1EE9c th\xEC!'
+    message: "Ch\u01B0a k\u1EBFt n\u1ED1i \u0111\u01B0\u1EE3c d\u1ECBch v\u1EE5 g\u1EEDi th\u01B0 t\u1EF1 \u0111\u1ED9ng. Th\u1EA7y c\xF3 th\u1EC3 nh\u1EADp M\u1EADt kh\u1EA9u \u1EE9ng d\u1EE5ng Gmail (App Password) \u1EDF m\u1EE5c c\u1EA5u h\xECnh b\xEAn d\u01B0\u1EDBi ho\u1EB7c b\u1EA5m X\xE1c th\u1EF1c b\u1EB1ng Gmail legialoi@gmail.com!"
   };
 }
 app.post("/api/auth/login", (req, res) => {
@@ -2557,15 +2677,26 @@ app.post("/api/auth/change-password", requireTeacherAuth, (req, res) => {
 });
 app.post("/api/auth/send-password-email", async (req, res) => {
   const now = Date.now();
-  if (now - lastPasswordEmailSentAt < 2e4) {
-    const waitSec = Math.ceil((2e4 - (now - lastPasswordEmailSentAt)) / 1e3);
+  if (now - lastPasswordEmailSentAt < 8e3) {
+    const waitSec = Math.ceil((8e3 - (now - lastPasswordEmailSentAt)) / 1e3);
     return res.status(429).json({
       error: `Vui l\xF2ng \u0111\u1EE3i ${waitSec} gi\xE2y tr\u01B0\u1EDBc khi g\u1EEDi l\u1EA1i m\u1EADt kh\u1EA9u v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com.`
     });
   }
   const incomingVault = req.body?.sealedPasswordVault;
+  const incomingSmtpPass = req.body?.smtpAppPassword;
   const serverVault = db.getAdminPasswordVault();
-  const effectiveVault = incomingVault && unsealTeacherPasswordVault(incomingVault) ? incomingVault : serverVault;
+  let effectiveVault = incomingVault && unsealTeacherPasswordVault(incomingVault) ? incomingVault : serverVault;
+  let effectiveSmtpPass = incomingSmtpPass ? String(incomingSmtpPass).trim() : void 0;
+  if (!effectiveVault || !effectiveSmtpPass) {
+    const fbRest = await fetchTeacherAuthConfigFromFirestoreRest();
+    if (!effectiveVault && fbRest.sealedPasswordVault) {
+      effectiveVault = fbRest.sealedPasswordVault;
+    }
+    if (!effectiveSmtpPass && fbRest.smtpPass) {
+      effectiveSmtpPass = fbRest.smtpPass;
+    }
+  }
   const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : "";
   if (!plainPassword) {
     return res.status(400).json({
@@ -2573,10 +2704,17 @@ app.post("/api/auth/send-password-email", async (req, res) => {
       error: 'Ch\u01B0a c\xF3 b\u1EA3n l\u01B0u m\u1EADt kh\u1EA9u \u0111\u1EC3 g\u1EEDi t\u1EF1 \u0111\u1ED9ng. Th\u1EA7y vui l\xF2ng b\u1EA5m n\xFAt "X\xE1c th\u1EF1c b\u1EB1ng Gmail legialoi@gmail.com" ngay b\xEAn d\u01B0\u1EDBi \u0111\u1EC3 \u0111\u1EB7t l\u1EA1i m\u1EADt kh\u1EA9u m\u1EDBi!'
     });
   }
-  lastPasswordEmailSentAt = now;
-  const result = await dispatchPasswordEmailToTeacher(plainPassword, "forgot_password");
+  const result = await dispatchPasswordEmailToTeacher(
+    plainPassword,
+    "forgot_password",
+    effectiveSmtpPass
+  );
+  if (result.sent) {
+    lastPasswordEmailSentAt = now;
+  }
   return res.json({
     success: result.sent,
+    provider: result.provider,
     recipient: "legialoi@gmail.com",
     message: result.message
   });

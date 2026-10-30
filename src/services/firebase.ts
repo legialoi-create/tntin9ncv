@@ -1023,6 +1023,59 @@ export async function getTeacherPasswordVaultFromFirestore(): Promise<string | n
   return null;
 }
 
+// 21b. Save/Get optional Gmail App Password (sealed) in Firestore for direct Gmail SMTP on Vercel
+export async function saveTeacherSmtpConfigToFirestore(appPassword: string): Promise<boolean> {
+  const clean = String(appPassword || '').replace(/\s+/g, '').trim();
+  if (!clean) return false;
+  const sealedSmtp = sealValue(clean, 'TEACHER_SMTP_VAULT_V3', true);
+  try {
+    localStorage.setItem('ncv_admin_smtp_vault', sealedSmtp);
+  } catch (e) {}
+  try {
+    await setDoc(
+      doc(firestore, 'classes', 'teacher_admin_auth_config'),
+      {
+        role: 'teacher_admin',
+        sealedSmtpPass: sealedSmtp,
+        smtpUpdatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    return true;
+  } catch (err) {
+    console.warn('[Firebase] saveTeacherSmtpConfigToFirestore error:', err);
+    return false;
+  }
+}
+
+export async function getTeacherSmtpConfigFromFirestore(): Promise<string | null> {
+  try {
+    const snap = await getDoc(doc(firestore, 'classes', 'teacher_admin_auth_config'));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (data && data.sealedSmtpPass && typeof data.sealedSmtpPass === 'string') {
+        const unsealed = unsealValue(data.sealedSmtpPass, 'TEACHER_SMTP_VAULT_V3');
+        if (unsealed) {
+          try {
+            localStorage.setItem('ncv_admin_smtp_vault', data.sealedSmtpPass);
+          } catch (e) {}
+          return unsealed;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Firebase] getTeacherSmtpConfigFromFirestore error:', err);
+  }
+  try {
+    const localSmtp = localStorage.getItem('ncv_admin_smtp_vault');
+    if (localSmtp) {
+      const unsealed = unsealValue(localSmtp, 'TEACHER_SMTP_VAULT_V3');
+      if (unsealed) return unsealed;
+    }
+  } catch (e) {}
+  return null;
+}
+
 // 22. Verify Teacher identity via official Google Account (legialoi@gmail.com)
 export async function verifyTeacherGoogleEmail(): Promise<{
   verified: boolean;
@@ -1062,6 +1115,14 @@ export async function verifyTeacherGoogleEmail(): Promise<{
         error: 'Đã đóng cửa sổ xác thực Google.',
       };
     }
+    if (code === 'auth/unauthorized-domain') {
+      const host = typeof window !== 'undefined' ? window.location.hostname : 'vercel.app';
+      return {
+        verified: false,
+        email: '',
+        error: `Tên miền ${host} chưa được thêm vào Authorized Domains trên Firebase. Thầy vui lòng bấm nút "Gửi mật khẩu hiện có về mail legialoi@gmail.com" ở phía trên để nhận mật khẩu qua hộp thư!`,
+      };
+    }
     return {
       verified: false,
       email: '',
@@ -1071,5 +1132,6 @@ export async function verifyTeacherGoogleEmail(): Promise<{
     };
   }
 }
+
 
 

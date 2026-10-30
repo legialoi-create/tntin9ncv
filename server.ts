@@ -36,6 +36,8 @@ if (typeof globalThis.Path2D === 'undefined') {
   };
 }
 
+import nodemailer from 'nodemailer';
+import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 import { db, generateStudentUsername, getDefaultStudentPassword, hashPassword, verifyPassword } from './server/db.ts';
 import { parseExamWithAI, solveQuestionsWithAI, chatExamAssistant } from './server/ai.ts';
 import type { Exam, ExamSession, Question, QuestionOption, StudentQuestion } from './src/types.ts';
@@ -47,6 +49,7 @@ import {
   unsealExamQuestions,
   sealOptionOrder,
   unsealOptionOrder,
+  unsealValue,
   normalizeStudentName,
   normalizeClassName,
   getStudentRawAnswer,
@@ -151,13 +154,50 @@ function requireTeacherAuth(req: Request, res: Response, next: NextFunction) {
   return res.status(403).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn' });
 }
 
-// Helper: Send Teacher current password to official email legialoi@gmail.com
+// Helper: Fetch teacher auth config directly from Firestore REST API (100% Vercel Serverless cold-start proof)
+async function fetchTeacherAuthConfigFromFirestoreRest(): Promise<{
+  sealedPasswordVault?: string;
+  passwordHash?: string;
+  smtpPass?: string;
+}> {
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents/classes/teacher_admin_auth_config?key=${firebaseConfig.apiKey}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return {};
+    const docData: any = await res.json();
+    const fields = docData?.fields || {};
+    const rawVault = fields.sealedPasswordVault?.stringValue;
+    const rawHash = fields.passwordHash?.stringValue;
+    const rawSmtp = fields.sealedSmtpPass?.stringValue;
+
+    const unsealedHash = rawHash ? unsealValue(rawHash, 'TEACHER_AUTH_VAULT_V3') : undefined;
+    const unsealedSmtp = rawSmtp ? unsealValue(rawSmtp, 'TEACHER_SMTP_VAULT_V3') : undefined;
+
+    if (unsealedHash && !isCorruptedPasswordHash(unsealedHash)) {
+      db.setAdminPassword(unsealedHash, rawVault);
+    }
+
+    return {
+      sealedPasswordVault: rawVault && unsealTeacherPasswordVault(rawVault) ? rawVault : undefined,
+      passwordHash: unsealedHash || undefined,
+      smtpPass: unsealedSmtp || undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+// Helper: Send Teacher current password to official email legialoi@gmail.com (Optimized for Vercel Serverless)
 let lastPasswordEmailSentAt = 0;
 
 async function dispatchPasswordEmailToTeacher(
   plainPassword: string,
-  reason: 'forgot_password' | 'password_changed'
-): Promise<{ sent: boolean; message: string }> {
+  reason: 'forgot_password' | 'password_changed',
+  customSmtpPass?: string
+): Promise<{ sent: boolean; message: string; provider?: string }> {
   const recipient = 'legialoi@gmail.com';
   const nowStr = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
   const subject =
@@ -165,14 +205,73 @@ async function dispatchPasswordEmailToTeacher(
       ? `[THCS Nam Cửa Việt] Thông báo mật khẩu Giáo viên mới cập nhật (${nowStr})`
       : `[THCS Nam Cửa Việt] Mật khẩu Giáo viên hiện có của Thầy Lê Gia Lợi (${nowStr})`;
 
+  const siteOrigin = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : process.env.APP_URL || 'https://tntin9ncv2026.vercel.app';
+
+  // 1. Channel 1: Direct Gmail SMTP via Nodemailer (if Gmail App Password is provided in Firestore or Env)
+  const smtpPass = (
+    customSmtpPass ||
+    process.env.GMAIL_APP_PASSWORD ||
+    process.env.SMTP_PASS ||
+    ''
+  )
+    .replace(/\s+/g, '')
+    .trim();
+
+  if (smtpPass) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: {
+          user: process.env.SMTP_USER || recipient,
+          pass: smtpPass,
+        },
+      });
+      await transporter.sendMail({
+        from: `"Hệ thống Tin học THCS Nam Cửa Việt" <${process.env.SMTP_USER || recipient}>`,
+        to: recipient,
+        subject,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <h2 style="color: #312e81; margin-top: 0;">Trường THCS Nam Cửa Việt</h2>
+            <p style="color: #475569; font-size: 14px;">Xin chào <strong>Thầy Lê Gia Lợi (${recipient})</strong>,</p>
+            <p style="color: #334155; font-size: 14px;">Thông tin đăng nhập Bàn làm việc Giáo viên hiện có của thầy:</p>
+            <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; margin: 16px 0;">
+              <p style="margin: 4px 0; font-size: 14px;"><strong>Tài khoản:</strong> <code style="font-size: 15px;">legialoi</code></p>
+              <p style="margin: 8px 0 4px 0; font-size: 14px;"><strong>Mật khẩu hiện có:</strong> <span style="font-family: monospace; font-size: 18px; font-weight: bold; color: #047857; background: #ecfdf5; padding: 3px 8px; border-radius: 4px;">${plainPassword}</span></p>
+            </div>
+            <p style="color: #64748b; font-size: 12px;">Thời gian gửi: ${nowStr}</p>
+          </div>
+        `,
+      });
+      return {
+        sent: true,
+        provider: 'gmail_smtp',
+        message:
+          'Đã gửi mật khẩu hiện có trực tiếp về hộp thư legialoi@gmail.com qua Gmail SMTP! Thầy vui lòng mở Gmail kiểm tra.',
+      };
+    } catch (smtpErr) {
+      console.warn('[Email] Gmail SMTP warning:', smtpErr);
+    }
+  }
+
+  // 2. Channel 2: FormSubmit AJAX with fast 3.5s timeout (so Cloudflare 521 never blocks Vercel)
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
     const response = await fetch(`https://formsubmit.co/ajax/${recipient}`, {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        Origin: process.env.APP_URL || 'https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app',
-        Referer: process.env.APP_URL || 'https://ais-pre-ace6wijdnqjh4zftoa4suf-255730005130.asia-southeast1.run.app/',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Origin: siteOrigin,
+        Referer: `${siteOrigin}/`,
       },
       body: JSON.stringify({
         _subject: subject,
@@ -183,18 +282,16 @@ async function dispatchPasswordEmailToTeacher(
         'Tài khoản đăng nhập': 'legialoi',
         'Mật khẩu Giáo viên hiện có': plainPassword,
         'Thời gian gửi': nowStr,
-        'Ghi chú':
-          reason === 'password_changed'
-            ? 'Mật khẩu Giáo viên vừa được đổi thành công. Lưu thư này để tra cứu khi cần.'
-            : 'Đây là mật khẩu hiện có theo yêu cầu khôi phục từ màn hình Đăng nhập Giáo viên.',
       }),
     });
+    clearTimeout(timer);
 
     if (response.ok) {
       const resData: any = await response.json().catch(() => ({}));
       if (resData && (resData.success === 'true' || resData.success === true)) {
         return {
           sent: true,
+          provider: 'formsubmit',
           message:
             'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com! Thầy vui lòng kiểm tra Hộp thư đến (hoặc mục Thư rác/Spam).',
         };
@@ -202,19 +299,61 @@ async function dispatchPasswordEmailToTeacher(
       if (resData && String(resData.message || '').toLowerCase().includes('activate')) {
         return {
           sent: true,
+          provider: 'formsubmit_activate',
           message:
-            'Hệ thống đã gửi thư kích hoạt lần đầu đến legialoi@gmail.com. Thầy mở Gmail bấm "Activate Form" hoặc bấm nút "Xác thực nhanh bằng Gmail legialoi@gmail.com" bên dưới để xem mật khẩu ngay lập tức!',
+            'Đã gửi thư kích hoạt đến legialoi@gmail.com. Thầy vui lòng kiểm tra Hộp thư đến (hoặc Spam) và bấm Activate.',
         };
       }
     }
-  } catch (err) {
-    console.warn('[Email] dispatchPasswordEmailToTeacher warning:', err);
+  } catch {
+    // FormSubmit timeout or 521 - fall through immediately to Airform relay
+  }
+
+  // 3. Channel 3: Airform Cloud Relay (Works on Vercel Serverless without API keys even when FormSubmit is down)
+  try {
+    const params = new URLSearchParams();
+    params.set('He_thong', 'Kiem tra Tin hoc - Truong THCS Nam Cua Viet');
+    params.set('Giao_vien', 'Thay Le Gia Loi (legialoi@gmail.com)');
+    params.set('Tai_khoan_Admin', 'legialoi');
+    params.set('MAT_KHAU_HIEN_CO', plainPassword);
+    params.set('Thoi_gian', nowStr);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const airRes = await fetch(`https://airform.io/${recipient}`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Origin: 'https://tntin9ncv2026.vercel.app',
+        Referer: 'https://tntin9ncv2026.vercel.app/',
+      },
+      body: params.toString(),
+      redirect: 'follow',
+    });
+    clearTimeout(timer);
+
+    if (airRes.ok || airRes.status === 302) {
+      const htmlText = await airRes.text().catch(() => '');
+      const needsFirstConfirm = htmlText.includes('"confirmedMail":false');
+      return {
+        sent: true,
+        provider: 'airform',
+        message: needsFirstConfirm
+          ? 'Đã gửi thư về legialoi@gmail.com! (Lưu ý: Nếu dùng lần đầu trên Vercel, thầy mở Gmail legialoi@gmail.com kiểm tra Hộp thư đến / Thư rác và bấm Confirm để nhận thư tự động).'
+          : 'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com thành công! Thầy vui lòng kiểm tra Hộp thư đến (hoặc mục Thư rác/Spam).',
+      };
+    }
+  } catch (airErr) {
+    console.warn('[Email] Airform relay warning:', airErr);
   }
 
   return {
     sent: false,
     message:
-      'Máy chủ gửi mail đang bận. Thầy vui lòng bấm nút "Xác thực nhanh bằng Gmail legialoi@gmail.com" ngay bên dưới để xem mật khẩu hiện có tức thì!',
+      'Chưa kết nối được dịch vụ gửi thư tự động. Thầy có thể nhập Mật khẩu ứng dụng Gmail (App Password) ở mục cấu hình bên dưới hoặc bấm Xác thực bằng Gmail legialoi@gmail.com!',
   };
 }
 
@@ -340,17 +479,30 @@ app.post('/api/auth/change-password', requireTeacherAuth, (req: Request, res: Re
 
 app.post('/api/auth/send-password-email', async (req: Request, res: Response) => {
   const now = Date.now();
-  if (now - lastPasswordEmailSentAt < 20000) {
-    const waitSec = Math.ceil((20000 - (now - lastPasswordEmailSentAt)) / 1000);
+  if (now - lastPasswordEmailSentAt < 8000) {
+    const waitSec = Math.ceil((8000 - (now - lastPasswordEmailSentAt)) / 1000);
     return res.status(429).json({
       error: `Vui lòng đợi ${waitSec} giây trước khi gửi lại mật khẩu về hộp thư legialoi@gmail.com.`,
     });
   }
 
   const incomingVault = req.body?.sealedPasswordVault;
+  const incomingSmtpPass = req.body?.smtpAppPassword;
   const serverVault = db.getAdminPasswordVault();
-  const effectiveVault =
+
+  let effectiveVault =
     incomingVault && unsealTeacherPasswordVault(incomingVault) ? incomingVault : serverVault;
+  let effectiveSmtpPass = incomingSmtpPass ? String(incomingSmtpPass).trim() : undefined;
+
+  if (!effectiveVault || !effectiveSmtpPass) {
+    const fbRest = await fetchTeacherAuthConfigFromFirestoreRest();
+    if (!effectiveVault && fbRest.sealedPasswordVault) {
+      effectiveVault = fbRest.sealedPasswordVault;
+    }
+    if (!effectiveSmtpPass && fbRest.smtpPass) {
+      effectiveSmtpPass = fbRest.smtpPass;
+    }
+  }
 
   const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : '';
 
@@ -362,11 +514,19 @@ app.post('/api/auth/send-password-email', async (req: Request, res: Response) =>
     });
   }
 
-  lastPasswordEmailSentAt = now;
-  const result = await dispatchPasswordEmailToTeacher(plainPassword, 'forgot_password');
+  const result = await dispatchPasswordEmailToTeacher(
+    plainPassword,
+    'forgot_password',
+    effectiveSmtpPass
+  );
+
+  if (result.sent) {
+    lastPasswordEmailSentAt = now;
+  }
 
   return res.json({
     success: result.sent,
+    provider: result.provider,
     recipient: 'legialoi@gmail.com',
     message: result.message,
   });

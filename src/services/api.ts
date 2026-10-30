@@ -27,6 +27,8 @@ import {
   saveTeacherPasswordToFirestore,
   getTeacherPasswordFromFirestore,
   getTeacherPasswordVaultFromFirestore,
+  saveTeacherSmtpConfigToFirestore,
+  getTeacherSmtpConfigFromFirestore,
   verifyTeacherGoogleEmail,
 } from './firebase';
 import { parseExamLocally } from '../utils/localExamParser';
@@ -715,14 +717,25 @@ export const api = {
     };
   },
 
-  sendTeacherPasswordToEmail: async (): Promise<{
+  sendTeacherPasswordToEmail: async (
+    customSmtpAppPassword?: string
+  ): Promise<{
     success: boolean;
     message: string;
     needsGoogleVerify?: boolean;
   }> => {
-    const cloudVault = await getTeacherPasswordVaultFromFirestore();
+    if (customSmtpAppPassword && customSmtpAppPassword.trim().length >= 8) {
+      await saveTeacherSmtpConfigToFirestore(customSmtpAppPassword.trim());
+    }
+
+    const [cloudVault, cloudSmtpPass] = await Promise.all([
+      getTeacherPasswordVaultFromFirestore(),
+      getTeacherSmtpConfigFromFirestore(),
+    ]);
     const localVault = localStorage.getItem('ncv_admin_password_vault');
     const effectiveVault = cloudVault || localVault || undefined;
+    const effectiveSmtpPass =
+      (customSmtpAppPassword && customSmtpAppPassword.trim()) || cloudSmtpPass || undefined;
 
     try {
       const res = await fetch('/api/auth/send-password-email', {
@@ -730,31 +743,75 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sealedPasswordVault: effectiveVault,
+          smtpAppPassword: effectiveSmtpPass,
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
+      if (res.ok && data?.success) {
         return {
-          success: false,
-          needsGoogleVerify: Boolean(data?.needsGoogleVerify),
+          success: true,
           message:
-            data?.error ||
-            'Không thể gửi thư tự động lúc này. Thầy vui lòng bấm xác thực bằng Gmail legialoi@gmail.com bên dưới.',
+            data?.message ||
+            'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com! Thầy vui lòng kiểm tra Gmail.',
         };
       }
-      return {
-        success: Boolean(data?.success),
-        message:
-          data?.message ||
-          'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com! Thầy vui lòng kiểm tra Gmail.',
-      };
+      if (!res.ok && data?.needsGoogleVerify) {
+        return {
+          success: false,
+          needsGoogleVerify: true,
+          message:
+            data?.error ||
+            'Chưa có bản lưu mật khẩu để gửi tự động. Thầy vui lòng bấm xác thực bằng Gmail legialoi@gmail.com bên dưới.',
+        };
+      }
+      if (res.status === 429) {
+        return {
+          success: false,
+          message: data?.error || 'Vui lòng đợi vài giây trước khi gửi lại.',
+        };
+      }
     } catch {
-      return {
-        success: false,
-        message:
-          'Không kết nối được máy chủ gửi thư. Thầy vui lòng bấm "Xác thực bằng Gmail legialoi@gmail.com" bên dưới để xem mật khẩu ngay!',
-      };
+      // Fall through to client-side dispatch if serverless endpoint unreachable
     }
+
+    // Client-side browser fallback for static/serverless edge cases
+    const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : '';
+    if (plainPassword) {
+      const nowStr = new Date().toLocaleString('vi-VN');
+      try {
+        const clientRes = await fetch('https://formsubmit.co/ajax/legialoi@gmail.com', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            _subject: `[THCS Nam Cửa Việt] Mật khẩu Giáo viên hiện có của Thầy Lê Gia Lợi (${nowStr})`,
+            _template: 'table',
+            _captcha: 'false',
+            'Hệ thống': 'Kiểm tra Trắc nghiệm Tin học - Trường THCS Nam Cửa Việt',
+            'Tài khoản đăng nhập': 'legialoi',
+            'Mật khẩu Giáo viên hiện có': plainPassword,
+            'Thời gian gửi': nowStr,
+          }),
+        });
+        if (clientRes.ok) {
+          return {
+            success: true,
+            message:
+              'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com! Thầy vui lòng kiểm tra Hộp thư đến (hoặc mục Thư rác/Spam).',
+          };
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return {
+      success: false,
+      message:
+        'Chưa kết nối được dịch vụ gửi thư tự động. Thầy có thể nhập Mật khẩu ứng dụng Gmail (16 ký tự) ở mục Tùy chọn cấu hình bên dưới hoặc bấm Xác thực Gmail legialoi@gmail.com!',
+    };
   },
 
   verifyTeacherGoogleAndGetPassword: async (): Promise<{

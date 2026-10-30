@@ -541,5 +541,6 @@
   "deletedClassNames": [],
   "deletedStudentIds": [],
   "adminToken": "legialoi-ncv-session-secret",
-  "adminPassword": "ncv_pw$v3$7a9e3b5c1d8f$51ca636f0897d1e7e7b4caf440c23fbd3b7c16589fa2dd87b758ba51a5785f76"
+  "adminPassword": "ncv_pw$v3$23130be4cd98$4cd9065829be5479b930f6cd88c9c5ef20506a5d844fa48c23e7d53c6a59ba85",
+  "adminPasswordVault": "ncv$v2$30920e8e4eee$bcbf8d0c6c7a963a$42edaad216ed7d115f18a45300"
 }
