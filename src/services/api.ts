@@ -846,7 +846,7 @@ export const api = {
     return {
       success: false,
       message:
-        'Chưa kết nối được dịch vụ gửi thư tự động. Thầy có thể nhập Mật khẩu ứng dụng Gmail (16 ký tự) ở mục Tùy chọn cấu hình bên dưới hoặc bấm Xác thực Gmail legialoi@gmail.com!',
+        'Chưa kết nối được dịch vụ gửi thư tự động. Thầy vui lòng kiểm tra kết nối mạng và bấm gửi lại sau ít giây.',
     };
   },
 
