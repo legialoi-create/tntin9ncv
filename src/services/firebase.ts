@@ -1026,7 +1026,13 @@ export async function getTeacherPasswordVaultFromFirestore(): Promise<string | n
 // 21b. Save/Get optional Gmail App Password (sealed) in Firestore for direct Gmail SMTP on Vercel
 export async function saveTeacherSmtpConfigToFirestore(appPassword: string): Promise<boolean> {
   const clean = String(appPassword || '').replace(/\s+/g, '').trim();
-  if (!clean) return false;
+  // Google App Passwords are strictly 16 alphabetic characters
+  if (!/^[a-zA-Z]{16}$/.test(clean)) {
+    try {
+      localStorage.removeItem('ncv_admin_smtp_vault');
+    } catch (e) {}
+    return false;
+  }
   const sealedSmtp = sealValue(clean, 'TEACHER_SMTP_VAULT_V3', true);
   try {
     localStorage.setItem('ncv_admin_smtp_vault', sealedSmtp);
@@ -1042,8 +1048,7 @@ export async function saveTeacherSmtpConfigToFirestore(appPassword: string): Pro
       { merge: true }
     );
     return true;
-  } catch (err) {
-    console.warn('[Firebase] saveTeacherSmtpConfigToFirestore error:', err);
+  } catch {
     return false;
   }
 }
@@ -1055,22 +1060,33 @@ export async function getTeacherSmtpConfigFromFirestore(): Promise<string | null
       const data = snap.data();
       if (data && data.sealedSmtpPass && typeof data.sealedSmtpPass === 'string') {
         const unsealed = unsealValue(data.sealedSmtpPass, 'TEACHER_SMTP_VAULT_V3');
-        if (unsealed) {
+        if (unsealed && /^[a-zA-Z]{16}$/.test(unsealed)) {
           try {
             localStorage.setItem('ncv_admin_smtp_vault', data.sealedSmtpPass);
           } catch (e) {}
           return unsealed;
+        } else {
+          // Clear invalid non-App-Password from Firestore and localStorage
+          try {
+            localStorage.removeItem('ncv_admin_smtp_vault');
+            await setDoc(
+              doc(firestore, 'classes', 'teacher_admin_auth_config'),
+              { sealedSmtpPass: '' },
+              { merge: true }
+            );
+          } catch (e) {}
         }
       }
     }
-  } catch (err) {
-    console.warn('[Firebase] getTeacherSmtpConfigFromFirestore error:', err);
+  } catch {
+    // ignore
   }
   try {
     const localSmtp = localStorage.getItem('ncv_admin_smtp_vault');
     if (localSmtp) {
       const unsealed = unsealValue(localSmtp, 'TEACHER_SMTP_VAULT_V3');
-      if (unsealed) return unsealed;
+      if (unsealed && /^[a-zA-Z]{16}$/.test(unsealed)) return unsealed;
+      localStorage.removeItem('ncv_admin_smtp_vault');
     }
   } catch (e) {}
   return null;

@@ -33,8 +33,6 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
   const [isForgotMode, setIsForgotMode] = useState(false);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [isVerifyingGoogle, setIsVerifyingGoogle] = useState(false);
-  const [showSmtpConfig, setShowSmtpConfig] = useState(false);
-  const [smtpAppPassword, setSmtpAppPassword] = useState('');
   const [recoveryNotice, setRecoveryNotice] = useState<{
     type: 'success' | 'error' | 'info';
     text: string;
@@ -67,16 +65,11 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
     setRecoveryNotice(null);
     setIsSendingEmail(true);
     try {
-      const res = await api.sendTeacherPasswordToEmail(
-        smtpAppPassword.trim() ? smtpAppPassword.trim() : undefined
-      );
+      const res = await api.sendTeacherPasswordToEmail();
       setRecoveryNotice({
         type: res.success ? 'success' : 'info',
         text: res.message,
       });
-      if (res.success && smtpAppPassword.trim()) {
-        setShowSmtpConfig(false);
-      }
     } catch (err: any) {
       setRecoveryNotice({
         type: 'error',
@@ -263,20 +256,11 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
             </form>
           </>
         ) : (
-          <div className="space-y-3.5">
+          <div className="space-y-4">
             <div className="p-3.5 bg-indigo-50/80 border border-indigo-200 rounded-xl text-xs text-indigo-950 space-y-1">
-              <div className="font-bold flex items-center justify-between text-indigo-800">
-                <span className="flex items-center space-x-1.5">
-                  <Mail className="w-4 h-4 shrink-0" />
-                  <span>Hộp thư nhận mật khẩu mặc định:</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setShowSmtpConfig(!showSmtpConfig)}
-                  className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
-                >
-                  {showSmtpConfig ? 'Ẩn cấu hình SMTP' : 'Cấu hình Gmail SMTP'}
-                </button>
+              <div className="font-bold flex items-center space-x-1.5 text-indigo-800">
+                <Mail className="w-4 h-4 shrink-0" />
+                <span>Hộp thư nhận mật khẩu mặc định:</span>
               </div>
               <div className="font-mono font-bold text-sm text-indigo-700 bg-white px-3 py-1.5 rounded-lg border border-indigo-200 select-all">
                 legialoi@gmail.com
@@ -285,24 +269,6 @@ export const TeacherLogin: React.FC<TeacherLoginProps> = ({ onLoginSuccess, onCa
                 Mật khẩu hiện có chỉ được gửi duy nhất về địa chỉ Gmail chính chủ của Thầy Lê Gia Lợi.
               </p>
             </div>
-
-            {showSmtpConfig && (
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
-                <label className="block text-[11px] font-bold text-slate-700">
-                  Mật khẩu ứng dụng Gmail (16 ký tự - Tùy chọn lưu cố định cho Vercel):
-                </label>
-                <input
-                  type="password"
-                  value={smtpAppPassword}
-                  onChange={(e) => setSmtpAppPassword(e.target.value)}
-                  placeholder="Ví dụ: abcd efgh ijkl mnop"
-                  className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-indigo-500"
-                />
-                <p className="text-[10px] text-slate-500 leading-relaxed">
-                  Nếu thầy nhập Mật khẩu ứng dụng (App Password) của Gmail legialoi@gmail.com, hệ thống sẽ lưu mã hóa trên Cloud Firestore và gửi thư trực tiếp qua máy chủ smtp.gmail.com trên Vercel.
-                </p>
-              </div>
-            )}
 
             {recoveryNotice && (
               <div

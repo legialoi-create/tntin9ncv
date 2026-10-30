@@ -2465,13 +2465,14 @@ async function fetchTeacherAuthConfigFromFirestoreRest() {
     const rawSmtp = fields.sealedSmtpPass?.stringValue;
     const unsealedHash = rawHash ? unsealValue(rawHash, "TEACHER_AUTH_VAULT_V3") : void 0;
     const unsealedSmtp = rawSmtp ? unsealValue(rawSmtp, "TEACHER_SMTP_VAULT_V3") : void 0;
+    const validSmtp = unsealedSmtp && /^[a-zA-Z]{16}$/.test(unsealedSmtp) ? unsealedSmtp : void 0;
     if (unsealedHash && !isCorruptedPasswordHash(unsealedHash)) {
       db.setAdminPassword(unsealedHash, rawVault);
     }
     return {
       sealedPasswordVault: rawVault && unsealTeacherPasswordVault(rawVault) ? rawVault : void 0,
       passwordHash: unsealedHash || void 0,
-      smtpPass: unsealedSmtp || void 0
+      smtpPass: validSmtp
     };
   } catch {
     return {};
@@ -2481,10 +2482,31 @@ var lastPasswordEmailSentAt = 0;
 async function dispatchPasswordEmailToTeacher(plainPassword, reason, customSmtpPass) {
   const recipient = "legialoi@gmail.com";
   const nowStr = (/* @__PURE__ */ new Date()).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-  const subject = reason === "password_changed" ? `[THCS Nam C\u1EEDa Vi\u1EC7t] Th\xF4ng b\xE1o m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn m\u1EDBi c\u1EADp nh\u1EADt (${nowStr})` : `[THCS Nam C\u1EEDa Vi\u1EC7t] M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn hi\u1EC7n c\xF3 c\u1EE7a Th\u1EA7y L\xEA Gia L\u1EE3i (${nowStr})`;
-  const siteOrigin = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.APP_URL || "https://tntin9ncv2026.vercel.app";
+  const subject = reason === "password_changed" ? `[THCS Nam C\u1EEDa Vi\u1EC7t] M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn m\u1EDBi: ${plainPassword} (${nowStr})` : `[THCS Nam C\u1EEDa Vi\u1EC7t] M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn hi\u1EC7n c\xF3: ${plainPassword} (${nowStr})`;
+  const emailHtml = `
+    <div style="font-family: Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 24px; border: 1px solid #cbd5e1; border-radius: 14px; background: #ffffff; color: #0f172a;">
+      <h2 style="color: #312e81; margin-top: 0; margin-bottom: 8px;">Tr\u01B0\u1EDDng THCS Nam C\u1EEDa Vi\u1EC7t</h2>
+      <p style="color: #475569; font-size: 14px; margin-top: 0;">H\u1EC7 th\u1ED1ng Ki\u1EC3m tra Tr\u1EAFc nghi\u1EC7m Tin h\u1ECDc</p>
+      <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 16px 0;" />
+      <p style="font-size: 14px; color: #1e293b;">Xin ch\xE0o <strong>Th\u1EA7y L\xEA Gia L\u1EE3i (${recipient})</strong>,</p>
+      <p style="font-size: 14px; color: #334155;">
+        ${reason === "password_changed" ? "M\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn (Admin) c\u1EE7a th\u1EA7y v\u1EEBa \u0111\u01B0\u1EE3c c\u1EADp nh\u1EADt th\xE0nh c\xF4ng. D\u01B0\u1EDBi \u0111\xE2y l\xE0 m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 \u0111\u1EC3 th\u1EA7y l\u01B0u tr\u1EEF:" : "Theo y\xEAu c\u1EA7u t\u1EA1i m\xE0n h\xECnh Qu\xEAn m\u1EADt kh\u1EA9u, h\u1EC7 th\u1ED1ng g\u1EEDi l\u1EA1i m\u1EADt kh\u1EA9u Gi\xE1o vi\xEAn (Admin) hi\u1EC7n c\xF3 c\u1EE7a th\u1EA7y:"}
+      </p>
+      <div style="background: #f8fafc; border: 2px solid #6366f1; border-radius: 10px; padding: 16px; margin: 18px 0;">
+        <p style="margin: 4px 0; font-size: 14px; color: #334155;">
+          <strong>T\xE0i kho\u1EA3n \u0111\u0103ng nh\u1EADp:</strong>
+          <code style="font-size: 15px; font-weight: bold; color: #1e1b4b; margin-left: 6px;">legialoi</code>
+        </p>
+        <p style="margin: 12px 0 4px 0; font-size: 14px; color: #334155;">
+          <strong>M\u1EADt kh\u1EA9u hi\u1EC7n c\xF3:</strong>
+          <span style="display: inline-block; font-family: monospace; font-size: 20px; font-weight: bold; color: #047857; background: #ecfdf5; border: 1px solid #6ee7b7; padding: 4px 12px; border-radius: 6px; margin-left: 6px; letter-spacing: 1px;">${plainPassword}</span>
+        </p>
+      </div>
+      <p style="color: #64748b; font-size: 12px; margin-bottom: 0;">Th\u1EDDi gian g\u1EEDi: ${nowStr}</p>
+    </div>
+  `;
   const smtpPass = (customSmtpPass || process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS || "").replace(/\s+/g, "").trim();
-  if (smtpPass) {
+  if (/^[a-zA-Z]{16}$/.test(smtpPass)) {
     try {
       const transporter = nodemailer.createTransport({
         host: "smtp.gmail.com",
@@ -2499,29 +2521,49 @@ async function dispatchPasswordEmailToTeacher(plainPassword, reason, customSmtpP
         from: `"H\u1EC7 th\u1ED1ng Tin h\u1ECDc THCS Nam C\u1EEDa Vi\u1EC7t" <${process.env.SMTP_USER || recipient}>`,
         to: recipient,
         subject,
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
-            <h2 style="color: #312e81; margin-top: 0;">Tr\u01B0\u1EDDng THCS Nam C\u1EEDa Vi\u1EC7t</h2>
-            <p style="color: #475569; font-size: 14px;">Xin ch\xE0o <strong>Th\u1EA7y L\xEA Gia L\u1EE3i (${recipient})</strong>,</p>
-            <p style="color: #334155; font-size: 14px;">Th\xF4ng tin \u0111\u0103ng nh\u1EADp B\xE0n l\xE0m vi\u1EC7c Gi\xE1o vi\xEAn hi\u1EC7n c\xF3 c\u1EE7a th\u1EA7y:</p>
-            <div style="background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px; margin: 16px 0;">
-              <p style="margin: 4px 0; font-size: 14px;"><strong>T\xE0i kho\u1EA3n:</strong> <code style="font-size: 15px;">legialoi</code></p>
-              <p style="margin: 8px 0 4px 0; font-size: 14px;"><strong>M\u1EADt kh\u1EA9u hi\u1EC7n c\xF3:</strong> <span style="font-family: monospace; font-size: 18px; font-weight: bold; color: #047857; background: #ecfdf5; padding: 3px 8px; border-radius: 4px;">${plainPassword}</span></p>
-            </div>
-            <p style="color: #64748b; font-size: 12px;">Th\u1EDDi gian g\u1EEDi: ${nowStr}</p>
-          </div>
-        `
+        html: emailHtml
       });
       return {
         sent: true,
         provider: "gmail_smtp",
-        message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 tr\u1EF1c ti\u1EBFp v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com qua Gmail SMTP! Th\u1EA7y vui l\xF2ng m\u1EDF Gmail ki\u1EC3m tra."
+        message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 tr\u1EF1c ti\u1EBFp v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com! Th\u1EA7y vui l\xF2ng m\u1EDF Gmail ki\u1EC3m tra."
       };
-    } catch (smtpErr) {
-      console.warn("[Email] Gmail SMTP warning:", smtpErr);
+    } catch {
     }
   }
   try {
+    const emailB64 = Buffer.from(recipient).toString("base64");
+    const originHost = process.env.VERCEL_URL || "tntin9ncv2026.vercel.app";
+    const originB64 = Buffer.from(originHost).toString("base64");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6e3);
+    const airSubmitRes = await fetch(`https://airform.io/submit/${emailB64}/${originB64}`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Origin: "https://airform.io",
+        Referer: "https://airform.io/confirmation"
+      },
+      body: JSON.stringify({
+        subject,
+        template: emailHtml
+      })
+    });
+    clearTimeout(timer);
+    if (airSubmitRes.ok || airSubmitRes.status === 201) {
+      return {
+        sent: true,
+        provider: "airform_direct",
+        message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com th\xE0nh c\xF4ng! Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c m\u1EE5c Th\u01B0 r\xE1c/Spam)."
+      };
+    }
+  } catch {
+  }
+  try {
+    const siteOrigin = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : process.env.APP_URL || "https://tntin9ncv2026.vercel.app";
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3500);
     const response = await fetch(`https://formsubmit.co/ajax/${recipient}`, {
@@ -2555,49 +2597,8 @@ async function dispatchPasswordEmailToTeacher(plainPassword, reason, customSmtpP
           message: "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com! Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c m\u1EE5c Th\u01B0 r\xE1c/Spam)."
         };
       }
-      if (resData && String(resData.message || "").toLowerCase().includes("activate")) {
-        return {
-          sent: true,
-          provider: "formsubmit_activate",
-          message: "\u0110\xE3 g\u1EEDi th\u01B0 k\xEDch ho\u1EA1t \u0111\u1EBFn legialoi@gmail.com. Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c Spam) v\xE0 b\u1EA5m Activate."
-        };
-      }
     }
   } catch {
-  }
-  try {
-    const params = new URLSearchParams();
-    params.set("He_thong", "Kiem tra Tin hoc - Truong THCS Nam Cua Viet");
-    params.set("Giao_vien", "Thay Le Gia Loi (legialoi@gmail.com)");
-    params.set("Tai_khoan_Admin", "legialoi");
-    params.set("MAT_KHAU_HIEN_CO", plainPassword);
-    params.set("Thoi_gian", nowStr);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5e3);
-    const airRes = await fetch(`https://airform.io/${recipient}`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        Origin: "https://tntin9ncv2026.vercel.app",
-        Referer: "https://tntin9ncv2026.vercel.app/"
-      },
-      body: params.toString(),
-      redirect: "follow"
-    });
-    clearTimeout(timer);
-    if (airRes.ok || airRes.status === 302) {
-      const htmlText = await airRes.text().catch(() => "");
-      const needsFirstConfirm = htmlText.includes('"confirmedMail":false');
-      return {
-        sent: true,
-        provider: "airform",
-        message: needsFirstConfirm ? "\u0110\xE3 g\u1EEDi th\u01B0 v\u1EC1 legialoi@gmail.com! (L\u01B0u \xFD: N\u1EBFu d\xF9ng l\u1EA7n \u0111\u1EA7u tr\xEAn Vercel, th\u1EA7y m\u1EDF Gmail legialoi@gmail.com ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn / Th\u01B0 r\xE1c v\xE0 b\u1EA5m Confirm \u0111\u1EC3 nh\u1EADn th\u01B0 t\u1EF1 \u0111\u1ED9ng)." : "\u0110\xE3 g\u1EEDi m\u1EADt kh\u1EA9u hi\u1EC7n c\xF3 v\u1EC1 h\u1ED9p th\u01B0 legialoi@gmail.com th\xE0nh c\xF4ng! Th\u1EA7y vui l\xF2ng ki\u1EC3m tra H\u1ED9p th\u01B0 \u0111\u1EBFn (ho\u1EB7c m\u1EE5c Th\u01B0 r\xE1c/Spam)."
-      };
-    }
-  } catch (airErr) {
-    console.warn("[Email] Airform relay warning:", airErr);
   }
   return {
     sent: false,

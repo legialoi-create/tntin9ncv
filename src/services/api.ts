@@ -778,6 +778,42 @@ export const api = {
     const plainPassword = effectiveVault ? unsealTeacherPasswordVault(effectiveVault) : '';
     if (plainPassword) {
       const nowStr = new Date().toLocaleString('vi-VN');
+      const subject = `[THCS Nam Cửa Việt] Mật khẩu Giáo viên hiện có: ${plainPassword} (${nowStr})`;
+      const emailHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 20px; border: 1px solid #cbd5e1; border-radius: 12px;">
+          <h2 style="color: #312e81; margin-top: 0;">Trường THCS Nam Cửa Việt</h2>
+          <p>Xin chào <strong>Thầy Lê Gia Lợi (legialoi@gmail.com)</strong>,</p>
+          <p><strong>Tài khoản đăng nhập:</strong> <code>legialoi</code></p>
+          <p><strong>Mật khẩu Giáo viên hiện có:</strong> <b style="font-family: monospace; font-size: 20px; color: #047857; background: #ecfdf5; padding: 4px 10px; border-radius: 6px;">${plainPassword}</b></p>
+          <p style="font-size: 12px; color: #64748b;">Thời gian gửi: ${nowStr}</p>
+        </div>
+      `;
+      try {
+        const emailB64 = btoa('legialoi@gmail.com');
+        const originB64 = btoa(
+          typeof window !== 'undefined' && window.location.hostname
+            ? window.location.hostname
+            : 'tntin9ncv2026.vercel.app'
+        );
+        const airRes = await fetch(`https://airform.io/submit/${emailB64}/${originB64}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subject,
+            template: emailHtml,
+          }),
+        });
+        if (airRes.ok || airRes.status === 201) {
+          return {
+            success: true,
+            message:
+              'Đã gửi mật khẩu hiện có về hộp thư legialoi@gmail.com thành công! Thầy vui lòng kiểm tra Hộp thư đến (hoặc mục Thư rác/Spam).',
+          };
+        }
+      } catch {
+        // ignore
+      }
+
       try {
         const clientRes = await fetch('https://formsubmit.co/ajax/legialoi@gmail.com', {
           method: 'POST',
@@ -786,7 +822,7 @@ export const api = {
             Accept: 'application/json',
           },
           body: JSON.stringify({
-            _subject: `[THCS Nam Cửa Việt] Mật khẩu Giáo viên hiện có của Thầy Lê Gia Lợi (${nowStr})`,
+            _subject: subject,
             _template: 'table',
             _captcha: 'false',
             'Hệ thống': 'Kiểm tra Trắc nghiệm Tin học - Trường THCS Nam Cửa Việt',
