@@ -105,7 +105,20 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const selectBestActiveExam = async (examsList: Exam[]) => {
     if (!examsList || examsList.length === 0) return;
     try {
-      const { bestExamId } = await api.getActiveExamStatsAndBestExam(examsList);
+      const { bestExamId, statsByExamId } = await api.getActiveExamStatsAndBestExam(examsList);
+      const sorted = [...examsList].sort((a, b) => {
+        const openA = a.isOpen !== false ? 1 : 0;
+        const openB = b.isOpen !== false ? 1 : 0;
+        if (openB !== openA) return openB - openA;
+        const inProgA = statsByExamId[a.id]?.inProgressCount || 0;
+        const inProgB = statsByExamId[b.id]?.inProgressCount || 0;
+        if (inProgB !== inProgA) return inProgB - inProgA;
+        const totA = statsByExamId[a.id]?.totalCount || 0;
+        const totB = statsByExamId[b.id]?.totalCount || 0;
+        if (totB !== totA) return totB - totA;
+        return 0;
+      });
+      setExams(sorted);
       if (bestExamId) {
         setSelectedExamId(bestExamId);
         localStorage.setItem('ncv_selected_exam_id', bestExamId);

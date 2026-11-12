@@ -85,12 +85,15 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
     .sort((a, b) => {
       const stA = examStats[a.id];
       const stB = examStats[b.id];
-      const inProgA = stA?.inProgressCount || 0;
-      const inProgB = stB?.inProgressCount || 0;
-      if (inProgB !== inProgA) return inProgB - inProgA;
+      // Priority 1: Currently open exams ("kỳ thi đang thi") at the very top
       const openA = a.isOpen !== false ? 1 : 0;
       const openB = b.isOpen !== false ? 1 : 0;
       if (openB !== openA) return openB - openA;
+      // Priority 2: If multiple exams are open, sort by most students currently taking it (inProgressCount)
+      const inProgA = stA?.inProgressCount || 0;
+      const inProgB = stB?.inProgressCount || 0;
+      if (inProgB !== inProgA) return inProgB - inProgA;
+      // Priority 3: Total participants count
       const totA = stA?.totalCount || 0;
       const totB = stB?.totalCount || 0;
       if (totB !== totA) return totB - totA;

@@ -248,14 +248,34 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
       .catch((err) => console.error('Failed to load classes:', err));
   }, []);
 
-  // Load available exams from backend
+  // Load available exams from backend and prioritize active exams with most students taking them at the top
   useEffect(() => {
     setIsLoadingExams(true);
     api.getExams()
-      .then((data) => {
-        setExams(data);
+      .then(async (data) => {
+        let sortedData = [...data].sort((a, b) => {
+          const openA = a.isOpen !== false ? 1 : 0;
+          const openB = b.isOpen !== false ? 1 : 0;
+          return openB - openA;
+        });
+        try {
+          const { statsByExamId } = await api.getActiveExamStatsAndBestExam(data);
+          sortedData = [...data].sort((a, b) => {
+            const openA = a.isOpen !== false ? 1 : 0;
+            const openB = b.isOpen !== false ? 1 : 0;
+            if (openB !== openA) return openB - openA;
+            const inProgA = statsByExamId[a.id]?.inProgressCount || 0;
+            const inProgB = statsByExamId[b.id]?.inProgressCount || 0;
+            if (inProgB !== inProgA) return inProgB - inProgA;
+            const totA = statsByExamId[a.id]?.totalCount || 0;
+            const totB = statsByExamId[b.id]?.totalCount || 0;
+            return totB - totA;
+          });
+        } catch {}
+
+        setExams(sortedData);
         if (initialExamCode) {
-          const found = data.find(
+          const found = sortedData.find(
             (e) =>
               e.code.toUpperCase() === initialExamCode.toUpperCase() ||
               e.id === initialExamCode
@@ -267,10 +287,10 @@ export const StudentEntry: React.FC<StudentEntryProps> = ({
             setExamCode(initialExamCode);
             setIsManualExamCode(true);
           }
-        } else if (data.length > 0) {
-          const openExam = data.find((e) => e.isOpen) || data[0];
-          setSelectedExamId(openExam.id);
-          setExamCode(openExam.code);
+        } else if (sortedData.length > 0) {
+          const topExam = sortedData.find((e) => e.isOpen !== false) || sortedData[0];
+          setSelectedExamId(topExam.id);
+          setExamCode(topExam.code);
         }
       })
       .catch((err) => {

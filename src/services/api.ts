@@ -1162,7 +1162,14 @@ export const api = {
       }
     });
 
-    const cleanExams = Array.from(examMap.values());
+    const cleanExams = Array.from(examMap.values()).sort((a, b) => {
+      const openA = a.isOpen !== false ? 1 : 0;
+      const openB = b.isOpen !== false ? 1 : 0;
+      if (openB !== openA) return openB - openA;
+      const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+      const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      return timeB - timeA;
+    });
     // Always store sealed questions in localStorage so DevTools inspection never reveals plain answers
     const sealedForStorage = cleanExams.map((e) => sealExamQuestions(e));
     localStorage.setItem('ncv_exams_data', JSON.stringify(sealedForStorage));
@@ -3887,25 +3894,27 @@ export const api = {
       };
     }
 
-    // 5. Sort to pick the active exam with the most students currently taking it
+    // 5. Sort to prioritize open exams ("kỳ thi đang thi") at the top; if multiple are open, pick the one with the most students currently taking it
     const sortedExams = [...exams].sort((a, b) => {
       const stA = statsByExamId[a.id];
       const stB = statsByExamId[b.id];
-      // Priority 1: Exam with more students currently taking it (in_progress)
-      if (stB.inProgressCount !== stA.inProgressCount) {
-        return stB.inProgressCount - stA.inProgressCount;
-      }
-      // Priority 2: Exam that is currently open (isOpen !== false)
+      // Priority 1: Exam that is currently open ("kỳ thi đang thi": isOpen !== false) always comes first
       const openA = a.isOpen !== false ? 1 : 0;
       const openB = b.isOpen !== false ? 1 : 0;
       if (openB !== openA) {
         return openB - openA;
       }
+      // Priority 2: Among open exams (or among closed exams), the one with more students currently taking it (in_progress) comes first
+      if (stB.inProgressCount !== stA.inProgressCount) {
+        return stB.inProgressCount - stA.inProgressCount;
+      }
       // Priority 3: Exam with more total participants
       if (stB.totalCount !== stA.totalCount) {
         return stB.totalCount - stA.totalCount;
       }
-      return 0;
+      const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+      const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      return timeB - timeA;
     });
 
     const bestExamId = sortedExams[0]?.id || exams[0]?.id || '';

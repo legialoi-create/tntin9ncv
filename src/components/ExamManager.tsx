@@ -321,13 +321,20 @@ export const ExamManager: React.FC<ExamManagerProps> = ({
     showFeedback('success', `Đã sao chép toàn bộ đề thi ${exam.code} (dán được ngay vào Word)`);
   };
 
-  const filteredExams = exams.filter((ex) => {
-    const matchSearch =
-      ex.title.toLowerCase().includes(search.toLowerCase()) ||
-      ex.code.toLowerCase().includes(search.toLowerCase());
-    const matchGrade = filterGrade === 'ALL' || ex.grade === filterGrade;
-    return matchSearch && matchGrade;
-  });
+  const filteredExams = exams
+    .filter((ex) => {
+      const matchSearch =
+        ex.title.toLowerCase().includes(search.toLowerCase()) ||
+        ex.code.toLowerCase().includes(search.toLowerCase());
+      const matchGrade = filterGrade === 'ALL' || ex.grade === filterGrade;
+      return matchSearch && matchGrade;
+    })
+    .sort((a, b) => {
+      const openA = a.isOpen !== false ? 1 : 0;
+      const openB = b.isOpen !== false ? 1 : 0;
+      if (openB !== openA) return openB - openA;
+      return 0;
+    });
 
   return (
     <div className="space-y-6">
