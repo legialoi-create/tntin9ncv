@@ -102,23 +102,28 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     }
   };
 
+  const selectBestActiveExam = async (examsList: Exam[]) => {
+    if (!examsList || examsList.length === 0) return;
+    try {
+      const { bestExamId } = await api.getActiveExamStatsAndBestExam(examsList);
+      if (bestExamId) {
+        setSelectedExamId(bestExamId);
+        localStorage.setItem('ncv_selected_exam_id', bestExamId);
+      }
+    } catch {}
+  };
+
   const loadExams = async () => {
     try {
       const data = await api.getExams(true);
       setExams(data);
       if (data.length > 0) {
-        const savedId = localStorage.getItem('ncv_selected_exam_id');
-        if (savedId && data.some((e) => e.id === savedId)) {
-          setSelectedExamId(savedId);
-        } else {
-          const mainExam = data[0];
-          setSelectedExamId(mainExam ? mainExam.id : '');
-          if (mainExam) {
-            localStorage.setItem('ncv_selected_exam_id', mainExam.id);
-          } else {
-            localStorage.removeItem('ncv_selected_exam_id');
-          }
+        const openExam = data.find((e) => e.isOpen !== false) || data[0];
+        if (openExam) {
+          setSelectedExamId(openExam.id);
+          localStorage.setItem('ncv_selected_exam_id', openExam.id);
         }
+        await selectBestActiveExam(data);
       } else {
         setSelectedExamId('');
       }
@@ -274,7 +279,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           </button>
 
           <button
-            onClick={() => setActiveTab('proctor')}
+            onClick={() => {
+              setActiveTab('proctor');
+              selectBestActiveExam(exams);
+            }}
             className={`py-2.5 px-4 border-b-2 flex items-center space-x-2 whitespace-nowrap transition cursor-pointer ${
               activeTab === 'proctor'
                 ? 'border-indigo-400 text-white bg-slate-800/80 rounded-t-lg'
@@ -286,7 +294,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           </button>
 
           <button
-            onClick={() => setActiveTab('reports')}
+            onClick={() => {
+              setActiveTab('reports');
+              selectBestActiveExam(exams);
+            }}
             className={`py-2.5 px-4 border-b-2 flex items-center space-x-2 whitespace-nowrap transition cursor-pointer ${
               activeTab === 'reports'
                 ? 'border-indigo-400 text-white bg-slate-800/80 rounded-t-lg'

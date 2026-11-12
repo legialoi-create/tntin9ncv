@@ -10,6 +10,10 @@ interface ExamSearchDropdownProps {
   size?: 'sm' | 'md';
   align?: 'left' | 'right';
   label?: string;
+  examStats?: Record<
+    string,
+    { inProgressCount: number; submittedCount: number; totalCount: number; isOpen: boolean }
+  >;
 }
 
 export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
@@ -19,7 +23,8 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
   className = '',
   size = 'md',
   align = 'left',
-  label = 'Kỳ thi:'
+  label = 'Kỳ thi:',
+  examStats = {}
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -29,7 +34,10 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
 
   const currentExam =
     exams.find((e) => e.id === currentExamId) ||
+    exams.find((e) => e.isOpen !== false) ||
     exams[0];
+
+  const currentStat = currentExam ? examStats[currentExam.id] : undefined;
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -58,21 +66,36 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
     }
   }, [isOpen]);
 
-  // Filter exams based on search query and grade
-  const filteredExams = exams.filter((exam) => {
-    const q = searchQuery.toLowerCase().trim();
-    const matchSearch =
-      !q ||
-      exam.title.toLowerCase().includes(q) ||
-      exam.code.toLowerCase().includes(q) ||
-      `khối ${exam.grade}`.includes(q) ||
-      `khoi ${exam.grade}`.includes(q) ||
-      (exam.targetClasses && exam.targetClasses.some((c) => c.toLowerCase().includes(q)));
+  // Filter exams based on search query and grade, then sort active exams with most in-progress students first
+  const filteredExams = exams
+    .filter((exam) => {
+      const q = searchQuery.toLowerCase().trim();
+      const matchSearch =
+        !q ||
+        exam.title.toLowerCase().includes(q) ||
+        exam.code.toLowerCase().includes(q) ||
+        `khối ${exam.grade}`.includes(q) ||
+        `khoi ${exam.grade}`.includes(q) ||
+        (exam.targetClasses && exam.targetClasses.some((c) => c.toLowerCase().includes(q)));
 
-    const matchGrade = selectedGrade === 'ALL' || exam.grade === selectedGrade;
+      const matchGrade = selectedGrade === 'ALL' || exam.grade === selectedGrade;
 
-    return matchSearch && matchGrade;
-  });
+      return matchSearch && matchGrade;
+    })
+    .sort((a, b) => {
+      const stA = examStats[a.id];
+      const stB = examStats[b.id];
+      const inProgA = stA?.inProgressCount || 0;
+      const inProgB = stB?.inProgressCount || 0;
+      if (inProgB !== inProgA) return inProgB - inProgA;
+      const openA = a.isOpen !== false ? 1 : 0;
+      const openB = b.isOpen !== false ? 1 : 0;
+      if (openB !== openA) return openB - openA;
+      const totA = stA?.totalCount || 0;
+      const totB = stB?.totalCount || 0;
+      if (totB !== totA) return totB - totA;
+      return 0;
+    });
 
   const getGradeBadgeColor = (grade: number) => {
     switch (grade) {
@@ -103,7 +126,7 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
           type="button"
           onClick={() => setIsOpen(!isOpen)}
           className={`flex items-center justify-between space-x-2 bg-white hover:bg-slate-50 border border-slate-300 hover:border-indigo-400 rounded-xl transition shadow-2xs cursor-pointer text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 ${
-            size === 'sm' ? 'px-2.5 py-1.5 text-xs max-w-[260px] sm:max-w-xs' : 'px-3 py-2 text-xs sm:text-sm max-w-[280px] sm:max-w-md'
+            size === 'sm' ? 'px-2.5 py-1.5 text-xs max-w-[260px] sm:max-w-xs' : 'px-3 py-2 text-xs sm:text-sm max-w-[300px] sm:max-w-lg'
           }`}
           title={currentExam ? `[${currentExam.code}] ${currentExam.title}` : 'Chọn kì thi'}
         >
@@ -124,6 +147,17 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
                   </span>
                   {currentExam.title}
                 </span>
+                {currentStat && currentStat.inProgressCount > 0 ? (
+                  <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 border border-emerald-300 rounded-md text-[10px] font-bold shrink-0 inline-flex items-center space-x-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>Đang thi ({currentStat.inProgressCount} em)</span>
+                  </span>
+                ) : currentExam.isOpen !== false ? (
+                  <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md text-[10px] font-bold shrink-0 inline-flex items-center space-x-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                    <span>Đang mở</span>
+                  </span>
+                ) : null}
               </>
             ) : (
               <span className="text-slate-400 font-medium truncate">-- Chọn kì thi --</span>
@@ -226,6 +260,7 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
             ) : (
               filteredExams.map((exam) => {
                 const isSelected = exam.id === currentExamId;
+                const st = examStats[exam.id];
                 return (
                   <button
                     key={exam.id}
@@ -260,7 +295,7 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
                         </span>
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1 text-[11px] text-slate-500">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 text-[11px] text-slate-500">
                         <span>{exam.questions?.length || 0} câu hỏi</span>
                         <span>•</span>
                         <span>{exam.durationMinutes} phút</span>
@@ -272,10 +307,23 @@ export const ExamSearchDropdown: React.FC<ExamSearchDropdownProps> = ({
                             </span>
                           </>
                         )}
-                        {exam.id === 'exam-1791604725287' && (
-                          <span className="ml-1 px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-md font-bold text-[10px] inline-flex items-center space-x-1">
-                            <span>9 HS đã nộp</span>
-                            <span>⭐</span>
+                        {st && st.inProgressCount > 0 ? (
+                          <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-md font-bold text-[10px] inline-flex items-center space-x-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <span>{st.inProgressCount} em đang làm bài</span>
+                          </span>
+                        ) : exam.isOpen !== false ? (
+                          <span className="px-1.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md font-semibold text-[10px]">
+                            Đang mở thi
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 border border-slate-200 rounded-md font-medium text-[10px]">
+                            Đã đóng
+                          </span>
+                        )}
+                        {st && st.submittedCount > 0 && (
+                          <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-md font-bold text-[10px]">
+                            {st.submittedCount} HS đã nộp
                           </span>
                         )}
                       </div>

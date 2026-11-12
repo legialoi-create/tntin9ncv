@@ -27,35 +27,48 @@ interface LiveProctoringProps {
 
 export const LiveProctoring: React.FC<LiveProctoringProps> = ({ exams, selectedExamId }) => {
   const [currentExamId, setCurrentExamId] = useState<string>(() => {
+    const openExam = exams.find((e) => e.isOpen !== false);
+    if (openExam) return openExam.id;
     if (selectedExamId && exams.some((e) => e.id === selectedExamId)) return selectedExamId;
     const saved = localStorage.getItem('ncv_selected_exam_id');
     if (saved && exams.some((e) => e.id === saved)) return saved;
     const preferred = exams.length > 0 ? exams[0] : null;
     return preferred ? preferred.id : '';
   });
+  const [examStats, setExamStats] = useState<
+    Record<string, { inProgressCount: number; submittedCount: number; totalCount: number; isOpen: boolean }>
+  >({});
+  const [hasUserManuallySelected, setHasUserManuallySelected] = useState(false);
   const [proctorData, setProctorData] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(() => new Date().toLocaleTimeString('vi-VN'));
 
-  // Synchronize currentExamId with selectedExamId and valid exams list
+  // Automatically pick the active exam with the most students currently taking it
   useEffect(() => {
-    if (selectedExamId && exams.some((e) => e.id === selectedExamId)) {
-      setCurrentExamId(selectedExamId);
-      localStorage.setItem('ncv_selected_exam_id', selectedExamId);
-    } else if (exams.length > 0) {
-      const savedId = localStorage.getItem('ncv_selected_exam_id');
-      if (savedId && exams.some((e) => e.id === savedId)) {
-        setCurrentExamId(savedId);
-      } else {
-        const preferred = exams[0];
-        setCurrentExamId(preferred.id);
-        localStorage.setItem('ncv_selected_exam_id', preferred.id);
-      }
-    } else {
+    let cancelled = false;
+    if (exams.length === 0) {
       setCurrentExamId('');
       setProctorData(null);
+      return;
     }
-  }, [selectedExamId, exams]);
+
+    const resolveBestExam = async () => {
+      try {
+        const { bestExamId, statsByExamId } = await api.getActiveExamStatsAndBestExam(exams);
+        if (cancelled) return;
+        setExamStats(statsByExamId);
+        if (!hasUserManuallySelected && bestExamId && exams.some((e) => e.id === bestExamId)) {
+          setCurrentExamId(bestExamId);
+          localStorage.setItem('ncv_selected_exam_id', bestExamId);
+        }
+      } catch {}
+    };
+
+    resolveBestExam();
+    return () => {
+      cancelled = true;
+    };
+  }, [exams, selectedExamId]);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -74,7 +87,13 @@ export const LiveProctoring: React.FC<LiveProctoringProps> = ({ exams, selectedE
     }
     if (showLoading) setIsLoading(true);
     try {
-      const data = await api.getProctorData(currentExamId);
+      const [data, activeRes] = await Promise.all([
+        api.getProctorData(currentExamId),
+        api.getActiveExamStatsAndBestExam(exams)
+      ]);
+      if (activeRes?.statsByExamId) {
+        setExamStats(activeRes.statsByExamId);
+      }
       if (data) {
         setProctorData(data);
         setLastUpdated(new Date().toLocaleTimeString('vi-VN'));
@@ -194,9 +213,14 @@ export const LiveProctoring: React.FC<LiveProctoringProps> = ({ exams, selectedE
           <ExamSearchDropdown
             exams={exams}
             currentExamId={currentExamId}
-            onSelectExam={(id) => setCurrentExamId(id)}
+            onSelectExam={(id) => {
+              setHasUserManuallySelected(true);
+              setCurrentExamId(id);
+              localStorage.setItem('ncv_selected_exam_id', id);
+            }}
             size="md"
             label="Kỳ thi:"
+            examStats={examStats}
           />
 
           {/* Manual mode indicator badge */}

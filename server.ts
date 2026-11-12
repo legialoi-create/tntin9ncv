@@ -2976,12 +2976,14 @@ app.get('/api/reports/:examId/export', requireTeacherAuth, (req: Request, res: R
           ? new Date(bestSession.submittedAt).toLocaleString('vi-VN')
           : '';
 
+        const roundedMaxSc = Number.isFinite(Number(maxSc)) ? Number(Number(maxSc).toFixed(1)) : 0;
+
         rowsData.push([
           idx + 1,
           st.sbd || bestSession.sbd || '',
           st.name,
           st.class || clsName,
-          maxSc,
+          roundedMaxSc,
           userSessions.length,
           bestSession.correctCount ?? 0,
           bestSession.incorrectCount ?? 0,
@@ -3029,12 +3031,13 @@ app.get('/api/reports/:examId/export', requireTeacherAuth, (req: Request, res: R
           const v = Math.max(s.violationCount || 0, Array.isArray(s.violations) ? s.violations.length : 0);
           return acc + v;
         }, 0);
+        const roundedExtraSc = Number.isFinite(Number(maxSc)) ? Number(Number(maxSc).toFixed(1)) : 0;
         rowsData.push([
           rowsData.length + 1,
           bestSession.sbd || '',
           bestSession.studentName,
           bestSession.studentClass || clsName,
-          maxSc,
+          roundedExtraSc,
           userSessions.length,
           bestSession.correctCount ?? 0,
           bestSession.incorrectCount ?? 0,

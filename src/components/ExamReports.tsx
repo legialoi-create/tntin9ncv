@@ -37,12 +37,18 @@ interface ExamReportsProps {
 
 export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId }) => {
   const [currentExamId, setCurrentExamId] = useState<string>(() => {
+    const openExam = exams.find((e) => e.isOpen !== false);
+    if (openExam) return openExam.id;
     if (selectedExamId && exams.some((e) => e.id === selectedExamId)) return selectedExamId;
     const saved = localStorage.getItem('ncv_selected_exam_id');
     if (saved && exams.some((e) => e.id === saved)) return saved;
     const preferred = exams.length > 0 ? exams[0] : null;
     return preferred ? preferred.id : '';
   });
+  const [examStats, setExamStats] = useState<
+    Record<string, { inProgressCount: number; submittedCount: number; totalCount: number; isOpen: boolean }>
+  >({});
+  const [hasUserManuallySelected, setHasUserManuallySelected] = useState(false);
   const [reportData, setReportData] = useState<any | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [filterClass, setFilterClass] = useState('ALL');
@@ -66,25 +72,32 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
   const [isCopiedAbsentList, setIsCopiedAbsentList] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(() => new Date().toLocaleTimeString('vi-VN'));
 
-  // Synchronize currentExamId with selectedExamId and valid exams list
+  // Automatically pick the active exam with the most students currently taking it
   useEffect(() => {
-    if (selectedExamId && exams.some((e) => e.id === selectedExamId)) {
-      setCurrentExamId(selectedExamId);
-      localStorage.setItem('ncv_selected_exam_id', selectedExamId);
-    } else if (exams.length > 0) {
-      const savedId = localStorage.getItem('ncv_selected_exam_id');
-      if (savedId && exams.some((e) => e.id === savedId)) {
-        setCurrentExamId(savedId);
-      } else {
-        const preferred = exams[0];
-        setCurrentExamId(preferred.id);
-        localStorage.setItem('ncv_selected_exam_id', preferred.id);
-      }
-    } else {
+    let cancelled = false;
+    if (exams.length === 0) {
       setCurrentExamId('');
       setReportData(null);
+      return;
     }
-  }, [selectedExamId, exams]);
+
+    const resolveBestExam = async () => {
+      try {
+        const { bestExamId, statsByExamId } = await api.getActiveExamStatsAndBestExam(exams);
+        if (cancelled) return;
+        setExamStats(statsByExamId);
+        if (!hasUserManuallySelected && bestExamId && exams.some((e) => e.id === bestExamId)) {
+          setCurrentExamId(bestExamId);
+          localStorage.setItem('ncv_selected_exam_id', bestExamId);
+        }
+      } catch {}
+    };
+
+    resolveBestExam();
+    return () => {
+      cancelled = true;
+    };
+  }, [exams, selectedExamId]);
 
   const fetchReports = async (showLoading = false) => {
     if (!currentExamId) {
@@ -92,7 +105,13 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
     }
     if (showLoading) setIsLoading(true);
     try {
-      const data = await api.getExamReports(currentExamId);
+      const [data, activeRes] = await Promise.all([
+        api.getExamReports(currentExamId),
+        api.getActiveExamStatsAndBestExam(exams)
+      ]);
+      if (activeRes?.statsByExamId) {
+        setExamStats(activeRes.statsByExamId);
+      }
       if (data) {
         setReportData(data);
         setLastUpdated(new Date().toLocaleTimeString('vi-VN'));
@@ -235,7 +254,7 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
       window.URL.revokeObjectURL(url);
       showReportNotice(
         'success',
-        'Đã xuất tệp Excel (.xlsx) nhiều tab (mỗi lớp 1 tab riêng, đủ danh sách học sinh theo thứ tự lớp, để trống ô điểm HS chưa thi)'
+        'Đã xuất tệp Excel (.xlsx) nhiều tab (điểm làm tròn 1 chữ số thập phân, đủ danh sách học sinh theo thứ tự lớp, để trống ô điểm HS chưa thi)'
       );
     } catch (err: any) {
       showReportNotice('error', 'Lỗi xuất tệp Excel: ' + (err.message || 'Vui lòng kiểm tra lại'));
@@ -388,11 +407,14 @@ export const ExamReports: React.FC<ExamReportsProps> = ({ exams, selectedExamId 
             exams={exams}
             currentExamId={currentExamId}
             onSelectExam={(id) => {
+              setHasUserManuallySelected(true);
               setCurrentExamId(id);
+              localStorage.setItem('ncv_selected_exam_id', id);
               setFilterClass('ALL');
             }}
             size="md"
             label="Kỳ thi:"
+            examStats={examStats}
           />
 
           {/* Nút Danh sách học sinh chưa làm (vắng thi) */}

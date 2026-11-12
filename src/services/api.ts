@@ -3721,6 +3721,197 @@ export const api = {
     return result;
   },
 
+  // Determine active exams and find the exam with the most students currently taking it
+  getActiveExamStatsAndBestExam: async (
+    examsList?: Exam[]
+  ): Promise<{
+    bestExamId: string;
+    statsByExamId: Record<
+      string,
+      { inProgressCount: number; submittedCount: number; totalCount: number; isOpen: boolean }
+    >;
+  }> => {
+    let exams: Exam[] = Array.isArray(examsList) ? examsList : [];
+    if (exams.length === 0) {
+      try {
+        const cached = localStorage.getItem('ncv_exams_data');
+        if (cached) exams = JSON.parse(cached);
+      } catch {}
+    }
+    if (!Array.isArray(exams) || exams.length === 0) {
+      return { bestExamId: '', statsByExamId: {} };
+    }
+
+    const statsByExamId: Record<
+      string,
+      { inProgressCount: number; submittedCount: number; totalCount: number; isOpen: boolean }
+    > = {};
+    const aliasToExamId = new Map<string, string>();
+
+    const normKey = (val?: string) =>
+      String(val || '')
+        .trim()
+        .toUpperCase();
+    const normAlpha = (val?: string) =>
+      String(val || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
+
+    for (const ex of exams) {
+      statsByExamId[ex.id] = {
+        inProgressCount: 0,
+        submittedCount: 0,
+        totalCount: 0,
+        isOpen: ex.isOpen !== false,
+      };
+      if (ex.id) {
+        aliasToExamId.set(normKey(ex.id), ex.id);
+        const na = normAlpha(ex.id);
+        if (na) aliasToExamId.set(na, ex.id);
+      }
+      if (ex.code) {
+        aliasToExamId.set(normKey(ex.code), ex.id);
+        const nc = normAlpha(ex.code);
+        if (nc) aliasToExamId.set(nc, ex.id);
+      }
+    }
+
+    const resolveTargetExamId = (rawId?: string, rawCode?: string): string | undefined => {
+      const k1 = normKey(rawId);
+      if (k1 && aliasToExamId.has(k1)) return aliasToExamId.get(k1);
+      const k2 = normKey(rawCode);
+      if (k2 && aliasToExamId.has(k2)) return aliasToExamId.get(k2);
+      const a1 = normAlpha(rawId);
+      if (a1 && aliasToExamId.has(a1)) return aliasToExamId.get(a1);
+      const a2 = normAlpha(rawCode);
+      if (a2 && aliasToExamId.has(a2)) return aliasToExamId.get(a2);
+      return undefined;
+    };
+
+    // Track per-exam student status: Map<examId, Map<studentKey, 'in_progress' | 'submitted'>>
+    const perExamStudents = new Map<string, Map<string, 'in_progress' | 'submitted'>>();
+    for (const ex of exams) {
+      perExamStudents.set(ex.id, new Map());
+    }
+
+    const recordStudentSession = (s: any, forcedExamId?: string) => {
+      if (!s) return;
+      const exId = forcedExamId || resolveTargetExamId(s.examId, s.examCode);
+      if (!exId || !perExamStudents.has(exId)) return;
+
+      const studentMap = perExamStudents.get(exId)!;
+      const nameStr = String(s.studentName || s.name || '').trim().toLowerCase();
+      const clsStr = String(s.studentClass || s.class || '').trim().toLowerCase();
+      const studentKey =
+        nameStr && clsStr
+          ? `${nameStr}:::${clsStr}`
+          : String(s.sessionId || Math.random()).trim();
+
+      const isInProgress = s.status === 'in_progress';
+      const prevStatus = studentMap.get(studentKey);
+      if (isInProgress) {
+        studentMap.set(studentKey, 'in_progress');
+      } else if (!prevStatus) {
+        studentMap.set(studentKey, 'submitted');
+      }
+    };
+
+    // 1. Local active sessions & cached submissions
+    try {
+      const activeRaw = localStorage.getItem('ncv_active_sessions');
+      if (activeRaw) {
+        const arr = JSON.parse(activeRaw);
+        if (Array.isArray(arr)) arr.forEach((s) => recordStudentSession(s));
+      }
+      const globalRaw = localStorage.getItem('ncv_submissions_global_all');
+      if (globalRaw) {
+        const arr = JSON.parse(globalRaw);
+        if (Array.isArray(arr)) arr.forEach((s) => recordStudentSession(s));
+      }
+      for (const ex of exams) {
+        for (const key of [ex.id, ex.code].filter(Boolean)) {
+          const byKey = localStorage.getItem(`ncv_submissions_${key}`);
+          if (byKey) {
+            try {
+              const arr = JSON.parse(byKey);
+              if (Array.isArray(arr)) arr.forEach((s) => recordStudentSession(s, ex.id));
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+
+    // 2. Cloud Firestore submissions (single collection read)
+    try {
+      const fbSubs = await getSubmissionsFromFirestore();
+      if (Array.isArray(fbSubs)) {
+        fbSubs.forEach((s) => recordStudentSession(s));
+      }
+    } catch {}
+
+    // 3. Server live proctoring sessions for open exams
+    try {
+      const openExams = exams.filter((e) => e.isOpen !== false);
+      await Promise.allSettled(
+        openExams.map(async (ex) => {
+          const res = await fetch(`/api/proctor/${encodeURIComponent(ex.id)}`, {
+            headers: getHeaders(true),
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => null);
+            if (Array.isArray(data?.students)) {
+              data.students.forEach((st: any) => recordStudentSession(st, ex.id));
+            }
+          }
+        })
+      );
+    } catch {}
+
+    // 4. Compute final counts per exam
+    for (const ex of exams) {
+      const studentMap = perExamStudents.get(ex.id);
+      let inProgressCount = 0;
+      let submittedCount = 0;
+      if (studentMap) {
+        studentMap.forEach((stStatus) => {
+          if (stStatus === 'in_progress') inProgressCount++;
+          else submittedCount++;
+        });
+      }
+      statsByExamId[ex.id] = {
+        inProgressCount,
+        submittedCount,
+        totalCount: inProgressCount + submittedCount,
+        isOpen: ex.isOpen !== false,
+      };
+    }
+
+    // 5. Sort to pick the active exam with the most students currently taking it
+    const sortedExams = [...exams].sort((a, b) => {
+      const stA = statsByExamId[a.id];
+      const stB = statsByExamId[b.id];
+      // Priority 1: Exam with more students currently taking it (in_progress)
+      if (stB.inProgressCount !== stA.inProgressCount) {
+        return stB.inProgressCount - stA.inProgressCount;
+      }
+      // Priority 2: Exam that is currently open (isOpen !== false)
+      const openA = a.isOpen !== false ? 1 : 0;
+      const openB = b.isOpen !== false ? 1 : 0;
+      if (openB !== openA) {
+        return openB - openA;
+      }
+      // Priority 3: Exam with more total participants
+      if (stB.totalCount !== stA.totalCount) {
+        return stB.totalCount - stA.totalCount;
+      }
+      return 0;
+    });
+
+    const bestExamId = sortedExams[0]?.id || exams[0]?.id || '';
+    return { bestExamId, statsByExamId };
+  },
+
   // Live Proctoring (Mục 2)
   getProctorData: async (examId?: string) => {
     if (!examId || examId === 'undefined' || examId.trim() === '') {
@@ -4442,12 +4633,14 @@ export const api = {
           s.score !== '';
 
         if (hasParticipated) {
+          const rawScore = Number(s.score ?? s.bestScore ?? 0);
+          const roundedScore = Number.isFinite(rawScore) ? Number(rawScore.toFixed(1)) : 0;
           sheetData.push([
             idx + 1,
             s.sbd || '',
             s.name || s.studentName || '',
             s.class || s.studentClass || clsLabel,
-            Number(s.score ?? s.bestScore ?? 0),
+            roundedScore,
             s.attemptCount || s.attemptNumber || 1,
             s.correctCount ?? 0,
             s.incorrectCount ?? 0,
